@@ -91,7 +91,9 @@ itself.**
 - `run-relay.sh` remains a valid way to run the app, but it will now say so:
   a shell-launched build reports *Given to another app* and offers to reopen
   itself properly instead of sending the user to a privacy pane where Relay may
-  already be switched on.
+  already be switched on. *(`run-relay.sh` was deleted on 2026-08-25 — see the
+  second amendment below. The behaviour it describes still applies to any
+  shell-launched build, including `flutter run`.)*
 
 **Amended 2026-08-25.** The `refused` state no longer carries a *Quit and reopen
 Relay* button. It is the only blocking state whose remedy is the privacy pane,
@@ -120,3 +122,17 @@ never responds.
 disproportionate: on macOS this is one blocking permission and on Windows it is
 none, and it would add a second screen family and navigation model to an
 application that is one panel plus one state machine (§19).
+
+---
+
+**Amended 2026-08-25 — `run-relay.sh` deleted.** The Consequences section above
+called it "a valid way to run the app". It was, in the narrow sense that the
+application now detects and reports a shell-attributed launch instead of showing
+a misleading privacy pane. But its only purpose was to `exec` the bundle binary
+directly and pipe it through `tee`, which is precisely the launch that costs the
+grant — so the script existed to do the one thing this ADR exists to warn about,
+and its output was already available through `FileLogSink`.
+
+`open build/macos/Build/Products/Debug/relay.app` is the supported way to run a
+local build. The detection behaviour this ADR describes is unchanged and still
+applies to `flutter run` and to any direct exec of the bundle binary.

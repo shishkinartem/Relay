@@ -28,9 +28,10 @@ shell is judged as that shell — which holds no screen-recording grant — and 
 enumerates zero sources. `open -a relay` resolves the name through LaunchServices and may
 pick a build-tree copy instead of the installed one.
 
-This applies to `./run-relay.sh` and to `flutter run`: both are attributed to the calling
-terminal. `docs/adr/2026-08-24-screen-recording-permission-applies-on-relaunch.md` records
-how the app detects and reports this.
+This applies to `flutter run` and to anything that `exec`s the binary from a shell: both
+are attributed to the calling terminal. A `run-relay.sh` that did exactly that was deleted
+for this reason. `docs/adr/2026-08-24-screen-recording-permission-applies-on-relaunch.md`
+records how the app detects and reports the situation.
 
 A granted answer also only takes effect at the **next** start. Grant, then relaunch.
 

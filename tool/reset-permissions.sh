@@ -16,8 +16,8 @@
 #   codesign -d -r- build/macos/Build/Products/Debug/relay.app
 #
 # A denial on an identity-signed build is almost always the launch method, not
-# the signature: a binary exec'd from a shell (run-relay.sh, `flutter run`) is
-# attributed to the shell. Diagnose first —
+# the signature: a binary exec'd from a shell (`flutter run`, or any direct
+# exec of the bundle binary) is attributed to the shell. Diagnose first —
 # docs/development/macos-tcc-and-launchservices.md.
 #
 set -euo pipefail
