@@ -93,6 +93,20 @@ itself.**
   itself properly instead of sending the user to a privacy pane where Relay may
   already be switched on.
 
+**Amended 2026-08-25.** The `refused` state no longer carries a *Quit and reopen
+Relay* button. It is the only blocking state whose remedy is the privacy pane,
+and switching Relay on there raises macOS's own **Quit & Reopen** — verified on
+macOS 26.5.2, where those strings live in `SecurityPrivacyExtension.appex` and
+nowhere in the TCC alert. Offering the same thing again is the application
+asking the user to do what the system has already asked them. §23's rule that
+*the app offers the relaunch itself* is unchanged and still satisfied by the two
+states the system does not cover: `pendingRelaunch`, raised by Relay's own
+prompt, which offers no relaunch of its own; and `notLaunchedByApp`, which the
+pane cannot repair at all. The removal is not a dead end — a user who chose
+*Later* re-asks with *Ask the system anyway* and lands on `pendingRelaunch`,
+which does offer the relaunch. That path is pinned by a test, because it is what
+the decision rests on.
+
 ## Alternatives considered
 
 **Keep mapping everything onto `denied`.** Cheapest, and the source of the

@@ -4,9 +4,14 @@
 **Scope:** diagnosing screen-recording, microphone and camera permission on macOS during development
 **Review when:** the signing identity changes, or `tool/install.sh` / `tool/reset-permissions.sh` change
 
-Everything here was learned by hand and lived only in `tool/install.sh` comments and its
-closing `printf` block. It is collected here because an agent debugging a permission
-failure reads `docs/`, not a 380-line shell script.
+Collected here because an agent debugging a permission failure reads `docs/`, not a
+380-line shell script.
+
+Provenance matters for this file. Most of it originated as commentary in
+`tool/install.sh` — **a script that has never been run on this machine**, so its claims
+carry no field experience. Every statement below was therefore re-verified directly
+against macOS 26.5 on 2026-08-25, and two of the original four claims did not survive;
+they are marked. Do not add anything here that you have not run.
 
 ---
 
@@ -71,26 +76,32 @@ signature. Diagnose with the log query below before resetting anything.
   --info --debug | grep AUTHREQ_ATTRIBUTION | grep com.relay.relay
 ```
 
-Three traps, each of which makes a working system look broken:
+**Grep the attribution line, not the result line.** `tccd` splits one request across
+three record types. Measured over six hours on this host: `AUTHREQ_CTX` 5501,
+`AUTHREQ_ATTRIBUTION` 5499, `AUTHREQ_RESULT` 5499. `CTX` carries the service, `RESULT`
+the `authValue`, and only `ATTRIBUTION` names the client — so grepping the result lines
+for `relay` matches nothing and reads, wrongly, as *no records exist*.
 
-1. **Use the absolute `/usr/bin/log`.** Some shells carry a `log` function or alias that
-   shadows it, answers *"too many arguments"*, and returns nothing — which reads as
-   *no TCC records exist*.
-2. **Grep the attribution line, not the result line.** `tccd` splits one request across
-   three lines joined by `msgID`: `AUTHREQ_CTX` carries the service, `AUTHREQ_ATTRIBUTION`
-   the client and the responsible process, `AUTHREQ_RESULT` the `authValue`. Only the
-   attribution line names the app, so grepping results for `relay` matches nothing.
-3. **Read the `responsible=` field.** A line with no `responsible=` is the app answering
-   for itself, which is what a grant needs. A line naming another process is the launch
-   method being wrong.
+**Read the `responsible=` field.** It is present on a minority of attribution lines — 187
+of 5516 here — and its absence is the normal case: no `responsible=` means the app is
+answering for itself, which is what a grant needs. A line naming another process is the
+launch method being wrong. Attribution lines otherwise always carry `pid=`,
+`identifier=`, `binary_path=`, `euid=` and `auid=`.
+
+Using the absolute `/usr/bin/log` costs nothing and avoids any shell that defines its own
+`log`. (The original note claimed this repository's shell does; it does not — `log`
+resolves to `/usr/bin/log` here.)
 
 ---
 
 ## LaunchServices
 
-- `lsregister` is private and undocumented, and its flags change. `-kill` was removed in
-  macOS 26. **`-domain` never existed at all** — it is a silent no-op that exits `0` and
-  therefore reads as success. Only `-f`, `-u` and `-dump` are used by `tool/install.sh`.
+- `lsregister` is private and undocumented, and its flags change. **Verified** against
+  `lsregister -h` on macOS 26.5: the documented options are `-delete -seed -lint -lazy
+  -r -R -f -u -v -gc -dump -h`. There is **no `-domain` flag** — "domain" exists only as
+  an argument to `-apps`, `-libs` and `-all` (`system`, `local`, `network`, `user`), so
+  `-domain something` is not an option and must not be relied on. `-kill` is likewise
+  absent. Only `-f`, `-u` and `-dump` are used by `tool/install.sh`.
 - A copy in `/Applications` outranks any build-tree copy regardless of version. Leftover
   registrations are hygiene; a record whose bundle is gone is residue, and only
   `lsregister -u <path>` clears it.
@@ -102,9 +113,14 @@ Three traps, each of which makes a working system look broken:
 
 ## Detecting a running copy
 
-Never `pgrep -f relay`. This repository lives in a directory called `Relay`, so the pattern
-matches the searching shell itself. `tool/install.sh` uses `pgrep -x relay` and then
-`ps -o comm=` to confirm the executable path ends in `/relay.app/Contents/MacOS/relay`.
+Use `pgrep -x relay`, then `ps -o comm=` to confirm the executable path ends in
+`/relay.app/Contents/MacOS/relay`.
+
+`pgrep -f` matches whole command lines, and **measured here** `pgrep -fl Relay` returns
+`/usr/libexec/SidecarRelay` and every shell whose command line contains this repository's
+path — neither of which is the app. (`pgrep -f relay`, lower-case, matches nothing at
+all: the directory is `Relay` and the match is case-sensitive. `tool/install.sh` gives
+that as its reason, and the reason is wrong even though `-x` is still the right choice.)
 
 ---
 

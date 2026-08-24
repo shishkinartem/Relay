@@ -318,26 +318,16 @@ class _BlockingActions extends StatelessWidget {
           onPressed: () =>
               vm.openPermissionSettings(PermissionKind.screenRecording),
         ),
-        // The pane offers the relaunch itself — this is the one blocking state
-        // where the operating system does that, because switching Relay on in
-        // Privacy & Security raises its own "Quit & Reopen". Saying so is what
-        // stops the button below reading as the expected next step; it is only
-        // here for the user who chose "Later", who is otherwise left on this
-        // screen with a permission that is granted and a process that cannot
-        // see it.
+        // No relaunch button here, deliberately. This is the one blocking state
+        // whose remedy lives in System Settings, and switching Relay on there
+        // raises the operating system's own "Quit & Reopen" — so offering the
+        // same thing again is the app asking to do what the user has already
+        // been asked. The state is not a dead end without it: choosing "Later"
+        // in that prompt leaves the permission granted and this process unable
+        // to see it, and "Ask the system anyway" below moves to
+        // `pendingRelaunch`, which is the state that does offer the relaunch.
         _note('macOS offers to quit and reopen Relay when you switch it on.'),
-        if (vm.capabilities.screenRecordingNeedsRelaunch) ...<Widget>[
-          const SizedBox(height: 8),
-          AppButton(
-            label: 'Quit and reopen Relay',
-            variant: AppButtonVariant.ghost,
-            fontSize: 12,
-            expand: true,
-            busy: vm.isBusy,
-            onPressed: vm.relaunchApplication,
-          ),
-        ],
-        const SizedBox(height: 4),
+        const SizedBox(height: 8),
         AppButton(
           label: 'Ask the system anyway',
           variant: AppButtonVariant.ghost,

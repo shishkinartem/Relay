@@ -2,7 +2,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import 'package:relay/core/settings/app_settings.dart';
-import 'package:relay/design_system/design_system.dart';
 import 'package:relay/features/recorder/domain/session_state.dart';
 import 'package:relay/features/recorder/presentation/preflight_screen.dart';
 
@@ -121,52 +120,84 @@ void main() {
     expect(harness.permissions.calls, contains('relaunchApplication'));
   });
 
-  testWidgets('a refused permission offers the pane, a relaunch and a re-ask', (
+  testWidgets(
+    'a refused permission offers the pane and a re-ask, not a relaunch',
+    (WidgetTester tester) async {
+      harness = await blockedBy(PermissionStatus.denied);
+      await showBlocking(tester);
+
+      expect(find.text('Open System Settings'), findsOneWidget);
+      expect(
+        find.text(
+          'macOS offers to quit and reopen Relay when you switch it on.',
+        ),
+        findsOneWidget,
+        reason:
+            'this is the one blocking state where the privacy pane raises its '
+            'own Quit & Reopen, and a screen that repeats the offer without '
+            'saying so reads as if the app needed asking twice',
+      );
+      expect(
+        find.text('Quit and reopen Relay'),
+        findsNothing,
+        reason:
+            'the privacy pane raises its own Quit & Reopen when Relay is switched '
+            'on, so repeating the offer here asks the user to do what the system '
+            'has already asked them',
+      );
+      expect(
+        find.text('Ask the system anyway'),
+        findsOneWidget,
+        reason:
+            'the stored flag can say "asked" when the system has no answer, and '
+            'that user needs a way back to the prompt',
+      );
+      expect(
+        find.text('Check again'),
+        findsNothing,
+        reason:
+            're-reading in this process cannot show an answer the platform only '
+            'applies to a fresh one',
+      );
+
+      await tester.tap(find.text('Open System Settings'));
+      await tester.pumpAndSettle();
+      expect(
+        harness.permissions.calls,
+        contains('openSystemSettings(screenRecording)'),
+      );
+    },
+  );
+
+  testWidgets('the refused state still reaches a relaunch through the prompt', (
     WidgetTester tester,
   ) async {
+    // Dropping the relaunch button from `refused` is only safe because of this
+    // path. A user who chose "Later" in the system's own Quit & Reopen comes
+    // back to a permission that is granted and a process that cannot see it;
+    // asking again makes the platform answer `pendingRelaunch`, which is the
+    // state that does offer the relaunch. Without this the removal would be a
+    // dead end, so it is the test that guards the decision.
     harness = await blockedBy(PermissionStatus.denied);
     await showBlocking(tester);
 
-    expect(find.text('Open System Settings'), findsOneWidget);
-    expect(
-      find.text('macOS offers to quit and reopen Relay when you switch it on.'),
-      findsOneWidget,
-      reason:
-          'this is the one blocking state where the privacy pane raises its '
-          'own Quit & Reopen, and a screen that repeats the offer without '
-          'saying so reads as if the app needed asking twice',
-    );
-    expect(
-      tester
-          .widget<AppButton>(
-            find.widgetWithText(AppButton, 'Quit and reopen Relay'),
-          )
-          .variant,
-      AppButtonVariant.ghost,
-      reason:
-          'the pane performs the relaunch, so this is the fallback for a user '
-          'who chose Later — it must not compete with Open System Settings',
-    );
-    expect(
-      find.text('Ask the system anyway'),
-      findsOneWidget,
-      reason:
-          'the stored flag can say "asked" when the system has no answer, and '
-          'that user needs a way back to the prompt',
-    );
-    expect(
-      find.text('Check again'),
-      findsNothing,
-      reason:
-          're-reading in this process cannot show an answer the platform only '
-          'applies to a fresh one',
-    );
-
-    await tester.tap(find.text('Open System Settings'));
+    harness.permissions.statuses[PermissionKind.screenRecording] =
+        PermissionStatus.pendingRelaunch;
+    await tester.tap(find.text('Ask the system anyway'));
     await tester.pumpAndSettle();
+
+    await tester.pumpWidget(
+      harness.wrap(
+        PreflightScreen(state: harness.viewModel.state as SessionPreflight),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Restart to apply'), findsOneWidget);
     expect(
-      harness.permissions.calls,
-      contains('openSystemSettings(screenRecording)'),
+      find.text('Quit and reopen Relay'),
+      findsOneWidget,
+      reason: 'the remedy has to remain reachable, one step further along',
     );
   });
 

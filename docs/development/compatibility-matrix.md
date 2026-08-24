@@ -97,6 +97,16 @@ Reason: same.
 
 NOT RUN: §24 soak tests (60 min 1080p30, 60 min 1080p60, disk-full, network loss)
 Reason: each run exceeds an interactive session; they are release gates, not per-change gates.
+
+NOT RUN: tool/install.sh (install into /Applications, and the whole copy/verify/swap path)
+Reason: never executed on this machine. The development loop has only ever been a Debug
+build launched from the build tree with `open`, which needs no install step. The script's
+--dry-run path is likewise unexercised, and two of the factual claims in its comments were
+found wrong when checked (see docs/development/macos-tcc-and-launchservices.md). Treat it
+as unproven code, not as documentation.
+
+NOT RUN: tool/package-dmg.sh notarization path
+Reason: no Developer ID certificate on this host.
 ```
 
 ## macOS packaging notes
