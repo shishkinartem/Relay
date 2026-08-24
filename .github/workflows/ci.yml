@@ -1,0 +1,206 @@
+name: CI
+
+# The merge gate from docs/development/testing.md: format → static analysis →
+# unit/widget tests → package tests → per-platform build. Independent jobs run
+# in parallel; the toolchain is pinned.
+#
+# Production credentials are never exposed here. The upload suites run entirely
+# against fakes and MockClient, so they need none.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.1
+
+jobs:
+  analyze:
+    name: Format and static analysis
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: dart format
+        run: dart format --output=none --set-exit-if-changed .
+      - name: flutter analyze
+        run: flutter analyze
+
+  test:
+    name: Unit, widget and package tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Application tests
+        run: flutter test --coverage
+      - name: recorder_platform_interface
+        run: flutter test
+        working-directory: packages/recorder_platform_interface
+      - name: recorder_windows
+        run: flutter test
+        working-directory: packages/recorder_windows
+      - name: upload_core
+        run: dart test
+        working-directory: packages/upload_core
+      - name: upload_telegram
+        run: dart test
+        working-directory: packages/upload_telegram
+      - name: upload_webdav
+        run: dart test
+        working-directory: packages/upload_webdav
+      - name: Coverage floor
+        # The number is a ratchet, not a target: raise it when it rises, never
+        # lower it to make a branch green. It exists because coverage was
+        # collected and uploaded for months without anything ever reading it.
+        run: |
+          set -e
+          pct=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{printf "%.2f", (lh/lf)*100}' coverage/lcov.info)
+          echo "Line coverage: $pct%"
+          awk -v p="$pct" 'BEGIN{ exit (p+0 >= 74.8) ? 0 : 1 }' || {
+            echo "Coverage $pct% is below the 74.80% floor." >&2
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/lcov.info
+
+  native-macos:
+    name: macOS native unit tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # No Flutter, and that is the point. The recorder's pure half was split
+      # into a package with no Flutter dependency precisely so it can be tested
+      # without one; needing a Flutter build to run these tests is what kept
+      # ~9,800 lines of native code unverified.
+      - name: swift test
+        run: swift test
+        working-directory: packages/recorder_macos/macos/recorder_macos/core
+
+  native-windows:
+    name: Windows native unit tests
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S packages/recorder_windows/windows/test -B build/win-tests
+      - name: Build
+        run: cmake --build build/win-tests --config Debug
+      - name: Test
+        run: ctest --test-dir build/win-tests -C Debug --output-on-failure
+
+  build-macos:
+    name: macOS build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # CI has no signing identity; build unsigned rather than failing on the
+      # development-team setting the local project carries.
+      - name: flutter build macos
+        run: >-
+          flutter build macos --debug
+          --dart-define=CI=true
+          || flutter build macos --debug
+        env:
+          CODE_SIGNING_ALLOWED: 'NO'
+          CODE_SIGNING_REQUIRED: 'NO'
+      - name: Artefact smoke check
+        run: test -d build/macos/Build/Products/Debug/relay.app
+
+  build-windows:
+    name: Windows build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: flutter build windows
+        run: flutter build windows --debug
+      - name: Artefact smoke check
+        run: Test-Path build\windows\x64\runner\Debug\relay.exe
+        shell: pwsh
+
+  integration-macos:
+    name: macOS integration tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # --run-skipped is mandatory: the suite carries @Tags(['platform']) and
+      # dart_test.yaml skips that tag, so without the flag this job would run
+      # zero tests and pass. See docs/development/testing.md.
+      #
+      # A hosted runner holds no screen-recording grant, so the three capture
+      # tests self-skip and say so. The two that do run are not filler: one
+      # asserts a platform implementation is registered, the other that both
+      # overlay windows reach the capture exclusion list — the §6 invariant
+      # that the control strip must never appear in the output.
+      - name: flutter test integration_test
+        run: |
+          set -o pipefail
+          flutter test integration_test -d macos --run-skipped 2>&1 | tee result.txt
+      - name: Fail if nothing executed
+        # The whole point of the job. A suite that ran no tests must not be
+        # reported as a passing gate.
+        run: |
+          set -e
+          if ! grep -qE '\+[1-9][0-9]*' result.txt; then
+            echo "The integration suite executed no tests. The platform tag or the" >&2
+            echo "device selection is wrong; this is not a pass." >&2
+            exit 1
+          fi
+          echo "Executed:"; grep -oE '\+[0-9]+ ?(-[0-9]+)?: All tests passed!' result.txt || true
+          echo "Skipped (no screen-recording grant on a hosted runner) is expected."
+
+  secret-scan:
+    name: Secret review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No committed .env or credentials
+        run: |
+          set -e
+          if git ls-files | grep -E '(^|/)\.env$|credentials\.json|client_secret'; then
+            echo "A credential file is tracked in git." >&2
+            exit 1
+          fi
+      - name: No token-shaped literals in source
+        run: |
+          set -e
+          if git grep -nIE '[0-9]{8,}:[A-Za-z0-9_-]{30,}' -- 'lib' 'packages' 'macos' 'windows'; then
+            echo "A bot-token-shaped literal is committed." >&2
+            exit 1
+          fi

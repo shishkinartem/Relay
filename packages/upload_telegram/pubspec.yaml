@@ -1,0 +1,18 @@
+name: upload_telegram
+description: "Telegram Bot API upload destination for Relay."
+version: 0.1.0
+publish_to: 'none'
+resolution: workspace
+
+environment:
+  sdk: ^3.13.1
+
+dependencies:
+  upload_core:
+    path: ../upload_core
+  http: ^1.2.2
+  meta: ^1.16.0
+
+dev_dependencies:
+  test: ^1.25.0
+  flutter_lints: ^6.0.0

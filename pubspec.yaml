@@ -1,0 +1,87 @@
+name: relay
+description: "Relay — cross-platform desktop screen recorder (macOS, Windows)."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.1
+
+workspace:
+  - packages/recorder_platform_interface
+  - packages/recorder_macos
+  - packages/recorder_windows
+  - packages/upload_core
+  - packages/upload_telegram
+  - packages/upload_webdav
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  recorder_platform_interface:
+    path: packages/recorder_platform_interface
+  recorder_macos:
+    path: packages/recorder_macos
+  recorder_windows:
+    path: packages/recorder_windows
+  upload_core:
+    path: packages/upload_core
+  upload_telegram:
+    path: packages/upload_telegram
+  upload_webdav:
+    path: packages/upload_webdav
+
+  # Persisted settings live in a versioned JSON document in the OS application
+  # support directory; path_provider resolves that directory per platform.
+  path_provider: ^2.1.5
+  # OS-backed credential storage: macOS Keychain / Windows Credential Manager.
+  flutter_secure_storage: ^9.2.4
+  # System-browser OAuth authorization and "Open System Settings" deep links.
+  url_launcher: ^6.3.1
+  # Local recordings folder picker (Settings, design 1m).
+  file_selector: ^1.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  # Lets a test stand in for the OS keychain and refuse the way macOS
+  # does for a build without the entitlement.
+  flutter_secure_storage_platform_interface: ^1.1.2
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+dependency_overrides:
+  # path_provider_foundation 2.5+ builds through the native-assets hook runner,
+  # which this toolchain cannot compile (`gen_kernel_aot.dart.snapshot is not an
+  # AOT snapshot`). 2.4.x is the last release on the plain plugin path and is
+  # API-identical for the directories this app resolves.
+  path_provider_foundation: 2.4.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/OFL.txt
+    - assets/fonts/OFL-IBMPlexMono.txt
+  fonts:
+    - family: Barlow
+      fonts:
+        - asset: assets/fonts/Barlow-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Barlow-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Barlow-Bold.ttf
+          weight: 700
+    - family: Barlow Condensed
+      fonts:
+        - asset: assets/fonts/BarlowCondensed-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/BarlowCondensed-SemiBold.ttf
+          weight: 600
+    # The design system's annotation voice is `ui-monospace, Menlo`. Vendoring
+    # a face keeps that identical on macOS and Windows instead of resolving to
+    # whatever each platform happens to ship.
+    - family: RelayMono
+      fonts:
+        - asset: assets/fonts/IBMPlexMono-Regular.ttf
+          weight: 400

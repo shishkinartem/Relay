@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Recorder — Desktop MVP (static design reference)</title>
+<!-- GENERATED from "Screen Recorder - Desktop MVP.dc.html" by scripts/render_design_preview.py.
+     Do not edit: re-run the script after pulling a new design revision.
+     The .dc.html is the source of truth; this file only makes it viewable offline,
+     because the canvas runtime (support.js) loads React from a CDN. -->
+<link rel="stylesheet" href="_ds/industry-fc0cac85-0d52-4222-8659-02887a721b86/styles.css">
+<script src="_ds/industry-fc0cac85-0d52-4222-8659-02887a721b86/_ds_bundle.js"></script>
+<style>
+body{margin:0;background:#e4e4e6;font-family:var(--font-body)}
+a{color:var(--color-accent)}a:hover{color:var(--color-accent-700)}
+.dv-turn{padding:40px 44px 34px;border-bottom:1px solid rgba(0,0,0,.1);scroll-margin-top:16px}
+.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 22px}
+.dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1d1f20;color:#f2f2f3;border-radius:0;text-decoration:none}
+.dv-tname{font-family:var(--font-heading);font-weight:600;font-size:17px;letter-spacing:.01em;color:#1d1f20}
+.dv-opts{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start}
+.dv-opt{flex:none;display:flex;flex-direction:column;gap:10px;scroll-margin-top:16px}
+.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.09);color:#1d1f20;border-radius:0;text-decoration:none}
+.dv-olabel{display:flex;align-items:baseline;gap:9px;font-size:12px;color:rgba(29,31,32,.6);max-width:460px}
+.dv-opt:target .dv-oid{background:var(--color-accent);color:#f2f2f3}
+.dv-next{margin:26px 0 0;font-size:12px;color:rgba(29,31,32,.55)}
+.win{background:var(--color-bg);border:1px solid rgba(29,31,32,.28);box-shadow:var(--shadow-md)}
+.tb{display:flex;align-items:center;gap:9px;height:34px;padding:0 11px;border-bottom:1px solid var(--color-divider);background:var(--color-surface)}
+.tl{display:flex;gap:6px}
+.tl i{width:10px;height:10px;border-radius:50%;border:1px solid rgba(29,31,32,.35);display:block}
+.tbt{font-family:var(--font-heading);font-weight:600;font-size:13px;letter-spacing:.02em;color:rgba(29,31,32,.75)}
+.pad{padding:14px}
+.k{font-family:var(--font-heading);font-weight:600;font-size:10px;letter-spacing:.11em;text-transform:uppercase;color:rgba(29,31,32,.5)}
+.mono{font:11px/1.5 ui-monospace,Menlo,monospace;color:rgba(29,31,32,.6)}
+.ann{max-width:420px;font-size:11.5px;line-height:1.5;color:rgba(29,31,32,.55);border-left:1px solid var(--color-divider);padding-left:10px}
+.ann code{font:11px ui-monospace,Menlo,monospace;color:var(--color-accent-700)}
+.rw{display:flex;align-items:center;gap:10px}
+</style>
+</head>
+<body>
+<section class="dv-turn" id="t0">
+  <div class="dv-thd"><a class="dv-tid" href="#t0">00</a><span class="dv-tname">Screen Recorder — MVP screen set</span></div>
+  <div style="display:flex;gap:40px;flex-wrap:wrap;max-width:1180px">
+    <div style="max-width:540px;font-size:13.5px;line-height:1.6;color:rgba(29,31,32,.78)">
+      <p style="margin:0 0 10px"><span class="k">Assumptions</span></p>
+      <p>Single 420px utility panel, macOS chrome, on the Industry wireframe system — every surface is a square hairline object with registration marks, one steel accent, Barlow Condensed over Barlow. Sized and structured so a Flutter build maps cleanly: each screen is one route or one dialog, each control is a stock widget (SegmentedButton, Radio, LinearProgressIndicator, ListTile).</p>
+      <p>Panel never grows past 420 × 560. Everything that must sit over other apps — the control strip, the camera preview — is a separate always-on-top window, never a child of the panel, and explicitly excluded from capture. Exclusion is mandatory: with entire screen as the default source, both surfaces sit inside the captured bounds and only <code style="font:11px ui-monospace,Menlo,monospace;color:var(--color-accent-700)">excludingWindows:</code> / <code style="font:11px ui-monospace,Menlo,monospace;color:var(--color-accent-700)">WDA_EXCLUDEFROMCAPTURE</code> keeps them out of the file.</p>
+      <p style="margin-bottom:0">Screens are annotated with their state from §19 and the spec section they answer. Three open decisions (§30.1, §30.2, §30.5) are shown as concrete proposals, marked <code style="font:11px ui-monospace,Menlo,monospace;color:var(--color-accent-700)">TBD</code>.</p>
+    </div>
+    <div style="width:300px">
+      <p style="margin:0 0 10px"><span class="k">Coverage</span></p>
+      <table class="table" style="font-size:12.5px">
+        <tbody>
+          <tr><td>Source selection</td><td class="mono"><a class="dv-oid" href="#1a">1a</a></td></tr>
+          <tr><td>Pre-record + preflight</td><td class="mono"><a class="dv-oid" href="#1c">1c</a> <a class="dv-oid" href="#1d">1d</a></td></tr>
+          <tr><td>Recording</td><td class="mono"><a class="dv-oid" href="#1e">1e</a> <a class="dv-oid" href="#1p">1p</a> <a class="dv-oid" href="#1f">1f</a> <a class="dv-oid" href="#1g">1g</a> <a class="dv-oid" href="#1h">1h</a></td></tr>
+          <tr><td>Post-recording</td><td class="mono"><a class="dv-oid" href="#1i">1i</a> <a class="dv-oid" href="#1o">1o</a> <a class="dv-oid" href="#1j">1j</a> <a class="dv-oid" href="#1k">1k</a> <a class="dv-oid" href="#1l">1l</a></td></tr>
+          <tr><td>Settings + recovery</td><td class="mono"><a class="dv-oid" href="#1m">1m</a> <a class="dv-oid" href="#1n">1n</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="dv-turn" id="t1">
+  <div class="dv-thd"><a class="dv-tid" href="#t1">01</a><span class="dv-tname">Setup — source selection and preflight</span></div>
+  <div class="dv-opts">
+
+    <div class="dv-opt" id="1a">
+      <div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Source picker — screens first, then windows</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span>
+          <span style="margin-left:auto" class="mono">720p · 30</span></div>
+        <div class="pad">
+          <div class="rw" style="justify-content:space-between;margin-bottom:10px">
+            <span class="k">Select a source</span><span class="mono">1 screen · 7 windows</span>
+          </div>
+          <div class="blueprint" style="padding:0;outline:2px solid var(--color-accent);outline-offset:2px;margin-bottom:18px">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="duotone" style="height:96px;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 7px,var(--color-neutral-200) 7px 14px)"></div>
+            <div class="rw" style="padding:7px 8px;border-top:1px solid var(--color-divider)">
+              <span><span style="display:block;font-size:12.5px;font-weight:500">Entire screen</span><span class="mono" style="font-size:10px">Built-in Display · 2560 × 1600</span></span>
+              <span class="tag tag-accent" style="margin-left:auto">Default</span>
+            </div>
+          </div>
+          <span class="k" style="display:block;margin-bottom:9px">Windows</span>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="blueprint" style="padding:0">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="duotone" style="height:74px;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 6px,var(--color-neutral-200) 6px 12px)"></div>
+              <div style="padding:6px 7px;border-top:1px solid var(--color-divider)">
+                <div style="font-size:12px;font-weight:500">Figma</div>
+                <div class="mono" style="font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Recorder — MVP</div>
+              </div>
+            </div>
+            <div class="blueprint" style="padding:0">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="duotone" style="height:74px;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 6px,var(--color-neutral-200) 6px 12px)"></div>
+              <div style="padding:6px 7px;border-top:1px solid var(--color-divider)">
+                <div style="font-size:12px;font-weight:500">Terminal</div>
+                <div class="mono" style="font-size:10px">zsh — flutter run</div>
+              </div>
+            </div>
+            <div class="blueprint" style="padding:0">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="duotone" style="height:74px;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 6px,var(--color-neutral-200) 6px 12px)"></div>
+              <div style="padding:6px 7px;border-top:1px solid var(--color-divider)">
+                <div style="font-size:12px;font-weight:500">Safari</div>
+                <div class="mono" style="font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">ScreenCaptureKit</div>
+              </div>
+            </div>
+            <div class="blueprint" style="padding:0">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="duotone" style="height:74px;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 6px,var(--color-neutral-200) 6px 12px)"></div>
+              <div style="padding:6px 7px;border-top:1px solid var(--color-divider)">
+                <div style="font-size:12px;font-weight:500">Slack</div>
+                <div class="mono" style="font-size:10px">#eng-desktop</div>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" style="margin-top:16px;height:38px">Continue</button>
+        </div>
+      </div>
+      <div class="ann">State <code>selectingSource</code>. Thumbnails come from one <code>SCShareableContent</code> snapshot refreshed on window focus, not a live stream. Grid reads well at 2 columns; more than 8 windows scrolls the list area only.</div>
+    </div>
+
+    <div class="dv-opt" id="1c">
+      <div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>Launch screen — configuration for this session</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span>
+          <button class="btn btn-ghost btn-icon" style="margin-left:auto;width:24px;height:24px" aria-label="Settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button></div>
+        <div class="pad">
+          <div class="rw" style="justify-content:space-between;margin-bottom:11px">
+            <span class="k">Record</span>
+            <div class="seg"><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="src">Entire screen</label><label class="seg-opt"><input type="radio" name="src">A window</label></div>
+          </div>
+          <div class="blueprint" style="padding:9px 10px;margin-bottom:16px">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="rw">
+              <span class="blueprint" style="width:38px;height:26px;flex:none;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 5px,var(--color-neutral-200) 5px 10px)"></span>
+              <span><span class="k" style="display:block">Source · display</span><span style="font-size:13px;font-weight:500">Built-in Display · 2560 × 1600</span></span>
+              <button class="btn btn-ghost" style="margin-left:auto;font-size:12px">Change</button>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:13px">
+            <div class="rw" style="justify-content:space-between"><span class="k">Quality</span>
+              <div class="seg"><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="q">720p</label><label class="seg-opt"><input type="radio" name="q">1080p</label></div></div>
+            <div class="rw" style="justify-content:space-between"><span class="k">Frame rate</span>
+              <div class="seg"><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="f">30</label><label class="seg-opt"><input type="radio" name="f">60</label></div></div>
+            <hr class="hr" style="margin:2px 0">
+            <div class="rw" style="justify-content:space-between"><span class="rw" style="gap:7px;font-size:13px">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg>Microphone</span>
+              <div class="seg"><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="m">On</label><label class="seg-opt"><input type="radio" name="m">Off</label></div></div>
+            <div class="rw" style="justify-content:space-between"><span class="rw" style="gap:7px;font-size:13px">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M19.1 4.9a10 10 0 0 1 0 14.2M15.5 8.5a5 5 0 0 1 0 7"></path></svg>System audio</span>
+              <div class="seg"><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="s">On</label><label class="seg-opt"><input type="radio" name="s">Off</label></div></div>
+            <div class="rw" style="justify-content:space-between"><span class="rw" style="gap:7px;font-size:13px">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m23 7-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14" rx="0"></rect></svg>Camera</span>
+              <div class="seg"><label class="seg-opt"><input type="radio" name="c">On</label><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="c">Off</label></div></div>
+            <details style="border-top:1px solid var(--color-divider);padding-top:11px">
+              <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px"><span class="k">Advanced</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:rgba(29,31,32,.45)"><path d="m6 9 6 6 6-6"></path></svg></summary>
+              <div style="display:flex;flex-direction:column;gap:9px;margin-top:12px">
+                <div class="rw" style="justify-content:space-between"><span class="rw" style="gap:7px;font-size:13px">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 2 14 12-6 1 3.5 6.5-2.5 1.3L9.5 16 4 20V2z"></path></svg>Show cursor</span>
+                  <div class="seg"><label class="seg-opt" style="background:var(--color-accent);color:var(--color-bg)"><input type="radio" name="cur">On</label><label class="seg-opt"><input type="radio" name="cur">Off</label></div></div>
+                <div class="mono">showCursor = true · §4.3 requires it in the output</div>
+              </div>
+            </details>
+            <hr class="hr" style="margin:2px 0">
+            <div class="rw" style="justify-content:space-between">
+              <span><span class="k" style="display:block">Send to</span><span style="font-size:13px">Google Drive</span></span>
+              <button class="btn btn-ghost" style="font-size:12px">Change</button>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" style="margin-top:16px;height:38px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"></circle></svg>Start recording</button>
+          <div class="mono" style="margin-top:8px;text-align:center">≈ 1.9 GB / hour at this profile</div>
+        </div>
+      </div>
+      <div class="ann">The screen the app opens on: source, settings and Start in one panel; Change opens <a class="dv-oid" href="#1a">1a</a>. Entire screen is the default source — note this adds <code>CaptureSource.Display</code> to MVP, which §2 lists as deferred; the domain model in §4 already carries it, so it is a scope change, not an architecture one. Feeds <code>RecordingConfiguration</code> one-to-one. Values come from <code>RecorderCapabilities</code>, so a platform that lacks system audio renders that row disabled rather than hidden. The size line is the §12 estimate, framed as an estimate.</div>
+    </div>
+
+    <div class="dv-opt" id="1d">
+      <div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a>Permission preflight — camera denied, camera off</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span></div>
+        <div class="pad">
+          <span class="k">Preflight</span>
+          <div style="border:1px solid var(--color-divider);margin-top:10px">
+            <div class="rw" style="padding:10px;border-bottom:1px solid var(--color-divider)">
+              <svg style="color:var(--color-accent)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 6 9 17l-5-5"></path></svg>
+              <span style="font-size:13px">Screen &amp; window recording</span><span class="tag tag-accent" style="margin-left:auto">Granted</span>
+            </div>
+            <div class="rw" style="padding:10px;border-bottom:1px solid var(--color-divider)">
+              <svg style="color:var(--color-accent)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 6 9 17l-5-5"></path></svg>
+              <span style="font-size:13px">Microphone</span><span class="tag tag-accent" style="margin-left:auto">Granted</span>
+            </div>
+            <div style="padding:10px">
+              <div class="rw">
+                <svg style="color:var(--color-neutral-600)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+                <span style="font-size:13px">Camera</span><span class="tag tag-neutral" style="margin-left:auto">Not granted</span>
+              </div>
+              <div class="mono" style="margin:6px 0 8px 26px">cameraEnabled = false — not required for this session</div>
+              <button class="btn btn-secondary" style="margin-left:26px;font-size:12px">Open System Settings</button>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" style="margin-top:14px;height:38px">Start recording</button>
+          <div class="mono" style="margin-top:8px;text-align:center">Camera will stay off</div>
+        </div>
+      </div>
+      <div class="ann">State <code>preparing</code>. §23: denial is a typed state, not an exception. Optional-and-off permissions never block Start; a source the user explicitly enabled turns this into a blocking <code>permissionDenied</code> screen with the primary button disabled.</div>
+    </div>
+  </div>
+  <p class="dv-next">Try next: "add a device picker for mic and camera to <a class="dv-oid" href="#1c">1c</a>" · "show the blocking permission variant" · "let the picker refresh while open"</p>
+</section>
+
+<section class="dv-turn" id="t2">
+  <div class="dv-thd"><a class="dv-tid" href="#t2">02</a><span class="dv-tname">Recording — overlay, strip states, camera</span></div>
+  <div class="dv-opts">
+
+    <div class="dv-opt" id="1e">
+      <div class="dv-olabel"><a class="dv-oid" href="#1e">1e</a>In situ — window source shown; strip docked top of current display, §6</div>
+      <div class="blueprint" style="width:760px;height:452px;background:var(--color-neutral-300);padding:0;overflow:hidden">
+        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <div style="height:22px;background:var(--color-neutral-200);border-bottom:1px solid var(--color-divider);display:flex;align-items:center;padding:0 10px;gap:14px">
+          <span class="mono" style="font-size:9.5px">Finder</span><span class="mono" style="font-size:9.5px">File</span><span class="mono" style="font-size:9.5px">Edit</span>
+          <span class="mono" style="font-size:9.5px;margin-left:auto">Mon 14:22</span>
+        </div>
+        <div style="position:relative;height:430px">
+          <div style="position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:3">
+            <div class="win" style="display:flex;align-items:center;gap:10px;padding:6px 10px;box-shadow:var(--shadow-lg)">
+              <span class="rw" style="gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:#b4413f;display:block"></span><span class="mono" style="font-size:11px;color:var(--color-text)">00:14:32</span></span>
+              <span style="width:1px;height:18px;background:var(--color-divider)"></span>
+              <span class="btn btn-primary" style="width:26px;height:26px;padding:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg></span>
+              <span class="btn btn-secondary" style="width:26px;height:26px;padding:0;opacity:.5"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m23 7-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14"></rect></svg></span>
+              <span class="btn btn-primary" style="width:26px;height:26px;padding:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M19.1 4.9a10 10 0 0 1 0 14.2"></path></svg></span>
+              <span style="width:1px;height:18px;background:var(--color-divider)"></span>
+              <span class="btn btn-secondary" style="width:26px;height:26px;padding:0"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg></span>
+              <span class="btn btn-secondary" style="width:26px;height:26px;padding:0"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14"></rect></svg></span>
+            </div>
+          </div>
+          <div style="position:absolute;top:64px;left:52px;width:470px">
+            <div class="win" style="outline:2px solid var(--color-accent);outline-offset:3px">
+              <div class="tb" style="height:26px"><span class="tl"><i></i><i></i><i></i></span><span class="tbt" style="font-size:11px">Figma — Recorder — MVP</span></div>
+              <div style="position:relative;height:236px;background:repeating-linear-gradient(135deg,var(--color-neutral-200) 0 8px,var(--color-neutral-100) 8px 16px)">
+                <div class="blueprint" style="position:absolute;right:5px;bottom:5px;width:104px;height:104px;background:var(--color-neutral-400)">
+                  <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                  <span class="mono" style="position:absolute;inset:auto 0 4px 0;text-align:center;font-size:9px;color:var(--color-neutral-100)">camera PiP</span>
+                </div>
+                <svg style="position:absolute;left:44%;top:40%;color:var(--color-text)" width="18" height="18" viewBox="0 0 24 24" fill="var(--color-bg)" stroke="currentColor" stroke-width="1.2"><path d="m4 2 14 12-6 1 3.5 6.5-2.5 1.3L9.5 16 4 20V2z"></path></svg>
+              </div>
+            </div>
+            <div class="mono" style="margin-top:8px;font-size:10px;color:var(--color-accent-800)">↑ capture scope, window mode — SCContentFilter(window:)</div>
+          </div>
+          <div style="position:absolute;right:36px;bottom:36px">
+            <div class="blueprint" style="width:150px;background:var(--color-bg);box-shadow:var(--shadow-lg);padding:0">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="duotone" style="height:150px;background:radial-gradient(circle at 50% 42%,var(--color-neutral-400) 0 32%,var(--color-neutral-300) 33% 100%)"></div>
+              <div class="rw" style="padding:5px 7px;border-top:1px solid var(--color-divider)">
+                <span class="mono" style="font-size:9px">Camera preview</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="ann">The strip and the camera preview are separate always-on-top windows, and both must be explicitly excluded from capture — <code>SCContentFilter(display:excludingWindows:)</code> / <code>WDA_EXCLUDEFROMCAPTURE</code>. In window mode the filter already scopes them out; in entire-screen mode, now the default, they sit inside the captured bounds and exclusion is the only thing keeping them out of the file (§6). Placement above the source is presentation, never the mechanism. The preview shows the same logical camera source the compositor draws into the PiP; it is not screen-captured.</div>
+    </div>
+
+    <div class="dv-opt" id="1p">
+      <div class="dv-olabel"><a class="dv-oid" href="#1p">1p</a>Entire-screen source — the default path, both overlays excluded</div>
+      <div class="blueprint" style="width:760px;height:452px;background:var(--color-neutral-300);padding:0;overflow:hidden;outline:2px solid var(--color-accent);outline-offset:3px">
+        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <div style="height:22px;background:var(--color-neutral-200);border-bottom:1px solid var(--color-divider);display:flex;align-items:center;padding:0 10px;gap:14px">
+          <span class="mono" style="font-size:9.5px">Finder</span><span class="mono" style="font-size:9.5px">File</span><span class="mono" style="font-size:9.5px">Edit</span>
+          <span class="mono" style="font-size:9.5px;margin-left:auto">Mon 14:22</span>
+        </div>
+        <div style="position:relative;height:430px">
+          <div style="position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:5px">
+            <div class="win" style="display:flex;align-items:center;gap:10px;padding:6px 10px;box-shadow:var(--shadow-lg);opacity:.55;border-style:dashed">
+              <span class="rw" style="gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:#b4413f;display:block"></span><span class="mono" style="font-size:11px;color:var(--color-text)">00:14:32</span></span>
+              <span style="width:1px;height:18px;background:var(--color-divider)"></span>
+              <span class="btn btn-primary" style="width:26px;height:26px;padding:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg></span>
+              <span class="btn btn-secondary" style="width:26px;height:26px;padding:0;opacity:.5"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m23 7-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14"></rect></svg></span>
+              <span class="btn btn-primary" style="width:26px;height:26px;padding:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M19.1 4.9a10 10 0 0 1 0 14.2"></path></svg></span>
+              <span style="width:1px;height:18px;background:var(--color-divider)"></span>
+              <span class="btn btn-secondary" style="width:26px;height:26px;padding:0"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg></span>
+              <span class="btn btn-secondary" style="width:26px;height:26px;padding:0"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14"></rect></svg></span>
+            </div>
+            <span class="tag tag-outline" style="font-size:9px;padding:1px 6px;background:var(--color-bg)">excluded from capture</span>
+          </div>
+          <div style="position:absolute;top:78px;left:52px;width:400px">
+            <div class="win">
+              <div class="tb" style="height:26px"><span class="tl"><i></i><i></i><i></i></span><span class="tbt" style="font-size:11px">Figma — Recorder — MVP</span></div>
+              <div style="height:190px;background:repeating-linear-gradient(135deg,var(--color-neutral-200) 0 8px,var(--color-neutral-100) 8px 16px)"></div>
+            </div>
+            <div class="mono" style="margin-top:8px;font-size:10px;color:var(--color-accent-800)">every window on the display is in scope — SCContentFilter(display:excludingWindows:)</div>
+          </div>
+          <svg style="position:absolute;left:46%;top:52%;color:var(--color-text)" width="18" height="18" viewBox="0 0 24 24" fill="var(--color-bg)" stroke="currentColor" stroke-width="1.2"><path d="m4 2 14 12-6 1 3.5 6.5-2.5 1.3L9.5 16 4 20V2z"></path></svg>
+          <div class="blueprint" style="position:absolute;right:5px;bottom:5px;width:126px;height:126px;background:var(--color-neutral-400)">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="duotone" style="position:absolute;inset:0;background:radial-gradient(circle at 50% 42%,var(--color-neutral-400) 0 30%,var(--color-neutral-300) 31% 100%)"></div>
+          </div>
+        </div>
+      </div>
+      <div class="ann">One camera surface, not two. In display mode the preview window is placed exactly where the compositor draws the PiP — same size, same corner — so what the user sees on screen is what lands in the file. It carries no labels of its own: it sits over the user's screen and must read as the camera, not as a diagram. It is still an excluded window, so it is not captured; the frames in the file come from the compositor. Window mode (<a class="dv-oid" href="#1e">1e</a>) is the case that needs a preview somewhere else, because the PiP position is inside a window the user is not looking at.</div>
+    </div>
+
+    <div class="dv-opt" id="1f">
+      <div class="dv-olabel"><a class="dv-oid" href="#1f">1f</a>Strip 1:1 — recording, mic on, camera off, system audio on</div>
+      <div class="win" style="display:inline-flex;align-items:center;gap:12px;padding:8px 12px">
+        <span class="rw" style="gap:7px"><span style="width:8px;height:8px;border-radius:50%;background:#b4413f;display:block"></span><span class="mono" style="font-size:13px;color:var(--color-text)">00:14:32</span></span>
+        <span style="width:1px;height:24px;background:var(--color-divider)"></span>
+        <button class="btn btn-primary btn-icon" style="width:32px;height:32px" aria-label="Microphone on"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg></button>
+        <button class="btn btn-secondary btn-icon" style="width:32px;height:32px;color:var(--color-neutral-600)" aria-label="Camera off"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m23 7-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14"></rect><path d="M2 22 22 2"></path></svg></button>
+        <button class="btn btn-primary btn-icon" style="width:32px;height:32px" aria-label="System audio on"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M19.1 4.9a10 10 0 0 1 0 14.2M15.5 8.5a5 5 0 0 1 0 7"></path></svg></button>
+        <span style="width:1px;height:24px;background:var(--color-divider)"></span>
+        <button class="btn btn-secondary btn-icon" style="width:32px;height:32px" aria-label="Pause"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg></button>
+        <button class="btn btn-secondary btn-icon" style="width:32px;height:32px" aria-label="Stop"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14"></rect></svg></button>
+      </div>
+      <div class="ann">State <code>recording</code>. Accent fill = source contributing to the mix; hairline = off. 32px hit targets, 46px strip height — small enough to dock without covering a menu bar, large enough to hit without aiming.</div>
+    </div>
+
+    <div class="dv-opt" id="1g">
+      <div class="dv-olabel"><a class="dv-oid" href="#1g">1g</a>Strip — paused, mic muted mid-session</div>
+      <div class="win" style="display:inline-flex;align-items:center;gap:12px;padding:8px 12px;border-color:var(--color-accent)">
+        <span class="rw" style="gap:7px"><span style="width:8px;height:8px;border-radius:50%;border:1px solid var(--color-neutral-600);display:block"></span><span class="mono" style="font-size:13px;color:var(--color-text)">00:14:32</span></span>
+        <span class="tag tag-accent">Paused</span>
+        <span style="width:1px;height:24px;background:var(--color-divider)"></span>
+        <button class="btn btn-secondary btn-icon" style="width:32px;height:32px;color:var(--color-neutral-600)" aria-label="Microphone off"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M2 2l20 20"></path></svg></button>
+        <button class="btn btn-secondary btn-icon" style="width:32px;height:32px;color:var(--color-neutral-600)" aria-label="Camera off"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m23 7-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14"></rect><path d="M2 22 22 2"></path></svg></button>
+        <button class="btn btn-primary btn-icon" style="width:32px;height:32px" aria-label="System audio on"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M19.1 4.9a10 10 0 0 1 0 14.2M15.5 8.5a5 5 0 0 1 0 7"></path></svg></button>
+        <span style="width:1px;height:24px;background:var(--color-divider)"></span>
+        <button class="btn btn-primary" style="height:32px;padding:0 12px"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4z"></path></svg>Resume</button>
+        <button class="btn btn-secondary btn-icon" style="width:32px;height:32px" aria-label="Stop"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14"></rect></svg></button>
+      </div>
+      <div class="ann">State <code>paused</code>. The timer holds and the frame border takes the accent so a paused strip is not mistaken for a recording one at a glance. Paused duration is omitted from the output timeline (§30.4 recommendation) — the timer therefore equals final file duration.</div>
+    </div>
+
+    <div class="dv-opt" id="1h">
+      <div class="dv-olabel"><a class="dv-oid" href="#1h">1h</a>Camera PiP spec — proposal for §30.2</div>
+      <div class="win" style="width:420px;padding:16px">
+        <span class="k">Composition · lower-right PiP</span>
+        <div class="blueprint" style="margin:14px 0 16px;background:repeating-linear-gradient(135deg,var(--color-neutral-200) 0 8px,var(--color-neutral-100) 8px 16px);height:212px;position:relative">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <div class="blueprint" style="position:absolute;right:5px;bottom:5px;width:84px;height:84px;background:var(--color-neutral-400)">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          </div>
+          <span class="mono" style="position:absolute;right:96px;bottom:44px;font-size:9.5px">0.22 W</span>
+          <span class="mono" style="position:absolute;right:14px;bottom:0;font-size:9.5px;transform:translateY(14px)">0.01 W</span>
+          <span class="mono" style="position:absolute;left:10px;top:10px;font-size:9.5px;color:var(--color-accent-800)">output canvas — display or window, 1920 × 1080</span>
+        </div>
+        <table class="table" style="font-size:12.5px">
+          <tbody>
+            <tr><td>Width</td><td class="mono">0.22 × canvas width</td></tr>
+            <tr><td>Shape</td><td class="mono">square, 1:1, radius 0</td></tr>
+            <tr><td>Margin</td><td class="mono">0.01 × canvas width</td></tr>
+            <tr><td>Preview</td><td class="mono">mirrored</td></tr>
+            <tr><td>Final output</td><td class="mono">not mirrored</td></tr>
+          </tbody>
+        </table>
+        <div class="mono" style="margin-top:10px">CameraOverlayConfiguration — all five values configurable</div>
+      </div>
+      <div class="ann">Square with registration marks matches the system and avoids a circular mask in the compositor. Ratios rather than pixels so 720p, 1080p, and both window and full-screen canvases share one config. Mirroring split follows the convention users expect: mirror what they look at, not what they publish.</div>
+    </div>
+  </div>
+  <p class="dv-next">Try next: "make the strip vertical" · "show the source-window-closed state" · "add an audio level meter to <a class="dv-oid" href="#1f">1f</a>"</p>
+</section>
+
+<section class="dv-turn" id="t3">
+  <div class="dv-thd"><a class="dv-tid" href="#t3">03</a><span class="dv-tname">Post-recording — send, delete, failure</span></div>
+  <div class="dv-opts">
+
+    <div class="dv-opt" id="1i">
+      <div class="dv-olabel"><a class="dv-oid" href="#1i">1i</a>Ready — Send or Delete, §13</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span><span class="tag tag-accent" style="margin-left:auto">Ready</span></div>
+        <div class="pad">
+          <div class="blueprint" style="padding:0;margin-bottom:14px">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="duotone" style="height:104px;background:repeating-linear-gradient(135deg,var(--color-neutral-300) 0 8px,var(--color-neutral-200) 8px 16px)"></div>
+            <div style="padding:9px 10px;border-top:1px solid var(--color-divider)">
+              <div class="rw" style="gap:6px">
+                <input class="input" value="recording-2026-08-22-1422" style="font:11.5px/1.4 ui-monospace,Menlo,monospace;min-height:30px;padding:4px 7px">
+                <span class="mono" style="flex:none">.mp4</span>
+              </div>
+              <div class="mono" style="margin-top:5px">14:32 · 1080p60 · H.264 / AAC · 1.02 GB</div>
+            </div>
+          </div>
+          <div class="rw" style="justify-content:space-between;margin-bottom:14px">
+            <span><span class="k" style="display:block">Destination</span><span style="font-size:13px">Google Drive · a.petrov@…</span></span>
+            <button class="btn btn-ghost" style="font-size:12px">Change</button>
+          </div>
+          <div class="rw" style="gap:8px">
+            <button class="btn btn-primary" style="flex:1;height:38px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>Send</button>
+            <button class="btn btn-secondary" style="height:38px;width:44px" aria-label="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"></path></svg></button>
+          </div>
+          <div class="mono" style="margin-top:9px;text-align:center">Local file is kept until upload is confirmed</div>
+        </div>
+      </div>
+      <div class="ann">State <code>ready</code>. The name is editable here — the only place it can be changed; it is the local filename and the name sent to the destination (<code>RemoteUploadResult.remoteName</code>). Renaming does not re-finalize the file, so it stays valid after a failed upload. The thumbnail is the first keyframe, not a player — no playback in MVP. Delete is an icon button, not a peer of Send, so the destructive action is reachable but not adjacent by accident.</div>
+    </div>
+
+    <div class="dv-opt" id="1o">
+      <div class="dv-olabel"><a class="dv-oid" href="#1o">1o</a>Change destination — from Send, and from <a class="dv-oid" href="#1m">1m</a></div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Send to</span>
+          <button class="btn btn-ghost" style="margin-left:auto;font-size:12px">Back</button></div>
+        <div class="pad">
+          <div class="mono" style="font-size:11.5px;color:var(--color-text)">recording-2026-08-22-1422.mp4 · 1.02 GB</div>
+          <div style="display:flex;flex-direction:column;gap:12px;margin-top:14px">
+            <div class="blueprint" style="padding:11px;border-color:var(--color-accent);background:color-mix(in srgb,var(--color-accent) 8%,transparent)">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="rw">
+                <span class="radio"><span class="dot" style="border-color:var(--color-accent);background:var(--color-accent);box-shadow:inset 0 0 0 4px var(--color-bg)"></span></span>
+                <span><span style="display:block;font-size:13.5px;font-weight:500">Google Drive</span><span class="mono" style="font-size:10.5px">a.petrov@example.com</span></span>
+                <span class="tag tag-accent" style="margin-left:auto">Fits</span>
+              </div>
+              <div class="mono" style="margin-top:7px">Resumable upload · no size limit · drive.file scope</div>
+            </div>
+            <div class="blueprint" style="padding:11px;opacity:.6">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="rw">
+                <span class="radio"><span class="dot"></span></span>
+                <span><span style="display:block;font-size:13.5px;font-weight:500">Telegram</span><span class="mono" style="font-size:10.5px">Hosted Bot API</span></span>
+                <span class="tag tag-outline" style="margin-left:auto">Too large</span>
+              </div>
+              <div class="mono" style="margin-top:7px">50 MB limit — this file is 1.02 GB. Preflight would fail.</div>
+            </div>
+          </div>
+          <label class="radio" style="margin-top:14px;font-size:12.5px"><span class="dot" style="border-color:var(--color-accent);background:var(--color-accent);box-shadow:inset 0 0 0 4px var(--color-bg)"></span>Also make this my default</label>
+          <button class="btn btn-primary btn-block" style="height:38px;margin-top:12px">Send to Google Drive</button>
+        </div>
+      </div>
+      <div class="ann">Reached from Change in <a class="dv-oid" href="#1i">1i</a> and <a class="dv-oid" href="#1k">1k</a>, and from the destination row in <a class="dv-oid" href="#1m">1m</a>. Each row renders its own <code>UploadCapabilities</code> against this file's size, so a destination that cannot accept it is dimmed and labelled before Send rather than failing mid-upload (§14). The default checkbox writes the persisted setting; leaving it off changes the destination for this recording only.</div>
+    </div>
+
+    <div class="dv-opt" id="1j">
+      <div class="dv-olabel"><a class="dv-oid" href="#1j">1j</a>Uploading — resumable, cancellable</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span><span class="tag tag-accent" style="margin-left:auto">Uploading</span></div>
+        <div class="pad">
+          <div class="mono" style="font-size:11.5px;color:var(--color-text)">recording-2026-08-22-1422.mp4</div>
+          <div class="rw" style="justify-content:space-between;margin:16px 0 7px">
+            <span style="font-family:var(--font-heading);font-weight:600;font-size:26px;line-height:1">62%</span>
+            <span class="mono">648 MB of 1.02 GB · 6.4 MB/s</span>
+          </div>
+          <div style="height:8px;border:1px solid var(--color-divider);background:var(--color-bg)">
+            <div style="height:100%;width:62%;background:var(--color-accent)"></div>
+          </div>
+          <div class="mono" style="margin-top:7px">Google Drive · resumable session · chunk 42 / 68</div>
+          <table class="table" style="font-size:12.5px;margin-top:16px">
+            <tbody>
+              <tr><td>Validated</td><td class="mono">size ok, no destination limit</td></tr>
+              <tr><td>Retries</td><td class="mono">0</td></tr>
+              <tr><td>On success</td><td class="mono">delete local file</td></tr>
+            </tbody>
+          </table>
+          <button class="btn btn-secondary btn-block" style="height:38px;margin-top:14px">Cancel upload</button>
+        </div>
+      </div>
+      <div class="ann">State <code>uploading(progress)</code>. Progress is bytes-confirmed-by-the-session, not bytes-written-to-socket, so it never shows 100% before Drive commits. Cancel returns to <code>ready</code> with the file intact.</div>
+    </div>
+
+    <div class="dv-opt" id="1k">
+      <div class="dv-olabel"><a class="dv-oid" href="#1k">1k</a>Upload failed — typed error, file retained</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span><span class="tag tag-outline" style="margin-left:auto">Failed</span></div>
+        <div class="pad">
+          <div class="blueprint" style="padding:11px;border-color:var(--color-accent)">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="rw" style="align-items:flex-start;gap:9px">
+              <svg style="color:var(--color-accent-700);flex:none;margin-top:2px" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 9v4M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path></svg>
+              <div>
+                <div style="font-family:var(--font-heading);font-weight:600;font-size:16px">Upload interrupted</div>
+                <div style="font-size:12.5px;color:rgba(29,31,32,.7)">The network dropped at 62%. Your recording is still on this Mac and can be resumed.</div>
+                <div class="mono" style="margin-top:6px">UploadError.network · session still valid · 12h left</div>
+              </div>
+            </div>
+          </div>
+          <table class="table" style="font-size:12.5px;margin-top:14px">
+            <tbody>
+              <tr><td>Local file</td><td class="mono">retained · 1.02 GB</td></tr>
+              <tr><td>Uploaded</td><td class="mono">648 MB confirmed</td></tr>
+            </tbody>
+          </table>
+          <div class="rw" style="gap:8px;margin-top:14px">
+            <button class="btn btn-primary" style="flex:1;height:38px">Resume upload</button>
+            <button class="btn btn-secondary" style="height:38px">Change destination</button>
+          </div>
+          <button class="btn btn-ghost btn-block" style="font-size:12px">Keep the file and decide later</button>
+        </div>
+      </div>
+      <div class="ann">State <code>uploadFailed → ready</code>. Nothing is deleted, no automatic retry loop. A Telegram 50 MB preflight failure uses the same layout with <code>UploadError.fileTooLarge</code> and "Change destination" promoted to primary.</div>
+    </div>
+
+    <div class="dv-opt" id="1l">
+      <div class="dv-olabel"><a class="dv-oid" href="#1l">1l</a>Delete confirmation — proposal for §30.5</div>
+      <div style="width:420px;position:relative;background:var(--color-neutral-400);padding:34px 0">
+        <div style="margin:0 14px;opacity:.35">
+          <div class="win"><div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span></div>
+            <div class="pad" style="height:120px"></div></div>
+        </div>
+        <div style="position:absolute;inset:0;display:grid;place-items:center;background:color-mix(in srgb,var(--color-neutral-900) 45%,transparent)">
+          <div class="dialog blueprint" style="width:340px;background:var(--color-bg);gap:var(--space-3)">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="dialog-title">Delete this recording?</div>
+            <div class="dialog-body">14:32 · 1.02 GB. It has not been uploaded, and this cannot be undone.</div>
+            <div class="dialog-actions">
+              <button class="btn btn-secondary">Keep</button>
+              <button class="btn btn-primary">Delete</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="ann">Confirm only when the file was never uploaded — the irreversible case. Post-upload cleanup is automatic and silent (§18), so this dialog appears at most once per recording.</div>
+    </div>
+  </div>
+  <p class="dv-next">Try next: "add a Telegram token setup screen" · "make Delete destructive-red" · "drop the confirmation dialog"</p>
+</section>
+
+<section class="dv-turn" id="t4">
+  <div class="dv-thd"><a class="dv-tid" href="#t4">04</a><span class="dv-tname">Settings and system states</span></div>
+  <div class="dv-opts">
+
+    <div class="dv-opt" id="1m">
+      <div class="dv-olabel"><a class="dv-oid" href="#1m">1m</a>Settings — destination and storage only, §15</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Settings</span></div>
+        <div class="pad" style="display:flex;flex-direction:column;gap:16px">
+          <div>
+            <span class="k">Upload destination</span>
+            <div style="display:flex;flex-direction:column;gap:10px;margin-top:9px">
+              <label class="radio" style="justify-content:space-between"><span class="rw"><input type="radio" name="d"><span class="dot" style="border-color:var(--color-accent);background:var(--color-accent);box-shadow:inset 0 0 0 4px var(--color-bg)"></span>Google Drive</span></label>
+              <div class="mono" style="margin-left:24px">a.petrov@example.com · drive.file scope</div>
+              <label class="radio" style="justify-content:space-between;margin-top:4px"><span class="rw"><input type="radio" name="d"><span class="dot"></span>Telegram</span><span class="tag tag-outline">50 MB max</span></label>
+              <div class="mono" style="margin-left:24px">Hosted Bot API — long recordings will fail preflight</div>
+            </div>
+          </div>
+          <hr class="hr" style="margin:0">
+          <div class="field"><label>Local recordings folder</label>
+            <div class="rw" style="gap:8px"><input class="input" value="~/Movies/Recorder" readonly><button class="btn btn-secondary">Choose</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="ann">Entry points: Change beside Send to in <a class="dv-oid" href="#1c">1c</a>, and the gear in its titlebar — the same panel window pushed as a second route, so there is no second window to manage. Quality, frame rate and cursor are not repeated here: they are per-session choices made in <a class="dv-oid" href="#1c">1c</a>, which persists its last values. Settings holds only what outlives a session — destination, account, storage. One active destination per Send (§15). Each destination row surfaces its own <code>UploadCapabilities</code> — the 50 MB tag is read from the destination, not hard-coded in the settings screen, so a Local Bot API URL removes it.</div>
+    </div>
+
+    <div class="dv-opt" id="1n">
+      <div class="dv-olabel"><a class="dv-oid" href="#1n">1n</a>Startup recovery — shown instead of <a class="dv-oid" href="#1c">1c</a> at launch, §18</div>
+      <div class="win" style="width:420px">
+        <div class="tb"><span class="tl"><i></i><i></i><i></i></span><span class="tbt">Recorder</span></div>
+        <div class="pad">
+          <span class="k">Unfinished recording found</span>
+          <div class="blueprint" style="padding:11px;margin:11px 0 13px">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="mono" style="font-size:11.5px;color:var(--color-text)">recording-8f2a11.part</div>
+            <div class="mono" style="margin-top:4px">yesterday 18:04 · 412 MB · not finalized</div>
+          </div>
+          <p style="font-size:12.5px;color:rgba(29,31,32,.7);margin-bottom:13px">The app closed before this recording was written out. Finalizing may recover most of it; nothing is deleted unless you choose to.</p>
+          <div class="rw" style="gap:8px">
+            <button class="btn btn-primary" style="flex:1;height:38px">Try to finalize</button>
+            <button class="btn btn-secondary" style="height:38px">Keep as is</button>
+          </div>
+          <button class="btn btn-ghost btn-block" style="font-size:12px">Discard file</button>
+        </div>
+      </div>
+      <div class="ann">Shown once at launch when a <code>.part</code> artifact is detected. Never auto-deletes, never auto-finalizes — data-loss behavior stays explicit and user-initiated (§18).</div>
+    </div>
+  </div>
+  <p class="dv-next">Try next: "add a Telegram configuration section to <a class="dv-oid" href="#1m">1m</a>" · "show the diagnostics/log-export screen" · "turn this set into a clickable prototype"</p>
+</section>
+</body>
+</html>

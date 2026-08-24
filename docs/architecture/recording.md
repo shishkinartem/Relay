@@ -1,0 +1,139 @@
+# Recording Architecture
+
+## Scope
+
+Defines the recorder/session domain. Product UX details remain in `../../TECHNICAL_SPEC.md`.
+
+## MVP source
+
+MVP records one entire screen or one selected application window.
+The display source is the default.
+
+Domain model remains extensible:
+
+```text
+CaptureSource
+├── Display   // default
+├── Window
+└── Region    // future
+```
+
+Source selection is a custom in-application list — displays first, then windows.
+See `TECHNICAL_SPEC.md` §4.1 and
+`../adr/2026-08-22-capture-source-scope-and-selection-ux.md`.
+
+## Session states
+
+Conceptual lifecycle:
+
+```text
+idle
+→ selectingSource
+→ preparing
+→ recording ⇄ paused
+→ stopping
+→ finalizing
+→ ready
+→ uploading/deleting
+→ idle
+```
+
+Errors are typed states/results rather than arbitrary UI strings.
+
+## Core invariants
+
+- control overlay never appears in recorded output — in display mode explicit
+  capture-filter exclusion is the only mechanism enforcing this;
+- the camera preview overlay is excluded on the same terms;
+- the control strip docks to the display's *usable* area — under the menu bar,
+  above the taskbar. The menu-bar band contains the notch on a notched Mac,
+  where a control is neither drawn nor clickable;
+- the two overlays are native always-on-top panels, each hosting its own
+  secondary Flutter engine — which is why their entry points carry
+  `@pragma('vm:entry-point')`, why their root widget must supply its own
+  `Directionality`, and why they run on `OverlayBinding`. See
+  `docs/adr/2026-08-23-overlay-windows-as-secondary-flutter-engines.md`;
+- the control strip is one size in every session state, and its host window is
+  restored to the last measured size every time the strip is shown again. The
+  overlay engine outlives a session and only reports a size when its own content
+  changes, so a second recording would otherwise clip Pause and Stop outside the
+  window;
+- **an overlay panel is driven through exactly one size per show, and is never
+  resized while it is off screen.** The last measured size is substituted into
+  the placement *before* it is applied, never applied after it. A window hosting
+  a Flutter view blocks the platform thread on each resize until that engine
+  commits a frame at the new size, so every distinct size is a real rendered
+  frame; alternating two sizes in one main-loop turn can hand the engine a back
+  buffer of the wrong size, and the render target that results has no colour
+  attachment. See `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md`;
+- overlay placement is resolved against the display the main application window
+  was on when the session started (§5). That window is hidden for the whole
+  session, so the display is pinned at the first show rather than re-resolved
+  per call — otherwise anything placed later falls back to whichever display has
+  keyboard focus, which is the one being recorded, not the one §5 names;
+- the finished session is released when the user leaves the post-recording
+  screen, not at process exit. `releaseSession` is a distinct call from `abort`,
+  which platforms may refuse once a file is finalized, and from `dispose`, which
+  ends the platform with the process;
+- cursor is present;
+- mic default ON;
+- camera default OFF;
+- system audio default ON;
+- camera may toggle during recording;
+- microphone may toggle during recording;
+- system audio may toggle during recording;
+- failed upload does not destroy the finalized local file.
+
+## Local file lifecycle
+
+Write incrementally to disk.
+
+Recommended lifecycle:
+
+```text
+recording-<id>.part
+→ capture/encode/mux
+→ successful finalize
+→ recording-<id>.mp4
+→ Send or Delete
+```
+
+Never keep the full recording in RAM.
+
+Local deletion is allowed only after:
+
+1. explicit user Delete; or
+2. confirmed upload success.
+
+Do not delete on upload start, bytes-sent completion, connection close, or assumed success.
+
+## Recovery
+
+On startup, detect incomplete artifacts. Do not silently delete data that may be recoverable.
+
+The exact user-facing recovery UX may remain minimal in MVP, but data-loss behavior must be explicit.
+
+## Idempotency/race safety
+
+Operations such as these must be idempotent or explicitly guarded:
+
+- `Recorder.stop()` — finalizes and returns the `RecordingFile`
+- `Recorder.abort()` — ends a session without producing an output file
+- `Recorder.releaseSession()` — releases the capture session, not the plugin
+- `Recorder.dispose()`
+- `RecordingStore.delete(file, DeletionReason)` — deletion always states a reason;
+  there is deliberately no unqualified delete on the store
+
+Double-clicks, retries, cancellation races, or repeated callbacks must not corrupt the output or create contradictory states.
+
+## TBDs inherited from product spec
+
+Do not silently resolve:
+
+- exact pause timeline semantics;
+- output policy when source dimensions/aspect ratio change (displays included);
+- source-close UX;
+- minimum supported OS versions.
+
+Resolved 2026-08-22, no longer open: source-selection UX, camera PiP geometry,
+Delete confirmation. See `../adr/`.

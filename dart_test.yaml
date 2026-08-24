@@ -1,0 +1,12 @@
+tags:
+  # Renders every screen offscreen for the design comparison the UI Definition
+  # of Done requires. Not an assertion suite, and slow enough to be opt-in:
+  #   flutter test test/tools/render_screens_test.dart --run-skipped
+  design-review:
+    skip: "opt-in: run test/tools/render_screens_test.dart with --run-skipped"
+
+  # Real capture against the host OS. Needs a granted screen-recording
+  # permission and a windowing session:
+  #   flutter test integration_test -d macos --run-skipped
+  platform:
+    skip: "opt-in: run with -d <device> --run-skipped"

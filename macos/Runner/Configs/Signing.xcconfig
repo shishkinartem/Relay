@@ -1,0 +1,26 @@
+// Code signing for the macOS target.
+//
+// macOS keys TCC permissions — screen recording above all — to the signing
+// identity. An ad-hoc signature ("-") changes on every build, so each rebuild
+// looks like a different application and a granted permission stops applying.
+// Signing with a stable identity is what makes the permission survive a
+// rebuild.
+//
+// Local override: create `macos/Runner/Configs/Signing.local.xcconfig` with
+// your own team, or set DEVELOPMENT_TEAM in Xcode's Signing & Capabilities.
+// That file is git-ignored.
+//
+// Building without an Apple account: set
+//     CODE_SIGN_IDENTITY = -
+//     CODE_SIGN_STYLE = Manual
+//     DEVELOPMENT_TEAM =
+// Everything still builds and runs; the permission has to be re-granted after
+// each rebuild, and a distributed copy is quarantined by Gatekeeper. Shipping a
+// DMG to other people needs a Developer ID Application certificate plus
+// notarization — see docs/development/compatibility-matrix.md.
+
+CODE_SIGN_IDENTITY = Apple Development
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM = X63B5429QJ
+
+#include? "Signing.local.xcconfig"
