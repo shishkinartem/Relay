@@ -2,16 +2,16 @@
 
 **Status:** Accepted — the rebuild question was settled by measurement on 2026-08-25
 **Scope:** diagnosing screen-recording, microphone and camera permission on macOS during development
-**Review when:** the signing identity changes, or `tool/install.sh` / `tool/reset-permissions.sh` change
+**Review when:** the signing identity changes, or `tool/reset-permissions.sh` changes
 
 Collected here because an agent debugging a permission failure reads `docs/`, not a
 380-line shell script.
 
-Provenance matters for this file. Most of it originated as commentary in
-`tool/install.sh` — **a script that has never been run on this machine**, so its claims
-carry no field experience. Every statement below was therefore re-verified directly
-against macOS 26.5 on 2026-08-25, and two of the original four claims did not survive;
-they are marked. Do not add anything here that you have not run.
+Provenance matters for this file. Most of it originated as commentary in an install
+script that had never actually been run, so its claims carried no field experience — two
+of the original four did not survive checking. Everything below was re-verified directly
+against macOS 26.5 on 2026-08-25, and the script itself has since been deleted. Do not
+add anything here that you have not run.
 
 ---
 
@@ -101,7 +101,7 @@ resolves to `/usr/bin/log` here.)
   -r -R -f -u -v -gc -dump -h`. There is **no `-domain` flag** — "domain" exists only as
   an argument to `-apps`, `-libs` and `-all` (`system`, `local`, `network`, `user`), so
   `-domain something` is not an option and must not be relied on. `-kill` is likewise
-  absent. Only `-f`, `-u` and `-dump` are used by `tool/install.sh`.
+  absent. Prefer `-f`, `-u` and `-dump`; treat anything else as version-dependent.
 - A copy in `/Applications` outranks any build-tree copy regardless of version. Leftover
   registrations are hygiene; a record whose bundle is gone is residue, and only
   `lsregister -u <path>` clears it.
@@ -119,8 +119,9 @@ Use `pgrep -x relay`, then `ps -o comm=` to confirm the executable path ends in
 `pgrep -f` matches whole command lines, and **measured here** `pgrep -fl Relay` returns
 `/usr/libexec/SidecarRelay` and every shell whose command line contains this repository's
 path — neither of which is the app. (`pgrep -f relay`, lower-case, matches nothing at
-all: the directory is `Relay` and the match is case-sensitive. `tool/install.sh` gives
-that as its reason, and the reason is wrong even though `-x` is still the right choice.)
+all: the directory is `Relay` and the match is case-sensitive — so the commonly given
+reason for avoiding `-f` here is itself wrong, even though `-x` is still the right
+choice.)
 
 ---
 
@@ -130,4 +131,4 @@ that as its reason, and the reason is wrong even though `-x` is still the right 
 - `docs/adr/2026-08-24-screen-recording-permission-applies-on-relaunch.md`
 - `docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md` — a denied mic or
   camera degrades the session instead of blocking it
-- `tool/install.sh`, `tool/reset-permissions.sh`
+- `tool/reset-permissions.sh`

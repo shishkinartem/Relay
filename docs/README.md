@@ -28,7 +28,7 @@ stays concise so permanent instructions do not crowd out task and code context.
 | `development/code-quality.md` | modularity, contracts, resource ownership, security |
 | `development/compatibility-matrix.md` | what is actually built and verified, per platform |
 | `development/macos-tcc-and-launchservices.md` | permission and launch-attribution diagnosis |
-| `development/how-to-install.md` | building, installing and distributing builds — **in Russian**; the only documentation of `tool/install.sh` and of the Windows packaging story |
+| `development/how-to-install.md` | building and distributing builds — **in Russian**; the only documentation of the Windows packaging story |
 
 ## Decisions
 
@@ -39,6 +39,6 @@ stays concise so permanent instructions do not crowd out task and code context.
 | Path | Covers |
 |---|---|
 | `../README.md` | running, building, permissions, connecting a destination, tests |
-| `../tool/` | `validate.sh`, `install.sh`, `package-dmg.sh`, `reset-permissions.sh` |
+| `../tool/` | `validate.sh`, `package-dmg.sh`, `reset-permissions.sh` |
 | `../design/README.md` | the vendored connected design, how to view and refresh it |
 | `../test/architecture_test.dart` | the layering rules, enforced rather than described |

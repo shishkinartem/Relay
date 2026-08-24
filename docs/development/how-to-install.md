@@ -62,11 +62,13 @@ open build/macos/Build/Products/Release/relay.app
 `Contents/MacOS/relay` (исполняемый файл), `Contents/Frameworks/` (движок
 Flutter и плагины), `Contents/Resources/`, `Contents/Info.plist`.
 
-Поставить к себе в `/Applications` — отдельным скриптом, он делает это
-безопасно (копия → проверка подписи → подмена, а не `cp` поверх):
+Ставить в `/Applications` не обязательно: запускать можно прямо из дерева
+сборки. Если всё-таки хочется — скопируйте bundle через `ditto` (он сохраняет
+xattr и подпись, в отличие от `cp -R`), а не поверх существующей копии:
 
 ```bash
-./tool/install.sh --release --build
+ditto build/macos/Build/Products/Release/relay.app /Applications/relay.app
+codesign --verify --deep --strict /Applications/relay.app
 ```
 
 ### Запускать только через `open`
@@ -112,7 +114,7 @@ Security → Screen & System Audio Recording, **и после этого при�
 
 | Что | Где | Переживает переустановку |
 |---|---|---|
-| Само приложение | `/Applications/relay.app` | заменяется |
+| Само приложение | `build/.../relay.app`, либо `/Applications/relay.app` | заменяется |
 | Записи | `~/Movies/Relay` | да |
 | Настройки | `~/Library/Application Support/com.relay.relay/settings.json` | да |
 | Пароли назначений | Связка ключей (Keychain) | да |
@@ -301,8 +303,8 @@ requirement — это `cdhash`, который меняется при кажд
 # разработка
 flutter run -d macos
 
-# боевая сборка + установка к себе
-./tool/install.sh --release --build
+# боевая сборка
+flutter build macos --release
 
 # DMG для отправки
 ./tool/package-dmg.sh --build

@@ -25,9 +25,8 @@
 # Development is notarization and distributability, not permission stability.
 # See docs/development/macos-tcc-and-launchservices.md.
 #
-# The DMG is built from the bundle that already exists, exactly as
-# tool/install.sh does, so what is shipped is what was tested. --build makes
-# that bundle first.
+# The DMG is built from the bundle that already exists, so what is shipped is
+# what was tested. --build makes that bundle first.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -149,7 +148,7 @@ trap cleanup EXIT
 step 'staging'
 # ditto rather than cp -R: it carries the extended attributes the signature
 # lives in, which cp -R silently drops — the copied bundle would then fail to
-# verify (tool/install.sh has the same note).
+# verify.
 ditto "$SRC" "$STAGE/relay.app"
 # The /Applications symlink is what makes the window a drag-and-drop installer.
 ln -s /Applications "$STAGE/Applications"
