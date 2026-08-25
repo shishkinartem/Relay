@@ -23,12 +23,19 @@ stays concise so permanent instructions do not crowd out task and code context.
 
 | Doc | Covers |
 |---|---|
+| `development/running-locally.md` | building and running a local macOS build, permissions, packaging |
 | `development/testing.md` | what to run, the merge gate, coverage, release readiness |
 | `development/design-system.md` | tokens, components, and the UI Definition of Done |
 | `development/code-quality.md` | modularity, contracts, resource ownership, security |
 | `development/compatibility-matrix.md` | what is actually built and verified, per platform |
 | `development/macos-tcc-and-launchservices.md` | permission and launch-attribution diagnosis |
 | `development/how-to-install.md` | building and distributing builds — **in Russian**; the only documentation of the Windows packaging story |
+
+## Using it
+
+| Doc | Covers |
+|---|---|
+| `upload-destinations.md` | connecting Telegram or WebDAV, and lifting Telegram's 50 MB limit |
 
 ## Decisions
 

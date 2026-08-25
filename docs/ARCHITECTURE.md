@@ -36,6 +36,31 @@ Flutter application
           └── WebDAV
 ```
 
+## Repository layout
+
+```text
+lib/
+├── app/                  composition root, shell, state-driven routing
+├── core/                 settings, logging, formatting, environment, errors
+├── design_system/        tokens, icons, components — ported from design/_ds
+├── features/
+│   ├── recorder/         session state machine, orchestration, screens
+│   ├── settings/
+│   └── post_recording/   ready, send, delete
+└── upload/               coordinator, registry, credential storage
+
+packages/
+├── recorder_platform_interface/   the Flutter ↔ native contract, once
+├── recorder_macos/                ScreenCaptureKit, AVFoundation, VideoToolbox
+├── recorder_windows/              Windows.Graphics.Capture, WASAPI, Media Foundation
+├── upload_core/                   destination-agnostic upload contract
+├── upload_telegram/
+└── upload_webdav/
+```
+
+Feature code depends on `recorder_platform_interface` and `upload_core` only.
+It never imports a platform API, and never imports Telegram or WebDAV.
+
 ## Expected extension axes
 
 - `CaptureSource`

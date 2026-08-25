@@ -102,6 +102,22 @@ NOT RUN: tool/package-dmg.sh notarization path
 Reason: no Developer ID certificate on this host.
 ```
 
+## Known gaps
+
+- **Windows is written but not built.** No MSVC toolchain on the development
+  host — see *Not verified* above.
+- **Open specification decisions** are implemented conservatively and marked in
+  code rather than silently resolved: §30.3 (non-16:9 sources), §30.4 (pause
+  timeline — implemented as "paused time is excluded", the recommendation),
+  §30.7 (main window changing display mid-recording), §30.8 / §30.9 (minimum OS
+  versions).
+- **Design gaps** the canvas does not cover — `preparing`, `stopping`,
+  `finalizing`, `deleting` and the fatal capture errors — are built from
+  existing components only, and marked `design gap:` in the source.
+- **Soak tests (§24)** have not been run.
+- **No licence file yet.** Without one the default is "all rights reserved", which
+  blocks reuse — add one before making the repository public if that is not intended.
+
 ## macOS packaging notes
 
 **The App Sandbox is off.** Recordings are written to `~/Movies/Relay`, which the

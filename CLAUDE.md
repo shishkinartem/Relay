@@ -21,17 +21,14 @@ Authority depends on the decision, not on a global ranking.
 | Layering and platform isolation | `test/architecture_test.dart` | It is executable. A doc that disagrees with the gate is the stale one. |
 | Everything else | the docs routed below, then existing conventions | — |
 
-Two standing rules:
-
-- A `TBD` or a `§30` open item in `TECHNICAL_SPEC.md` is unresolved on purpose. Surface it;
-  do not invent an answer.
-- A spec **summary table** (§2, §31) that disagrees with the numbered section body is the
-  stale side — digests drift first.
+Two standing rules: a `TBD` or `§30` open item in `TECHNICAL_SPEC.md` is unresolved on
+purpose — surface it, do not invent an answer; and a spec **summary table** (§2, §31) that
+disagrees with the numbered section body is the stale side, because digests drift first.
 
 ## Read before coding
 
-Consult `TECHNICAL_SPEC.md` for the product behavior your task touches; read only the
-relevant sections. Then read only the relevant detailed doc:
+Consult `TECHNICAL_SPEC.md` for the behavior your task touches — relevant sections only.
+Then the relevant detailed doc:
 
 | Task | Doc |
 |---|---|
@@ -45,7 +42,8 @@ relevant sections. Then read only the relevant detailed doc:
 | what is actually built and verified per platform | `docs/development/compatibility-matrix.md` |
 | macOS permissions, TCC, LaunchServices | `docs/development/macos-tcc-and-launchservices.md` |
 | architecture, scalability, security, review | `docs/development/code-quality.md` |
-| building, installing, packaging, distribution | `docs/development/how-to-install.md` (Russian), `README.md`, `tool/` |
+| running locally, permissions, packaging | `docs/development/running-locally.md`; `docs/development/how-to-install.md` (Russian) |
+| connecting a destination as a user | `docs/upload-destinations.md` |
 
 Full index: `docs/README.md`. Decision index: `docs/adr/README.md`.
 
@@ -53,7 +51,7 @@ For UI work, inspect the relevant connected design screen/component before imple
 
 ## Core product invariants
 
-A digest of `TECHNICAL_SPEC.md` kept here because it is needed on nearly every task. When
+A digest of `TECHNICAL_SPEC.md`, kept here because it is needed on nearly every task. If
 it disagrees with the spec-as-amended, the spec wins and this list needs fixing.
 
 - MVP platforms: macOS and Windows.
@@ -164,11 +162,10 @@ A test that was not run is not considered passed. Standing gaps belong in
 
 ## Destructive commands
 
-`tool/reset-permissions.sh` runs `tccutil reset`, which irreversibly deletes this
-machine's screen-recording, microphone and camera grants. It is the right tool **only for
-an ad-hoc signed build**. An identity-signed build keeps its grant across rebuilds, so
-running it there destroys a working grant for nothing — a denial on such a build is
-almost always the launch method. Diagnose first:
+`tool/reset-permissions.sh` runs `tccutil reset`, irreversibly deleting this machine's
+screen-recording, microphone and camera grants. It is right **only for an ad-hoc signed
+build**: an identity-signed one keeps its grant across rebuilds, so running it there
+destroys a working grant for nothing. Diagnose the launch method first —
 `docs/development/macos-tcc-and-launchservices.md`.
 
 ## Definition of Done
