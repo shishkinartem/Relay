@@ -128,15 +128,18 @@ Not run ≠ passed.
 | `native-windows` | cmake + ctest |
 | `build-macos` | unsigned debug build + artefact smoke check |
 | `build-windows` | debug build + artefact smoke check |
-| `integration-macos` | `flutter test integration_test -d macos --run-skipped`, then fails if the suite executed zero tests |
 | `secret-scan` | no tracked `.env`/`credentials.json`/`client_secret*`; no bot-token-shaped literal (`[0-9]{8,}:[A-Za-z0-9_-]{30,}`) under `lib packages macos windows` |
 
-**What `integration-macos` does and does not prove.** A hosted runner holds no
-screen-recording grant, so three of the five tests self-skip. The two that run assert
-that a platform implementation is registered and that both overlay windows reach the
-capture exclusion list — the §6 invariant. Real capture, Pause/Resume, `.part`
-finalization and A/V duration are still verified **only** by running the suite locally on
-a machine with the grant. There is no Windows integration test at all.
+**CI does not run `integration_test/`, and cannot.** It was tried and reverted: with
+`--run-skipped` the suite hangs indefinitely instead of finishing — 1h35m on a hosted
+runner before a later push cancelled it, and the same hang locally on a machine that does
+hold the grant. Without the flag the `platform` tag skips every test and the job is a
+false green, which is worse than no job.
+
+So real capture, overlay exclusion, Pause/Resume, `.part` finalization and A/V duration
+are verified **only** by running the suite by hand and watching it. There is no Windows
+integration test at all. Every job now carries `timeout-minutes: 25` so a hang can never
+again run to GitHub's six-hour ceiling.
 
 `secret-scan` does not scan root `test/`, which is why the token-shaped fixtures in
 `test/core/logging/` are allowed. Copying one into any `packages/*/test/` file turns CI

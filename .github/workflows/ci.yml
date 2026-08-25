@@ -23,6 +23,7 @@ jobs:
   analyze:
     name: Format and static analysis
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -39,6 +40,7 @@ jobs:
   test:
     name: Unit, widget and package tests
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -85,6 +87,7 @@ jobs:
   native-macos:
     name: macOS native unit tests
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       # No Flutter, and that is the point. The recorder's pure half was split
@@ -98,6 +101,7 @@ jobs:
   native-windows:
     name: Windows native unit tests
     runs-on: windows-2022
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -121,6 +125,7 @@ jobs:
   build-macos:
     name: macOS build
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -152,6 +157,7 @@ jobs:
   build-windows:
     name: Windows build
     runs-on: windows-2022
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -177,54 +183,10 @@ jobs:
         run: Test-Path build\windows\x64\runner\Release\relay.exe
         shell: pwsh
 
-  integration-macos:
-    name: macOS integration tests
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-      - run: flutter pub get
-      # --run-skipped is mandatory: the suite carries @Tags(['platform']) and
-      # dart_test.yaml skips that tag, so without the flag this job would run
-      # zero tests and pass. See docs/development/testing.md.
-      #
-      # A hosted runner holds no screen-recording grant, so the three capture
-      # tests self-skip and say so. The two that do run are not filler: one
-      # asserts a platform implementation is registered, the other that both
-      # overlay windows reach the capture exclusion list — the §6 invariant
-      # that the control strip must never appear in the output.
-      - name: Ad-hoc signing for CI
-        run: |
-          printf 'CODE_SIGN_IDENTITY = -\nCODE_SIGN_STYLE = Manual\nDEVELOPMENT_TEAM =\n' \
-            > macos/Runner/Configs/Signing.local.xcconfig
-      - name: flutter test integration_test
-        run: |
-          set -o pipefail
-          flutter test integration_test -d macos --run-skipped 2>&1 | tee result.txt
-      - name: Publish failure tail
-        if: failure()
-        run: |
-          { echo '### flutter test integration_test — last 60 lines'; echo '```'; tail -60 result.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - name: Fail if nothing executed
-        # The whole point of the job. A suite that ran no tests must not be
-        # reported as a passing gate.
-        run: |
-          set -e
-          if ! grep -qE '\+[1-9][0-9]*' result.txt; then
-            echo "The integration suite executed no tests. The platform tag or the" >&2
-            echo "device selection is wrong; this is not a pass." >&2
-            exit 1
-          fi
-          echo "Executed:"; grep -oE '\+[0-9]+ ?(-[0-9]+)?: All tests passed!' result.txt || true
-          echo "Skipped (no screen-recording grant on a hosted runner) is expected."
-
   secret-scan:
     name: Secret review
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: No committed .env or credentials

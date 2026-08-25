@@ -95,6 +95,13 @@ be compiled and a mid-session abort confirmed recoverable before release.
 NOT RUN: Windows integration tests
 Reason: same.
 
+NOT RUN: integration_test/ in CI
+Reason: `flutter test integration_test -d macos --run-skipped` does not terminate. Measured
+2026-08-25: 1h35m on a macos-15 runner with no output, killed only by the next push, and
+the same hang locally on a host that does hold the screen-recording grant. Without
+--run-skipped the `platform` tag skips everything and the job passes having run nothing.
+The suite is therefore run by hand and watched. The hang itself is undiagnosed.
+
 NOT RUN: §24 soak tests (60 min 1080p30, 60 min 1080p60, disk-full, network loss)
 Reason: each run exceeds an interactive session; they are release gates, not per-change gates.
 
