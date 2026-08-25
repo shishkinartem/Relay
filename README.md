@@ -47,13 +47,14 @@ Needs Flutter 3.47.1.
 
 ```bash
 flutter pub get
-flutter build macos --debug
-open build/macos/Build/Products/Debug/relay.app
+flutter build macos --release
+open build/macos/Build/Products/Release/relay.app
 ```
 
-Launch it with `open`, not by running the binary inside the bundle: macOS attributes
-screen-recording permission to the *responsible* process, so a binary started from a shell
-is judged as that shell and Relay will see no screens.
+`open` launches it as an application, exactly like double-clicking it in Finder. Do not
+run the binary *inside* the bundle (`…/Contents/MacOS/relay`): macOS attributes
+screen-recording permission to the responsible process, and a binary exec'd from a shell is
+judged as that shell — Relay will see no screens.
 
 Grant screen recording on first launch, then **relaunch** — macOS only applies it at the
 next start.
@@ -90,7 +91,8 @@ exactly what is and is not verified. Linux is deferred by design.
 ```
 
 Behavioural changes need tests; anything expensive to reverse needs an
-[ADR](docs/adr/README.md). House rules are in [`CLAUDE.md`](CLAUDE.md).
+[ADR](docs/adr/README.md). House rules are in
+[`docs/development/code-quality.md`](docs/development/code-quality.md).
 
 ## Licence
 

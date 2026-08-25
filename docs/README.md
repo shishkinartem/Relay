@@ -2,11 +2,11 @@
 
 Start with:
 
-1. `../CLAUDE.md` — always-on instructions, sources of truth, routing, validation
-2. `../TECHNICAL_SPEC.md` — product and technical behavior, as amended by accepted ADRs
+1. `../TECHNICAL_SPEC.md` — product and technical behavior, as amended by accepted ADRs
+2. `../CLAUDE.md` — always-on agent instructions: sources of truth, routing, validation.
+   Deliberately untracked (`.gitignore`); it exists in a working copy, not on GitHub.
 
-Then load only the topic relevant to the task. This split is intentional: `CLAUDE.md`
-stays concise so permanent instructions do not crowd out task and code context.
+Then load only the topic relevant to the task.
 
 ## Architecture
 

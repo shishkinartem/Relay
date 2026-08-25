@@ -155,8 +155,7 @@ Do not mix broad formatting/refactoring with sensitive media changes unless requ
 
 Before finalizing:
 
-- re-read every file you changed and list them by path — this repository is not
-  under git, so `git diff` and `git status` are unavailable;
+- inspect the diff;
 - verify no credentials/generated junk were added;
 - run required tests;
 - report what was actually tested;

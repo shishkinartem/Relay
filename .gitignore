@@ -49,6 +49,11 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 
+# Agent instruction files — local working notes, not part of the published project.
+# The pattern has no slash, so it matches at every level (packages/CLAUDE.md too).
+CLAUDE.md
+CLAUDE.local.md
+
 # Relay — secrets and local artifacts
 # `cov/` is the per-package coverage output directory; `coverage/` above only
 # catches the conventionally named one.

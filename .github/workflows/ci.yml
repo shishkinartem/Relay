@@ -141,13 +141,13 @@ jobs:
       - name: flutter build macos
         run: |
           set -o pipefail
-          flutter build macos --debug --dart-define=CI=true 2>&1 | tee build-macos.log
+          flutter build macos --release --dart-define=CI=true 2>&1 | tee build-macos.log
       - name: Publish failure tail
         if: failure()
         run: |
           { echo '### flutter build macos — last 60 lines'; echo '```'; tail -60 build-macos.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Artefact smoke check
-        run: test -d build/macos/Build/Products/Debug/relay.app
+        run: test -d build/macos/Build/Products/Release/relay.app
 
   build-windows:
     name: Windows build
@@ -163,7 +163,7 @@ jobs:
       - name: flutter build windows
         shell: pwsh
         run: |
-          flutter build windows --debug 2>&1 | Tee-Object build-windows.log
+          flutter build windows --release 2>&1 | Tee-Object build-windows.log
           exit $LASTEXITCODE
       - name: Publish failure tail
         if: failure()
@@ -174,7 +174,7 @@ jobs:
           Get-Content build-windows.log -Tail 120 >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
       - name: Artefact smoke check
-        run: Test-Path build\windows\x64\runner\Debug\relay.exe
+        run: Test-Path build\windows\x64\runner\Release\relay.exe
         shell: pwsh
 
   integration-macos:

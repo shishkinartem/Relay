@@ -54,7 +54,7 @@ requirement — and both satisfy a grant given to either.
 Check which case you are in:
 
 ```bash
-codesign -d -r- build/macos/Build/Products/Debug/relay.app
+codesign -d -r- build/macos/Build/Products/Release/relay.app
 ```
 
 `macos/Runner/Configs/Signing.xcconfig` selects the identity, overridable per machine via

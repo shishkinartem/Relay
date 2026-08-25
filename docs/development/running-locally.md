@@ -14,9 +14,12 @@ flutter run -d macos
 Or the built app:
 
 ```bash
-flutter build macos --debug
-open build/macos/Build/Products/Debug/relay.app
+flutter build macos --release
+open build/macos/Build/Products/Release/relay.app
 ```
+
+(`--debug` builds and runs the same way from `…/Debug/relay.app`; the permission story is
+identical — the designated requirement names the certificate, not the build.)
 
 Launch it with `open`, not by running the binary directly. macOS attributes
 screen-recording permission to the *responsible* process, so a binary started

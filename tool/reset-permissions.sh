@@ -13,7 +13,7 @@
 # so a rebuild keeps its grant — and running this throws that grant away for
 # nothing. Measured on this host 2026-08-25; check yours with:
 #
-#   codesign -d -r- build/macos/Build/Products/Debug/relay.app
+#   codesign -d -r- build/macos/Build/Products/Release/relay.app
 #
 # A denial on an identity-signed build is almost always the launch method, not
 # the signature: a binary exec'd from a shell (`flutter run`, or any direct
