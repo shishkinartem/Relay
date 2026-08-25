@@ -105,7 +105,18 @@ jobs:
       - name: Build
         run: cmake --build build/win-tests --config Debug
       - name: Test
-        run: ctest --test-dir build/win-tests -C Debug --output-on-failure
+        shell: pwsh
+        run: |
+          ctest --test-dir build/win-tests -C Debug --output-on-failure 2>&1 | Tee-Object ctest.log
+          exit $LASTEXITCODE
+      - name: Publish failure tail
+        if: failure()
+        shell: pwsh
+        run: |
+          "### ctest — last 120 lines" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          Get-Content ctest.log -Tail 120 >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
 
   build-macos:
     name: macOS build
@@ -118,16 +129,23 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      # CI has no signing identity; build unsigned rather than failing on the
-      # development-team setting the local project carries.
+      # The runner has no Apple certificate, and Signing.xcconfig pins an
+      # Automatic team. CODE_SIGNING_ALLOWED as an env var is not an xcodebuild
+      # build setting, so exporting it does nothing — use the project's own
+      # override file instead: Signing.local.xcconfig is git-ignored, included
+      # by Signing.xcconfig, and ad-hoc manual signing needs no certificate.
+      - name: Ad-hoc signing for CI
+        run: |
+          printf 'CODE_SIGN_IDENTITY = -\nCODE_SIGN_STYLE = Manual\nDEVELOPMENT_TEAM =\n' \
+            > macos/Runner/Configs/Signing.local.xcconfig
       - name: flutter build macos
-        run: >-
-          flutter build macos --debug
-          --dart-define=CI=true
-          || flutter build macos --debug
-        env:
-          CODE_SIGNING_ALLOWED: 'NO'
-          CODE_SIGNING_REQUIRED: 'NO'
+        run: |
+          set -o pipefail
+          flutter build macos --debug --dart-define=CI=true 2>&1 | tee build-macos.log
+      - name: Publish failure tail
+        if: failure()
+        run: |
+          { echo '### flutter build macos — last 60 lines'; echo '```'; tail -60 build-macos.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Artefact smoke check
         run: test -d build/macos/Build/Products/Debug/relay.app
 
@@ -143,7 +161,18 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: flutter build windows
-        run: flutter build windows --debug
+        shell: pwsh
+        run: |
+          flutter build windows --debug 2>&1 | Tee-Object build-windows.log
+          exit $LASTEXITCODE
+      - name: Publish failure tail
+        if: failure()
+        shell: pwsh
+        run: |
+          "### flutter build windows — last 120 lines" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          Get-Content build-windows.log -Tail 120 >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
       - name: Artefact smoke check
         run: Test-Path build\windows\x64\runner\Debug\relay.exe
         shell: pwsh
@@ -168,10 +197,18 @@ jobs:
       # asserts a platform implementation is registered, the other that both
       # overlay windows reach the capture exclusion list — the §6 invariant
       # that the control strip must never appear in the output.
+      - name: Ad-hoc signing for CI
+        run: |
+          printf 'CODE_SIGN_IDENTITY = -\nCODE_SIGN_STYLE = Manual\nDEVELOPMENT_TEAM =\n' \
+            > macos/Runner/Configs/Signing.local.xcconfig
       - name: flutter test integration_test
         run: |
           set -o pipefail
           flutter test integration_test -d macos --run-skipped 2>&1 | tee result.txt
+      - name: Publish failure tail
+        if: failure()
+        run: |
+          { echo '### flutter test integration_test — last 60 lines'; echo '```'; tail -60 result.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Fail if nothing executed
         # The whole point of the job. A suite that ran no tests must not be
         # reported as a passing gate.
