@@ -25,4 +25,9 @@ abstract final class RecorderChannels {
 abstract final class OverlayEntrypoints {
   static const String controlStrip = 'controlStripMain';
   static const String cameraPreview = 'cameraPreviewMain';
+
+  /// The device list a chevron opens (§33.4). Its own engine for the same
+  /// reason the other two have one: it is a separate always-on-top window, and
+  /// it must be excluded from capture as they are (§6).
+  static const String inputMenu = 'inputMenuMain';
 }

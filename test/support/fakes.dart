@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show Offset;
 
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import 'package:relay/features/recorder/domain/local_recording_store.dart';
@@ -230,6 +231,46 @@ class FakeRecorder implements Recorder {
     meteredDevices.remove(kind);
   }
 
+  /// The device each input was swapped to while a session was running.
+  final Map<MediaDeviceKind, String?> liveDevices =
+      <MediaDeviceKind, String?>{};
+
+  RecorderException? failOnSelectDevice;
+
+  @override
+  Future<void> selectInputDevice(
+    MediaDeviceKind kind, {
+    String? deviceId,
+  }) async {
+    calls.add('selectInputDevice(${kind.name}, ${deviceId ?? 'default'})');
+    final RecorderException? failure = failOnSelectDevice;
+    if (failure != null) {
+      throw failure;
+    }
+    liveDevices[kind] = deviceId;
+  }
+
+  /// Every picture-in-picture geometry pushed mid-session.
+  final List<CameraOverlayConfiguration> cameraOverlays =
+      <CameraOverlayConfiguration>[];
+
+  /// What the host would report the preview's position to be.
+  Offset? reportedCameraPreviewPosition;
+
+  @override
+  Future<void> setCameraOverlay(
+    CameraOverlayConfiguration configuration,
+  ) async {
+    calls.add('setCameraOverlay(${configuration.preset.name})');
+    cameraOverlays.add(configuration);
+  }
+
+  @override
+  Future<Offset?> cameraPreviewPosition() async {
+    calls.add('cameraPreviewPosition');
+    return reportedCameraPreviewPosition;
+  }
+
   @override
   Future<RecorderCapabilities> getCapabilities() async {
     calls.add('getCapabilities');
@@ -445,6 +486,47 @@ class FakeOverlayWindowController implements OverlayWindowController {
   Future<OverlayStripPosition?> controlStripPosition() async {
     calls.add('controlStripPosition');
     return reportedStripPosition;
+  }
+
+  /// Every menu snapshot the host was asked to show or update.
+  final List<InputMenuOverlayState> menuStates = <InputMenuOverlayState>[];
+
+  /// Choices the menu window reports back, as the event channel would.
+  ///
+  /// Never closed, like `commandController` beside it: the harness discards the
+  /// whole fake, and closing a broadcast controller the view model is still
+  /// unsubscribing from races that teardown.
+  // ignore: close_sinks
+  final StreamController<InputMenuSelection> menuController =
+      StreamController<InputMenuSelection>.broadcast();
+
+  @override
+  Stream<InputMenuSelection> get menuSelections => menuController.stream;
+
+  @override
+  Future<void> showInputMenu(
+    OverlayPlacement placement,
+    InputMenuOverlayState state,
+  ) async {
+    calls.add('showInputMenu(${state.kind.name})');
+    menuStates.add(state);
+  }
+
+  @override
+  Future<void> updateInputMenu(InputMenuOverlayState state) async {
+    calls.add('updateInputMenu(${state.kind.name})');
+    menuStates.add(state);
+  }
+
+  @override
+  Future<void> hideInputMenu() async => calls.add('hideInputMenu');
+
+  final List<Offset> nudges = <Offset>[];
+
+  @override
+  Future<void> nudgeControlStrip(double dx, double dy) async {
+    nudges.add(Offset(dx, dy));
+    calls.add('nudgeControlStrip($dx, $dy)');
   }
 
   @override

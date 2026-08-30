@@ -11,8 +11,11 @@
 #include <winrt/base.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -45,6 +48,16 @@ class CameraCapture {
   bool Start(ID3D11Device* device, VideoCompositor* compositor,
              PreviewHandler on_preview, ErrorHandler on_error, std::string* error);
 
+  // Waits for the capture thread to settle on whether it has a stream, and
+  // reports what it settled on. False on a timeout as well as on a failure.
+  //
+  // Start() returns as soon as the thread exists — opening a Media Foundation
+  // source takes long enough that doing it on the caller's thread would stall
+  // whoever asked — so a swap that has to leave the previous camera running
+  // until the new one is really open has no other way to know (spec 33.2). Safe
+  // to call more than once; each call answers from the same settled result.
+  bool WaitUntilOpen(std::chrono::milliseconds timeout);
+
   // Idempotent.
   void Stop();
 
@@ -68,6 +81,8 @@ class CameraCapture {
                     int32_t stride);
   void ReportFailure(const std::string& message, HRESULT hr);
   void ReleaseResources();
+  // Releases whoever is waiting in WaitUntilOpen with the answer.
+  void SettleOpen(bool opened);
 
   winrt::com_ptr<ID3D11Device> device_;
   winrt::com_ptr<ID3D11DeviceContext> context_;
@@ -89,6 +104,14 @@ class CameraCapture {
   std::atomic<bool> stopping_{false};
   std::atomic<uint32_t> width_{0};
   std::atomic<uint32_t> height_{0};
+
+  // Whether the capture thread has decided it has a stream, and what it
+  // decided. Written once per run by that thread, read by whoever is waiting on
+  // the handshake above.
+  std::mutex open_mutex_;
+  std::condition_variable open_cv_;
+  bool open_settled_ = false;
+  bool opened_ = false;
 };
 
 }  // namespace relay

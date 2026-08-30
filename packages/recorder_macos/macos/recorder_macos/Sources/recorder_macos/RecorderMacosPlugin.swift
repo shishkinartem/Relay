@@ -66,6 +66,26 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     }
   }
 
+  /// What the live capture filter was built from, and what it actually
+  /// excludes (§6).
+  ///
+  /// `_filterExcludedIDs` is deliberately not "every panel we own": it is the
+  /// ids that were both ours *and* listed by the window server when the filter
+  /// was made, because those are the only ones a filter can hold. The
+  /// difference is what tells a panel that never reached the exclusion list
+  /// apart from one that is already in it.
+  ///
+  /// Behind a lock of their own: they are written from the `Task` `prepare`
+  /// runs on and read from the main thread, where the overlay callback that
+  /// triggers a rebuild fires. `sessionLock` is not reused for them — it guards
+  /// one reference and is held across nothing else, and widening it to cover a
+  /// second concern is how a lock starts covering a system call.
+  private let exclusionLock = NSLock()
+  private var _activeSourceId: String?
+  private var _filterExcludedIDs: Set<CGWindowID> = []
+  private var _exclusionRebuildInFlight = false
+  private var _exclusionRebuildPending = false
+
   /// Installs a session, releasing whatever it replaces.
   ///
   /// `prepare` used to assign straight over the previous session. If one was
@@ -82,6 +102,12 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     let previous = _session
     _session = next
     sessionLock.unlock()
+    if next == nil {
+      // Nothing left to re-point, and a source id that outlived its session
+      // would send the next overlay's appearance rebuilding a filter for a
+      // recording that is over.
+      forgetCaptureFilter()
+    }
     if let previous, previous !== next {
       await previous.release()
     }
@@ -149,6 +175,34 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
 
     overlays.onCommand = { [weak self] command in
       DispatchQueue.main.async { self?.overlayEventSink?(command) }
+    }
+
+    // A choice travels on the same channel as the commands, as a map. Dart
+    // decodes by shape — a String is a command, a Map is a choice — so a host
+    // that only ever emits names keeps working untouched (§33.4).
+    overlays.onMenuSelection = { [weak self] selection in
+      DispatchQueue.main.async { self?.overlayEventSink?(selection) }
+    }
+
+    // An overlay window just appeared, and it cannot be in the filter `prepare`
+    // built: that filter names the windows the window server was listing at the
+    // time, and every overlay — the strip, the preview, the input menu — is
+    // shown afterwards. Re-pointing the running capture is what makes the
+    // exclusion list the second mechanism §6 asks for rather than a list that
+    // happens to be empty.
+    overlays.onOverlayWindowsChanged = { [weak self] in
+      guard let self else { return }
+      Task { await self.refreshCaptureExclusions() }
+    }
+
+    // A drag of the preview *is* a drag of the picture-in-picture in display
+    // mode (design `1p`), so the compositor follows it here rather than waiting
+    // for the application to read the position back and push it: the drag ran
+    // inside AppKit's own loop, and a preview that has moved while the file has
+    // not is the disagreement §33.7 calls a defect.
+    overlays.onCameraPreviewMoved = { [weak self] _ in
+      guard let self, let overlay = self.overlays.cameraOverlay else { return }
+      self.session?.setCameraOverlay(overlay)
     }
 
     // Device lists change under the user: a webcam is unplugged, an iPhone
@@ -297,6 +351,35 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       session?.setSystemAudioEnabled(arguments["enabled"] as? Bool ?? false)
       result(nil)
 
+    case "selectInputDevice":
+      // Off the platform thread, like every other arm that talks to hardware:
+      // a swap is a `stopRunning()` and a `startRunning()`, seconds of either
+      // on a Bluetooth or Continuity input, and the control strip is a Flutter
+      // view driven from this thread.
+      let deviceKind = MediaDeviceKind(name: arguments["kind"] as? String)
+      let requestedId = arguments["deviceId"] as? String
+      Task {
+        await self.selectInputDevice(
+          deviceKind, deviceId: requestedId, result: result)
+      }
+
+    case "setCameraOverlay":
+      // Applied between frames, for the next one. The tile also *is* the
+      // preview window in display mode, so both move together or design `1p`
+      // stops being true (§33.5). Outside a session there is nothing to
+      // re-point: what the next recording opens is the configuration's business.
+      if let session {
+        let overlay = CameraOverlayConfiguration(map: arguments)
+        session.setCameraOverlay(overlay)
+        overlays.updateCameraPreview(
+          configuration: overlay, source: cameraTileSource())
+      }
+      result(nil)
+
+    case "cameraPreviewPosition":
+      // Null in window mode, where the preview is not the tile (design `1e`).
+      result(overlays.cameraPreviewPosition())
+
     case "recoverArtifact":
       Task { await self.recover(path: arguments["path"] as? String, result: result) }
 
@@ -342,6 +425,21 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     case "updateControlStrip":
       overlays.updateControlStrip(arguments)
       result(nil)
+    case "showInputMenu":
+      overlays.showInputMenu(
+        placement: arguments,
+        state: arguments["state"] as? [String: Any] ?? [:])
+      result(nil)
+    case "updateInputMenu":
+      overlays.updateInputMenu(arguments)
+      result(nil)
+    case "hideInputMenu":
+      overlays.hideInputMenu()
+      result(nil)
+    case "nudgeControlStrip":
+      overlays.nudgeControlStrip(
+        dx: arguments["dx"] as? Double ?? 0, dy: arguments["dy"] as? Double ?? 0)
+      result(nil)
     case "showCameraPreview":
       overlays.cameraFrameProvider = { [weak self] in
         self?.session?.cameraFrameProvider.copyLatestFrame()
@@ -352,7 +450,6 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       let overlay = (arguments["cameraOverlay"] as? [String: Any]).map {
         CameraOverlayConfiguration(map: $0)
       }
-      let cameraAspect = session?.cameraFrameProvider.aspectRatio ?? 16.0 / 9.0
       overlays.showCameraPreview(
         placement: arguments,
         configuration: overlay,
@@ -361,7 +458,7 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
         // display mode for a window recording too.
         matchesCompositedPip: arguments["matchesCompositedPip"] as? Bool ?? false,
         mirrored: overlay?.mirrorPreview ?? true,
-        aspectRatio: cameraAspect)
+        source: cameraTileSource())
       result(nil)
     case "hideCameraPreview":
       overlays.hideCameraPreview()
@@ -482,9 +579,10 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       await self.replaceSession(with: nil)
       let configuration = try RecordingConfiguration(map: arguments)
       let content = try await enumerator.shareableContent()
+      let requestedExclusions = overlays.excludedWindowIDs
       let (filter, _) = try enumerator.filter(
         forSourceId: configuration.sourceId,
-        excludedWindowIDs: overlays.excludedWindowIDs,
+        excludedWindowIDs: requestedExclusions,
         content: content)
 
       let session = RecordingSession(emit: { [weak self] event in
@@ -505,6 +603,13 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       }
       try session.prepare(configuration: configuration, filter: filter)
       await self.replaceSession(with: session)
+      // Recorded *after* the session is installed, because `replaceSession`
+      // with a new session leaves the previous one's record in place and a nil
+      // one clears it. What is recorded is what the filter really holds, which
+      // on a first recording is nothing at all: no overlay is on screen yet.
+      rememberCaptureFilter(
+        sourceId: configuration.sourceId, requested: requestedExclusions,
+        listedIn: content)
       await MainActor.run { result(nil) }
     } catch {
       await MainActor.run { result(Self.flutterError(error)) }
@@ -531,13 +636,163 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     await MainActor.run { result(nil) }
   }
 
+  /// The live device swap, off the platform thread. See the `handle` arm.
+  ///
+  /// Every kind answers, including the one macOS cannot choose: system audio is
+  /// the mix ScreenCaptureKit delivers and there is no endpoint to name
+  /// (§33.8). Falling through to `FlutterMethodNotImplemented` would reach Dart
+  /// as `unsupported` — a failure, rather than "there is nothing here to
+  /// choose". Outside a session it is a no-op for the same reason `prepare`
+  /// carries device ids at all.
+  private func selectInputDevice(
+    _ kind: MediaDeviceKind?, deviceId: String?, result: @escaping FlutterResult
+  ) async {
+    // The session's microphone may have stopped, restarted, or gone off
+    // entirely, and the meter reads either that capture or its own tap (§33.7).
+    defer { refreshMeterSource() }
+    if let kind, let session {
+      // The same handover `prepare` and the microphone toggle make: a meter
+      // whose own tap is open on a device the session is about to take is the
+      // one state §33.7 forbids outright, so the tap is closed *before* the
+      // swap and held closed until the deferred re-source above lifts it.
+      if kind == .microphone { await meter.yieldToSession() }
+      session.selectInputDevice(kind: kind, deviceId: deviceId)
+      if kind == .camera {
+        // A camera of another shape gives the tile another shape, and in
+        // display mode the preview *is* the tile (design `1p`). The tile's
+        // position and preset are untouched; only what they resolve to moves.
+        let source = cameraTileSource()
+        await MainActor.run {
+          self.overlays.updateCameraPreview(configuration: nil, source: source)
+        }
+      }
+    }
+    await MainActor.run { result(nil) }
+  }
+
+  /// What the host knows about the camera the live session holds.
+  ///
+  /// Zeroed with no session, where the tile has no camera to be capped against
+  /// and the configured width stands.
+  private func cameraTileSource() -> CameraTileSource {
+    guard let session else { return CameraTileSource() }
+    return CameraTileSource(
+      aspectRatio: session.cameraFrameProvider.aspectRatio,
+      pixelWidth: session.cameraFrameProvider.pixelWidth,
+      canvasWidth: session.outputCanvasSize.width)
+  }
+
   private func start(result: @escaping FlutterResult) async {
     do {
       try await currentSession().start()
+      // The strip, and the camera preview when there is one, were shown between
+      // `prepare` and here — so the stream started on a filter that names
+      // neither (§6). Not awaited: the capture is already running, the
+      // window-level `sharingType = .none` is already keeping both out of the
+      // frame, and the redundant half of the rule must not delay the answer to
+      // `start`.
+      Task { await self.refreshCaptureExclusions() }
       await MainActor.run { result(nil) }
     } catch {
       await MainActor.run { result(Self.flutterError(error)) }
     }
+  }
+
+  /// Re-points a live capture at a filter that excludes the overlay windows on
+  /// screen now, and never drops a request to (§6).
+  ///
+  /// A rebuild answers "is every overlay on screen *now* named in the filter?",
+  /// so a second announcement arriving while one is in flight is not a repeat
+  /// of it: the panel it is about appeared after the running rebuild had
+  /// already read the window list. Dropping it would leave that window out of
+  /// the exclusion list until something else happened to appear. It is
+  /// remembered, and the rebuild goes round once more instead — the same
+  /// coalescing `scheduleStripResize` does on the overlay side.
+  private func refreshCaptureExclusions() async {
+    exclusionLock.lock()
+    let running = _exclusionRebuildInFlight
+    _exclusionRebuildInFlight = true
+    if running { _exclusionRebuildPending = true }
+    exclusionLock.unlock()
+    guard !running else { return }
+
+    var again = true
+    while again {
+      await rebuildContentFilter()
+      exclusionLock.lock()
+      again = _exclusionRebuildPending
+      _exclusionRebuildPending = false
+      _exclusionRebuildInFlight = again
+      exclusionLock.unlock()
+    }
+  }
+
+  /// One rebuild, or nothing when the live filter is already complete.
+  ///
+  /// Whether it is needed at all is `CaptureExclusionPolicy`'s decision, in
+  /// `RecorderCore` where `swift test` executes it: a window source cannot show
+  /// an overlay in the first place, and an overlay already in the list must not
+  /// spend a `SCShareableContent` fetch every time a menu reopens.
+  ///
+  /// Every failure is swallowed. This is the second of §6's two mechanisms —
+  /// each panel's own `sharingType = .none` is untouched by anything here — so
+  /// a rebuild that will not apply is never a reason to fail, or to report,
+  /// a recording that is running.
+  private func rebuildContentFilter() async {
+    let panels = await MainActor.run {
+      (onScreen: self.overlays.onScreenWindowIDs, all: self.overlays.excludedWindowIDs)
+    }
+    exclusionLock.lock()
+    let sourceId = _activeSourceId
+    let excludedByFilter = _filterExcludedIDs
+    exclusionLock.unlock()
+
+    guard let sourceId, let session, session.isActive,
+      CaptureExclusionPolicy.needsFilterRebuild(
+        sourceId: sourceId, onScreenOverlayIDs: panels.onScreen,
+        excludedByFilter: excludedByFilter)
+    else { return }
+
+    do {
+      let content = try await enumerator.shareableContent()
+      let (filter, _) = try enumerator.filter(
+        forSourceId: sourceId, excludedWindowIDs: panels.all, content: content)
+      await session.updateContentFilter(filter)
+      // Only if this is still the recording it was for. A rebuild spans a
+      // system call, and a session released while it was in flight has already
+      // cleared the record — writing into it here would leave a finished
+      // recording's exclusions standing over the next one's.
+      rememberCaptureFilter(
+        sourceId: sourceId, requested: panels.all, listedIn: content,
+        onlyIfStillActive: true)
+    } catch {
+      // Nothing to do and nothing to say; see above.
+    }
+  }
+
+  /// Records what a filter just built actually excludes.
+  ///
+  /// The intersection, not the request: `SCContentFilter` can only be given
+  /// windows the shareable content lists, so an id of ours that was off screen
+  /// at that moment was silently dropped — and remembering it as excluded is
+  /// exactly how a window ends up in a recording with nobody noticing.
+  private func rememberCaptureFilter(
+    sourceId: String, requested: Set<CGWindowID>,
+    listedIn content: SCShareableContent, onlyIfStillActive: Bool = false
+  ) {
+    let listed = Set(content.windows.map { $0.windowID })
+    exclusionLock.lock()
+    defer { exclusionLock.unlock() }
+    if onlyIfStillActive, _activeSourceId != sourceId { return }
+    _activeSourceId = sourceId
+    _filterExcludedIDs = requested.intersection(listed)
+  }
+
+  private func forgetCaptureFilter() {
+    exclusionLock.lock()
+    _activeSourceId = nil
+    _filterExcludedIDs = []
+    exclusionLock.unlock()
   }
 
   private func stop(result: @escaping FlutterResult) async {

@@ -207,6 +207,55 @@ public enum OverlayPlacementGeometry {
       CGRect(origin: origin, size: frame.size), inVisibleFrame: visible)
   }
 
+  /// The strip moved by a keyboard nudge, settled exactly as a drag end is.
+  ///
+  /// §33.3's arrow keys, deferred from the drag itself: the same snap and the
+  /// same clamp, because a strip that lands somewhere a drag could not is a
+  /// second placement rule nobody asked for.
+  ///
+  /// The contract's deltas are top-left — a positive `dy` is *down* — and
+  /// AppKit is bottom-left, the flip `absoluteFrame` documents. A non-finite
+  /// delta moves nothing: a NaN origin makes AppKit place a panel nowhere.
+  public static func nudged(
+    _ frame: CGRect, dx: Double, dy: Double, inVisibleFrame visible: CGRect
+  ) -> CGRect {
+    guard dx.isFinite, dy.isFinite else {
+      return clamped(frame, inVisibleFrame: visible)
+    }
+    return snapped(
+      CGRect(
+        x: frame.minX + dx, y: frame.minY - dy, width: frame.width,
+        height: frame.height), inVisibleFrame: visible)
+  }
+
+  /// Where the input menu goes, relative to the strip that raised it (§33.4).
+  ///
+  /// Below the strip when there is room under it, above it otherwise;
+  /// horizontally centred on the control that asked for it, and clamped to the
+  /// usable area. "Below" is a *smaller* y here, AppKit being bottom-left.
+  ///
+  /// `anchorX` is the pressed control's centre in screen coordinates — only
+  /// Flutter knows where a chevron ended up inside the strip, so it travels
+  /// with the command that opened the menu. Without one the menu centres on the
+  /// strip, which is where a menu raised by anything but a chevron belongs.
+  ///
+  /// The clamp is what answers §33.7's "sheet would extend past the usable
+  /// area": it flips first, and only then pins, so a menu taller than either
+  /// side still lands somewhere clickable rather than half off the display.
+  public static func inputMenuFrame(
+    size: CGSize, anchorX: CGFloat?, stripFrame: CGRect, gap: Double,
+    inVisibleFrame visible: CGRect
+  ) -> CGRect {
+    let center = anchorX.flatMap { $0.isFinite ? $0 : nil } ?? stripFrame.midX
+    let below = stripFrame.minY - gap - size.height
+    let above = stripFrame.maxY + gap
+    let y = below >= visible.minY ? below : above
+    return clamped(
+      CGRect(
+        x: center - size.width / 2, y: y, width: size.width,
+        height: size.height), inVisibleFrame: visible)
+  }
+
   /// The nearest candidate within `distance`, or the value unchanged.
   private static func snap(
     _ value: CGFloat, to candidates: [CGFloat], within distance: Double

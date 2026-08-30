@@ -385,5 +385,11 @@ class _FakeDeviceProvider implements MediaDeviceProvider {
   }) async {}
 
   @override
+  Future<void> selectInputDevice(
+    MediaDeviceKind kind, {
+    String? deviceId,
+  }) async {}
+
+  @override
   Future<void> stopInputMetering(MediaDeviceKind kind) async {}
 }

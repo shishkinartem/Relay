@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -201,6 +202,490 @@ TEST(ResolvePipRect, TheTileStaysInsideTheCanvas) {
     EXPECT_GE(rect.y, 0) << "ratio " << ratio;
     EXPECT_LE(rect.x + rect.width, kCanvasWidth) << "ratio " << ratio;
     EXPECT_LE(rect.y + rect.height, kCanvasHeight) << "ratio " << ratio;
+  }
+}
+
+// ── presets, crop and mask (spec 33.5) ───────────────────────────────────────
+
+TEST(CameraPipPreset, EveryPresetKeepsItsWireSpelling) {
+  // These strings are CameraPipPreset.name in Dart and travel on the
+  // cameraOverlay map. A rename on either side is caught by nothing else.
+  EXPECT_EQ(std::string(CameraPipPresetName(CameraPipPreset::kCamera)), "camera");
+  EXPECT_EQ(std::string(CameraPipPresetName(CameraPipPreset::kSquare)), "square");
+  EXPECT_EQ(std::string(CameraPipPresetName(CameraPipPreset::kCircle)), "circle");
+  EXPECT_EQ(CameraPipPresetFromName("camera"), CameraPipPreset::kCamera);
+  EXPECT_EQ(CameraPipPresetFromName("square"), CameraPipPreset::kSquare);
+  EXPECT_EQ(CameraPipPresetFromName("circle"), CameraPipPreset::kCircle);
+}
+
+TEST(CameraPipPreset, AnUnknownPresetIsTheOneThatCropsNothing) {
+  // Unlike a device kind, a preset has to resolve to something: a tile is going
+  // to be drawn either way, and the default is the one that keeps the whole
+  // frame.
+  EXPECT_EQ(CameraPipPresetFromName("hexagon"), CameraPipPreset::kCamera);
+  EXPECT_EQ(CameraPipPresetFromName(""), CameraPipPreset::kCamera);
+  EXPECT_EQ(CameraPipFitFromName("nonsense"), CameraPipFit::kContain);
+  EXPECT_EQ(CameraPipFitFromName(""), CameraPipFit::kContain);
+}
+
+TEST(CameraPipFit, EveryFitKeepsItsWireSpelling) {
+  EXPECT_EQ(std::string(CameraPipFitName(CameraPipFit::kContain)), "contain");
+  EXPECT_EQ(std::string(CameraPipFitName(CameraPipFit::kCover)), "cover");
+  EXPECT_EQ(CameraPipFitFromName("contain"), CameraPipFit::kContain);
+  EXPECT_EQ(CameraPipFitFromName("cover"), CameraPipFit::kCover);
+}
+
+TEST(EffectivePipWidthRatio, TheCameraPresetIsCappedAtTheAcceptedDefault) {
+  // A 1280-wide camera on a 1920 canvas asks for 0.66 and gets the cap, so an
+  // ordinary session looks exactly as it did before presets existed (33.5).
+  const CameraOverlayConfig config;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 1280),
+                   kCameraPresetWidthCap);
+}
+
+TEST(EffectivePipWidthRatio, ACameraNarrowerThanTheCapGetsItsOwnWidth) {
+  // "The camera's own width" is a default, not a licence to upscale: a small
+  // sensor is never stretched past its own pixels.
+  const CameraOverlayConfig config;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 240), 240.0 / 1920.0);
+}
+
+TEST(EffectivePipWidthRatio, TheFloorHoldsForACameraNobodyCouldRead) {
+  const CameraOverlayConfig config;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 32), kMinPipWidthRatio);
+}
+
+TEST(EffectivePipWidthRatio, AFixedPresetKeepsItsSizeWhateverTheCameraIs) {
+  // Square and Circle are a stated size; a small sensor does not shrink them,
+  // because the size is the point of choosing them.
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kSquare;
+  config.width_ratio = kSmallPresetWidthRatio;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 240),
+                   kSmallPresetWidthRatio);
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 4096),
+                   kSmallPresetWidthRatio);
+}
+
+TEST(EffectivePipWidthRatio, AnUnknownCameraWidthLeavesTheConfiguredRatio) {
+  // Nothing has been captured yet. The tile still has to be placed, and the
+  // configured width is the honest answer until a frame says otherwise.
+  const CameraOverlayConfig config;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 0),
+                   kCameraPresetWidthCap);
+}
+
+TEST(EffectivePipWidthRatio, TheStatedBoundsHoldHoweverTheValueArrived) {
+  CameraOverlayConfig config;
+  config.width_ratio = 4.0;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 0), kMaxPipWidthRatio);
+  config.width_ratio = 0.001;
+  EXPECT_DOUBLE_EQ(EffectivePipWidthRatio(config, kCanvasWidth, 0), kMinPipWidthRatio);
+}
+
+TEST(ResolvePipRect, AFreePositionIsHonouredWhereItIs) {
+  CameraOverlayConfig config;
+  config.has_position = true;
+  config.position_x = 0.4;
+  config.position_y = 0.3;
+
+  const RectD rect = ResolvePipRect(config, kCanvasWidth, kCanvasHeight);
+  EXPECT_NEAR(rect.x, 0.4 * kCanvasWidth, 1e-9);
+  EXPECT_NEAR(rect.y, 0.3 * kCanvasHeight, 1e-9);
+}
+
+TEST(ResolvePipRect, ADragPastTheEdgeIsClampedToTheMargin) {
+  CameraOverlayConfig config;
+  config.has_position = true;
+  config.position_x = 1.5;
+  config.position_y = -0.4;
+
+  const RectD rect = ResolvePipRect(config, kCanvasWidth, kCanvasHeight);
+  const double margin = kCanvasWidth * config.margin_ratio;
+  EXPECT_NEAR(rect.x, kCanvasWidth - margin - rect.width, 1e-9);
+  EXPECT_NEAR(rect.y, margin, 1e-9);
+}
+
+TEST(ResolvePipRect, ATileLeftNearACornerSnapsOntoIt) {
+  // Within 2% of the canvas width, the tile lands on the margin exactly, so
+  // "put it back in the corner" is one gesture rather than a pixel hunt.
+  CameraOverlayConfig config;
+  config.has_position = true;
+  const double margin = kCanvasWidth * config.margin_ratio;
+  const double near_corner = margin + kCanvasWidth * kPipSnapRatio * 0.5;
+  config.position_x = near_corner / kCanvasWidth;
+  config.position_y = near_corner / kCanvasHeight;
+
+  const RectD rect = ResolvePipRect(config, kCanvasWidth, kCanvasHeight);
+  EXPECT_NEAR(rect.x, margin, 1e-9);
+  EXPECT_NEAR(rect.y, margin, 1e-9);
+}
+
+TEST(ResolvePipRect, BeyondTheSnapDistanceTheTileStaysWhereItWasPut) {
+  CameraOverlayConfig config;
+  config.has_position = true;
+  const double margin = kCanvasWidth * config.margin_ratio;
+  const double away = margin + kCanvasWidth * kPipSnapRatio * 2.0;
+  config.position_x = away / kCanvasWidth;
+  config.position_y = away / kCanvasHeight;
+
+  const RectD rect = ResolvePipRect(config, kCanvasWidth, kCanvasHeight);
+  EXPECT_NEAR(rect.x, away, 1e-9);
+  EXPECT_NEAR(rect.y, away, 1e-9);
+}
+
+TEST(ResolvePipRect, NoPositionIsALiveReferenceToTheCornerNotAStaleFraction) {
+  // Null is not "unset": a canvas that changes shape keeps the tile in the
+  // corner rather than at whatever fraction that corner used to be.
+  const CameraOverlayConfig config;
+  const RectD wide = ResolvePipRect(config, 1920, 1080);
+  const RectD tall = ResolvePipRect(config, 1080, 1920);
+  EXPECT_NEAR(1920 - (wide.x + wide.width), 1920 * config.margin_ratio, 1e-9);
+  EXPECT_NEAR(1080 - (tall.x + tall.width), 1080 * config.margin_ratio, 1e-9);
+}
+
+TEST(PipPositionRatio, TheRoundTripReproducesTheRectangleItWasMeasuredFrom) {
+  CameraOverlayConfig config;
+  config.has_position = true;
+  config.position_x = 0.37;
+  config.position_y = 0.61;
+  const RectD rect = ResolvePipRect(config, kCanvasWidth, kCanvasHeight);
+
+  double x = 0;
+  double y = 0;
+  ASSERT_TRUE(PipPositionRatio(rect.x, rect.y, kCanvasWidth, kCanvasHeight, &x, &y));
+  CameraOverlayConfig again = config;
+  again.position_x = x;
+  again.position_y = y;
+  const RectD reproduced = ResolvePipRect(again, kCanvasWidth, kCanvasHeight);
+  EXPECT_NEAR(reproduced.x, rect.x, 1e-9);
+  EXPECT_NEAR(reproduced.y, rect.y, 1e-9);
+}
+
+TEST(PipPositionRatio, ACanvasWithNoExtentHasNoFractionToReport) {
+  // A fraction of nothing says nothing: the caller keeps whatever it had, which
+  // is the null cameraPreviewPosition answers with.
+  double x = 0;
+  double y = 0;
+  EXPECT_FALSE(PipPositionRatio(10, 10, 0, 1080, &x, &y));
+  EXPECT_FALSE(PipPositionRatio(10, 10, 1920, 0, &x, &y));
+}
+
+TEST(ResolvePipDraw, TheCameraPresetDrawsTheWholeFrameAndCropsNothing) {
+  const CameraOverlayConfig config;
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+
+  EXPECT_DOUBLE_EQ(draw.source.x, 0);
+  EXPECT_DOUBLE_EQ(draw.source.y, 0);
+  EXPECT_DOUBLE_EQ(draw.source.width, 1280);
+  EXPECT_DOUBLE_EQ(draw.source.height, 720);
+  EXPECT_DOUBLE_EQ(draw.corner_radius, 0);
+  // And the tile takes the camera's shape, so the letterbox inside it is the
+  // tile itself.
+  EXPECT_NEAR(draw.dest.width / draw.dest.height, 1280.0 / 720.0, 1e-9);
+}
+
+TEST(ResolvePipDraw, ASquarePresetTakesTheCentreOfTheFrame) {
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kSquare;
+  config.width_ratio = kSmallPresetWidthRatio;
+  config.aspect_ratio = 1.0;
+  config.follows_source_aspect_ratio = false;
+  config.fit = CameraPipFit::kCover;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  // The largest square inside a 16:9 frame is its height, centred.
+  EXPECT_DOUBLE_EQ(draw.source.width, 720);
+  EXPECT_DOUBLE_EQ(draw.source.height, 720);
+  EXPECT_DOUBLE_EQ(draw.source.x, (1280 - 720) / 2.0);
+  EXPECT_DOUBLE_EQ(draw.source.y, 0);
+  // Cover fills the tile, so the destination is the tile and nothing is
+  // letterboxed inside it.
+  EXPECT_NEAR(draw.dest.width, kCanvasWidth * kSmallPresetWidthRatio, 1e-9);
+  EXPECT_NEAR(draw.dest.height, draw.dest.width, 1e-9);
+}
+
+TEST(ResolvePipDraw, APortraitCameraIsCroppedOnTheOtherAxis) {
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kSquare;
+  config.width_ratio = kSmallPresetWidthRatio;
+  config.aspect_ratio = 1.0;
+  config.follows_source_aspect_ratio = false;
+  config.fit = CameraPipFit::kCover;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 720, 1280);
+  EXPECT_DOUBLE_EQ(draw.source.width, 720);
+  EXPECT_DOUBLE_EQ(draw.source.height, 720);
+  EXPECT_DOUBLE_EQ(draw.source.x, 0);
+  EXPECT_DOUBLE_EQ(draw.source.y, (1280 - 720) / 2.0);
+}
+
+TEST(ResolvePipDraw, TheCircleIsTheSquareWithARadiusOfHalfItsWidth) {
+  // Same size, same crop: only the mask differs, which is what makes the two
+  // presets one shape with two edges (33.5).
+  CameraOverlayConfig square;
+  square.preset = CameraPipPreset::kSquare;
+  square.width_ratio = kSmallPresetWidthRatio;
+  square.aspect_ratio = 1.0;
+  square.follows_source_aspect_ratio = false;
+  square.fit = CameraPipFit::kCover;
+  CameraOverlayConfig circle = square;
+  circle.preset = CameraPipPreset::kCircle;
+  circle.corner_radius_ratio = 0.5;
+
+  const PipDraw flat = ResolvePipDraw(square, kCanvasWidth, kCanvasHeight, 1280, 720);
+  const PipDraw round = ResolvePipDraw(circle, kCanvasWidth, kCanvasHeight, 1280, 720);
+  EXPECT_DOUBLE_EQ(round.dest.width, flat.dest.width);
+  EXPECT_DOUBLE_EQ(round.source.width, flat.source.width);
+  EXPECT_DOUBLE_EQ(round.corner_radius, round.dest.width / 2.0);
+}
+
+TEST(ResolvePipDraw, TheRadiusNeverExceedsHalfTheShorterSide) {
+  // A ratio above 0.5 on a tile that is not square would otherwise describe an
+  // arc larger than the rectangle it is rounding.
+  CameraOverlayConfig config;
+  config.corner_radius_ratio = 0.5;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  EXPECT_LE(draw.corner_radius, (std::min)(draw.dest.width, draw.dest.height) / 2.0);
+}
+
+TEST(ResolvePipDraw, NoFrameYetStillPlacesTheTile) {
+  // The preview is positioned before the first camera frame arrives; there is
+  // simply no crop to resolve for a frame that does not exist.
+  const CameraOverlayConfig config;
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 0, 0);
+  EXPECT_GT(draw.dest.width, 0);
+  EXPECT_DOUBLE_EQ(draw.source.width, 0);
+}
+
+// ── what the preview window is told to draw (spec 33.5, design 1p) ───────────
+
+TEST(ResolveCameraPreviewDraw, TheDisplayModePreviewCarriesThePresetsCropAndMask) {
+  // The defect this exists to prevent: a preview that letterboxes a rectangle
+  // while the file gets a cropped circle. `1p` promises they are one object.
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kCircle;
+  config.width_ratio = kSmallPresetWidthRatio;
+  config.aspect_ratio = 1.0;
+  config.follows_source_aspect_ratio = false;
+  config.fit = CameraPipFit::kCover;
+  config.corner_radius_ratio = 0.5;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  const CameraPreviewDraw preview =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/true, draw, 1280, 720);
+
+  EXPECT_EQ(preview.fit, CameraPipFit::kCover);
+  EXPECT_DOUBLE_EQ(preview.corner_radius_ratio, 0.5);
+  // The tile's shape, not the camera's: the host pushes the crop to the
+  // preview's texture, so a square tile fed a 16:9 sensor is drawn square.
+  EXPECT_NEAR(preview.aspect_ratio, 1.0, 1e-9);
+}
+
+TEST(ResolveCameraPreviewDraw, TheWindowModePreviewDrawsTheFrameWholeAndUncropped) {
+  // Design 1e: a separate captioned object that is deliberately not the tile.
+  // It is handed the frame whole, so neither the crop nor the mask is its to
+  // apply — whatever the configuration says.
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kCircle;
+  config.aspect_ratio = 1.0;
+  config.follows_source_aspect_ratio = false;
+  config.fit = CameraPipFit::kCover;
+  config.corner_radius_ratio = 0.5;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  const CameraPreviewDraw preview =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/false, draw, 1280, 720);
+
+  EXPECT_EQ(preview.fit, CameraPipFit::kContain);
+  EXPECT_DOUBLE_EQ(preview.corner_radius_ratio, 0);
+  // The camera's own shape. Reporting the tile's — 1.0 here — would squash the
+  // whole frame into a square the preview never received a crop for.
+  EXPECT_NEAR(preview.aspect_ratio, 1280.0 / 720.0, 1e-9);
+}
+
+TEST(ResolveCameraPreviewDraw, TheDefaultPresetCropsNothingAndMasksNothing) {
+  const CameraOverlayConfig config;
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 640, 480);
+  const CameraPreviewDraw preview =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/true, draw, 640, 480);
+
+  EXPECT_EQ(preview.fit, CameraPipFit::kContain);
+  EXPECT_DOUBLE_EQ(preview.corner_radius_ratio, 0);
+  // A 4:3 camera on the `camera` preset gives a 4:3 tile, which is the whole
+  // point of following the source aspect ratio.
+  EXPECT_NEAR(preview.aspect_ratio, 4.0 / 3.0, 1e-9);
+}
+
+TEST(ResolveCameraPreviewDraw, ANeverOpenedCameraFallsBackToTheConfiguredShape) {
+  // The preview is placed before the camera has delivered anything, and the
+  // window-mode preview has no tile to take a shape from.
+  CameraOverlayConfig config;
+  config.aspect_ratio = 4.0 / 3.0;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 0, 0);
+  const CameraPreviewDraw preview =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/false, draw, 0, 0);
+  EXPECT_NEAR(preview.aspect_ratio, 4.0 / 3.0, 1e-9);
+
+  // A fallback that is not a shape falls back again, exactly as ResolvePipRect
+  // does, rather than collapsing the window.
+  config.aspect_ratio = 0;
+  const CameraPreviewDraw malformed =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/false, draw, 0, 0);
+  EXPECT_NEAR(malformed.aspect_ratio, 16.0 / 9.0, 1e-9);
+}
+
+TEST(ResolveCameraPreviewDraw, ARadiusOutsideTheStatedRangeIsClampedNotDrawn) {
+  // 0.5 is a circle and there is no shape past it. Dart clamps the same value
+  // on the way in; a host that sent 3.0 would ask the preview to round a tile
+  // by more than its own width.
+  CameraOverlayConfig config;
+  config.corner_radius_ratio = 3.0;
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  EXPECT_DOUBLE_EQ(
+      ResolveCameraPreviewDraw(config, /*is_tile=*/true, draw, 1280, 720)
+          .corner_radius_ratio,
+      kMaxCornerRadiusRatio);
+
+  config.corner_radius_ratio = -1.0;
+  EXPECT_DOUBLE_EQ(
+      ResolveCameraPreviewDraw(config, /*is_tile=*/true, draw, 1280, 720)
+          .corner_radius_ratio,
+      0.0);
+}
+
+TEST(ResolveCameraPreviewDraw, ATileWithNoExtentStillReportsADrawableShape) {
+  // The canvas has no room, or nothing has been composed yet. A zero aspect
+  // ratio would be a window with no height.
+  const CameraOverlayConfig config;
+  const CameraPreviewDraw preview =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/true, PipDraw(), 0, 0);
+  EXPECT_NEAR(preview.aspect_ratio, 16.0 / 9.0, 1e-9);
+}
+
+// ── which choices close the input menu (spec 33.4) ───────────────────────────
+
+TEST(MenuChoiceClosesMenu, ADeviceRowClosesTheSheet) {
+  // Including `System default` and `Off`, which carry none of the camera
+  // sheet's extra keys either.
+  EXPECT_TRUE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/false,
+                                   /*resets_position=*/false));
+}
+
+TEST(MenuChoiceClosesMenu, AShapePresetLeavesTheSheetOpen) {
+  // The tile changes shape on screen underneath it, and comparing the three
+  // presets must not cost a reopen each time.
+  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/true, /*has_corner=*/false,
+                                    /*resets_position=*/false));
+}
+
+TEST(MenuChoiceClosesMenu, ACornerLeavesTheSheetOpen) {
+  // Window mode's placement row: the tile moves under the sheet exactly as a
+  // preset reshapes it.
+  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/true,
+                                    /*resets_position=*/false));
+}
+
+TEST(MenuChoiceClosesMenu, ResetPositionLeavesTheSheetOpen) {
+  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/false,
+                                    /*resets_position=*/true));
+}
+
+TEST(ResolveCameraFrameMask, TheDefaultPresetMasksNothing) {
+  const CameraOverlayConfig config;
+  const CameraFrameMask mask =
+      ResolveCameraFrameMask(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  EXPECT_TRUE(CameraMaskIsRectangular(mask));
+  EXPECT_DOUBLE_EQ(mask.crop.width, 1280);
+  EXPECT_DOUBLE_EQ(mask.crop.height, 720);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 0.5, 0.5), 1.0);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 639.5, 359.5), 1.0);
+}
+
+TEST(ResolveCameraFrameMask, TheCircleBecomesACircleInTheFramesOwnPixels) {
+  // The crop and the tile are the same shape, so the mask scales to the frame
+  // without becoming an ellipse — which is what lets the preview and the file
+  // be masked by one number.
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kCircle;
+  config.width_ratio = kSmallPresetWidthRatio;
+  config.aspect_ratio = 1.0;
+  config.follows_source_aspect_ratio = false;
+  config.fit = CameraPipFit::kCover;
+  config.corner_radius_ratio = 0.5;
+
+  const CameraFrameMask mask =
+      ResolveCameraFrameMask(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  EXPECT_FALSE(CameraMaskIsRectangular(mask));
+  EXPECT_DOUBLE_EQ(mask.crop.width, 720);
+  EXPECT_NEAR(mask.corner_radius, 360.0, 1e-9);
+
+  // The centre is covered, the corners of the crop are not.
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 640.0, 360.0), 1.0);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, mask.crop.x + 1, 1), 0.0);
+  EXPECT_DOUBLE_EQ(
+      CameraMaskCoverage(mask, mask.crop.x + mask.crop.width - 1, 719), 0.0);
+}
+
+TEST(CameraMaskCoverage, TheEdgeOfARoundedMaskIsRampedNotStepped) {
+  CameraFrameMask mask;
+  mask.crop = RectD{0, 0, 100, 100};
+  mask.corner_radius = 50;
+  // Straight across the middle: fully covered inside, nothing outside, and a
+  // single pixel of ramp between them.
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 50, 50), 1.0);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 99.4, 50), 1.0);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 100.6, 50), 0.0);
+  EXPECT_NEAR(CameraMaskCoverage(mask, 100.0, 50), 0.5, 1e-9);
+}
+
+TEST(CameraMaskCoverage, ARectangularMaskCutsHardSoNothingHasToBlend) {
+  CameraFrameMask mask;
+  mask.crop = RectD{10, 10, 80, 80};
+  EXPECT_TRUE(CameraMaskIsRectangular(mask));
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 50, 50), 1.0);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 9.9, 50), 0.0);
+  EXPECT_DOUBLE_EQ(CameraMaskCoverage(mask, 90.1, 50), 0.0);
+}
+
+TEST(ApplyCameraMaskRow, TheRowFastPathAgreesWithTheCoverageItStandsFor) {
+  // The mask is applied a row at a time for speed. The two must not be two
+  // answers: a circle in the preview and a rounded square in the file is
+  // exactly the defect 33.7 calls a defect rather than a tolerance.
+  CameraFrameMask mask;
+  mask.crop = RectD{4, 2, 24, 24};
+  mask.corner_radius = 12;
+
+  constexpr uint32_t kWidth = 32;
+  constexpr uint32_t kHeight = 30;
+  std::vector<uint8_t> pixels(static_cast<size_t>(kWidth) * kHeight * 4, 0x11);
+  for (uint32_t row = 0; row < kHeight; ++row) {
+    uint8_t* line = pixels.data() + static_cast<size_t>(row) * kWidth * 4;
+    ApplyCameraMaskRow(mask, static_cast<double>(row) + 0.5, kWidth, line);
+    for (uint32_t column = 0; column < kWidth; ++column) {
+      const double coverage = CameraMaskCoverage(
+          mask, static_cast<double>(column) + 0.5, static_cast<double>(row) + 0.5);
+      EXPECT_EQ(line[column * 4 + 3],
+                static_cast<uint8_t>(coverage * 255.0 + 0.5))
+          << "row " << row << " column " << column;
+      // And nothing but the alpha byte is touched.
+      EXPECT_EQ(line[column * 4 + 0], 0x11);
+      EXPECT_EQ(line[column * 4 + 1], 0x11);
+      EXPECT_EQ(line[column * 4 + 2], 0x11);
+    }
+  }
+}
+
+TEST(ApplyCameraMaskRow, AnUnconfiguredMaskLeavesTheFrameOpaque) {
+  // No crop yet: every pixel is drawn, which is what an uninitialized
+  // compositor has to look like rather than an invisible camera.
+  const CameraFrameMask mask;
+  std::vector<uint8_t> pixels(4 * 4, 0);
+  ApplyCameraMaskRow(mask, 0.5, 4, pixels.data());
+  for (uint32_t column = 0; column < 4; ++column) {
+    EXPECT_EQ(pixels[column * 4 + 3], 0xFF);
   }
 }
 
@@ -534,28 +1019,29 @@ TEST(IsUsableWorkArea, TheRectangleAFailedMonitorReadLeavesBehindIsNot) {
   EXPECT_FALSE(IsUsableWorkArea(RECT{500, 500, 100, 100}));
 }
 
-TEST(ShouldBeginStripMove, AHeldButtonOnTheStripStartsTheMove) {
-  EXPECT_TRUE(ShouldBeginStripMove(true, false, true));
+TEST(ShouldBeginOverlayMove, AHeldButtonOnTheStripStartsTheMove) {
+  EXPECT_TRUE(ShouldBeginOverlayMove(true, false, true));
 }
 
-TEST(ShouldBeginStripMove, AButtonAlreadyReleasedDropsTheRequest) {
+TEST(ShouldBeginOverlayMove, AButtonAlreadyReleasedDropsTheRequest) {
   // The request is acted on a turn of the message loop after it was made, and
   // the operating system's move loop ends on the *next* button release: begun
   // with nothing held, it would drag the strip around behind a button nobody is
   // pressing until the user clicked to put it down.
-  EXPECT_FALSE(ShouldBeginStripMove(true, false, false));
+  EXPECT_FALSE(ShouldBeginOverlayMove(true, false, false));
 }
 
-TEST(ShouldBeginStripMove, ASecondRequestInsideARunningLoopIsDropped) {
+TEST(ShouldBeginOverlayMove, ASecondRequestInsideARunningLoopIsDropped) {
   // The move loop pumps the message queue, so a second posted request is
   // dispatched mid-drag. One gesture, one loop.
-  EXPECT_FALSE(ShouldBeginStripMove(true, true, true));
+  EXPECT_FALSE(ShouldBeginOverlayMove(true, true, true));
 }
 
-TEST(ShouldBeginStripMove, AnOverlayThatIsNotTheStripNeverMoves) {
-  // The camera preview's frame is the composited picture-in-picture's and is
-  // set by the compositor (spec 33.5).
-  EXPECT_FALSE(ShouldBeginStripMove(false, false, true));
+TEST(ShouldBeginOverlayMove, AnOverlayThatIsNotDraggableNeverMoves) {
+  // The window-mode camera preview: a separate captioned object that is not the
+  // picture-in-picture, so dragging it would move a window standing for nothing
+  // (design 1e, spec 33.5). The menu is never draggable at all.
+  EXPECT_FALSE(ShouldBeginOverlayMove(false, false, true));
 }
 
 TEST(FractionalStripFrame, TheStoredFractionSurvivesAUsableAreaThatShrinksAndReturns) {
@@ -579,6 +1065,101 @@ TEST(FractionalStripFrame, TheStoredFractionSurvivesAUsableAreaThatShrinksAndRet
   double y = 0;
   ASSERT_TRUE(StripPositionRatio(narrow, shrunk, &x, &y));
   EXPECT_EQ(FractionalStripFrame(wide, x, y, kStripWidth, kStripHeight).left, 1380);
+}
+
+// ── the input menu's placement (spec 33.4) ───────────────────────────────────
+
+// A strip 360 x 46 docked at the top centre of a 1920 x 1040 usable area, which
+// is where the default placement puts it.
+constexpr RECT kMenuWorkArea{0, 0, 1920, 1040};
+constexpr RECT kStripFrame{780, 6, 1140, 52};
+constexpr LONG kMenuGap = 6;
+
+TEST(ResolveInputMenuFrame, TheMenuOpensUnderTheStripWhenThereIsRoom) {
+  const RECT frame =
+      ResolveInputMenuFrame(kMenuWorkArea, kStripFrame, 900, 240, 200, kMenuGap);
+  EXPECT_EQ(frame.top, kStripFrame.bottom + kMenuGap);
+  EXPECT_EQ(frame.bottom - frame.top, 200);
+}
+
+TEST(ResolveInputMenuFrame, TheMenuIsCentredOnTheChevronThatAskedForIt) {
+  // Not on the strip: the chevron is what the user pressed, and only Flutter
+  // knew where inside the strip it ended up.
+  const RECT frame =
+      ResolveInputMenuFrame(kMenuWorkArea, kStripFrame, 900, 240, 200, kMenuGap);
+  EXPECT_EQ(frame.left + (frame.right - frame.left) / 2, 900);
+}
+
+TEST(ResolveInputMenuFrame, AMenuThatWouldRunOffTheBottomFlipsAboveTheStrip) {
+  constexpr RECT low_strip{780, 900, 1140, 946};
+  const RECT frame =
+      ResolveInputMenuFrame(kMenuWorkArea, low_strip, 900, 240, 200, kMenuGap);
+  EXPECT_EQ(frame.bottom, low_strip.top - kMenuGap);
+  EXPECT_EQ(frame.top, low_strip.top - kMenuGap - 200);
+}
+
+TEST(ResolveInputMenuFrame, WithNoRoomOnEitherSideItTakesTheSpaceBelow) {
+  // A menu taller than the usable area. Overlapping the strip is legible;
+  // hanging off the top of the screen is not.
+  constexpr RECT centred{780, 500, 1140, 546};
+  const RECT frame =
+      ResolveInputMenuFrame(kMenuWorkArea, centred, 900, 240, 1200, kMenuGap);
+  EXPECT_GE(frame.top, kMenuWorkArea.top);
+  EXPECT_LE(frame.left, kMenuWorkArea.right);
+}
+
+TEST(ResolveInputMenuFrame, AChevronNearTheEdgeStillLandsInsideTheUsableArea) {
+  // Clamped to the usable area, always: 33.4's "aligned to the chevron" never
+  // beats 6's "never off the screen".
+  const RECT frame =
+      ResolveInputMenuFrame(kMenuWorkArea, kStripFrame, 1918, 240, 200, kMenuGap);
+  EXPECT_LE(frame.right, kMenuWorkArea.right);
+  EXPECT_GE(frame.left, kMenuWorkArea.left);
+  EXPECT_EQ(frame.right - frame.left, 240);
+}
+
+TEST(ResolveInputMenuFrame, TheMenuNeverCoversTheTaskbar) {
+  // rcWork, never rcMonitor: a menu resolved against the whole display would
+  // open over the taskbar (spec 6).
+  constexpr RECT taskbar_work_area{0, 0, 1920, 1000};
+  constexpr RECT bottom_strip{780, 900, 1140, 946};
+  const RECT frame = ResolveInputMenuFrame(taskbar_work_area, bottom_strip, 900, 240,
+                                           200, kMenuGap);
+  EXPECT_LE(frame.bottom, taskbar_work_area.bottom);
+}
+
+TEST(ResolveInputMenuFrame, ASizeOfNothingIsAFrameOfNothingNotANegativeOne) {
+  const RECT frame =
+      ResolveInputMenuFrame(kMenuWorkArea, kStripFrame, 900, -10, -10, kMenuGap);
+  EXPECT_EQ(frame.right - frame.left, 0);
+  EXPECT_EQ(frame.bottom - frame.top, 0);
+}
+
+// ── moving the strip by keyboard (spec 33.3) ─────────────────────────────────
+
+TEST(NudgeStripFrame, TheStripMovesByExactlyWhatWasAsked) {
+  constexpr RECT frame{800, 400, 1160, 446};
+  const RECT moved = NudgeStripFrame(kMenuWorkArea, frame, 8, -8, 0);
+  EXPECT_EQ(moved.left, 808);
+  EXPECT_EQ(moved.top, 392);
+  EXPECT_EQ(moved.right - moved.left, frame.right - frame.left);
+}
+
+TEST(NudgeStripFrame, TheKeyboardCannotPushTheStripOffTheUsableArea) {
+  constexpr RECT frame{1900, 400, 2260, 446};
+  const RECT moved = NudgeStripFrame(kMenuWorkArea, frame, 32, 0, 0);
+  EXPECT_LE(moved.right, kMenuWorkArea.right);
+  EXPECT_EQ(moved.right - moved.left, 360);
+}
+
+TEST(NudgeStripFrame, TheKeyboardSnapsWhereADragWould) {
+  // Arrow keys and a pointer must not be able to leave the strip in two
+  // different places, so the same snap runs on both paths.
+  constexpr RECT frame{800, 40, 1160, 86};
+  const RECT nudged = NudgeStripFrame(kMenuWorkArea, frame, 0, -20, 24);
+  const RECT dragged = SnapStripFrame(kMenuWorkArea, RECT{800, 20, 1160, 66}, 24);
+  EXPECT_EQ(nudged.top, kMenuWorkArea.top);
+  EXPECT_EQ(nudged.top, dragged.top);
 }
 
 // ── the session timeline ─────────────────────────────────────────────────────
@@ -618,9 +1199,15 @@ TEST(SessionClock, PausedIntervalsAreSubtracted) {
   clock.Pause(5 * kSecond);
   clock.Resume(9 * kSecond);
 
-  // Four seconds of wall time passed while paused; the media timeline must not
-  // have advanced by them.
-  EXPECT_EQ(clock.MediaTime100ns(10 * kSecond), 5 * kSecond);
+  // Ten seconds of wall time, four of them paused: five seconds were recorded
+  // before the pause and one after it, so the sample captured at wall ten sits
+  // six seconds into the file. The subtraction is the whole point — the
+  // encoded duration has to equal the elapsed time the strip shows (spec 9).
+  //
+  // Asserted 5 until this stage, which is the wall time of the pause rather
+  // than the media time of the sample. The arithmetic under test never
+  // produced it.
+  EXPECT_EQ(clock.MediaTime100ns(10 * kSecond), 6 * kSecond);
 }
 
 TEST(SessionClock, SeveralPausesAccumulate) {

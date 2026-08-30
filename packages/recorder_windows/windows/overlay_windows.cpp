@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -30,6 +32,7 @@ constexpr char kOverlayViewChannel[] = "relay/overlay/view";
 // The overlay engines run these Dart entrypoints (contract: relay/overlay/view).
 constexpr char kControlStripEntrypoint[] = "controlStripMain";
 constexpr char kCameraPreviewEntrypoint[] = "cameraPreviewMain";
+constexpr char kInputMenuEntrypoint[] = "inputMenuMain";
 
 double MonitorScale(HMONITOR monitor) {
   UINT dpi_x = USER_DEFAULT_SCREEN_DPI;
@@ -70,6 +73,54 @@ std::string StringAt(const flutter::EncodableMap& map, const char* key) {
   }
   const auto* text = std::get_if<std::string>(value);
   return text == nullptr ? std::string() : *text;
+}
+
+bool BoolAt(const flutter::EncodableMap& map, const char* key, bool fallback) {
+  const flutter::EncodableValue* value = Find(map, key);
+  if (value == nullptr) {
+    return fallback;
+  }
+  const auto* flag = std::get_if<bool>(value);
+  return flag == nullptr ? fallback : *flag;
+}
+
+// A key that is present and holds a string, distinguished from one that is
+// absent or null. `System default` is a null device id, and a device whose id
+// happens to be empty is a different answer (spec 33.4).
+std::optional<std::string> OptionalStringAt(const flutter::EncodableMap& map,
+                                            const char* key) {
+  const flutter::EncodableValue* value = Find(map, key);
+  if (value == nullptr) {
+    return std::nullopt;
+  }
+  const auto* text = std::get_if<std::string>(value);
+  return text == nullptr ? std::nullopt : std::optional<std::string>(*text);
+}
+
+// The same, for a number: absent and null both read as "no anchor", which is a
+// command that came from something other than a chevron.
+std::optional<double> OptionalDoubleAt(const flutter::EncodableMap& map,
+                                       const char* key) {
+  const flutter::EncodableValue* value = Find(map, key);
+  if (value == nullptr) {
+    return std::nullopt;
+  }
+  if (const auto* number = std::get_if<double>(value)) {
+    return *number;
+  }
+  if (const auto* integer = std::get_if<int32_t>(value)) {
+    return static_cast<double>(*integer);
+  }
+  if (const auto* big = std::get_if<int64_t>(value)) {
+    return static_cast<double>(*big);
+  }
+  return std::nullopt;
+}
+
+// Rounds a canvas coordinate onto the pixel grid, away from zero, the way every
+// other placement in this file does.
+LONG RoundToPixel(double value) {
+  return static_cast<LONG>(value < 0 ? value - 0.5 : value + 0.5);
 }
 
 // The display a strip belongs to: the one holding its centre (spec 33.3).
@@ -152,7 +203,34 @@ bool WindowAndWorkArea(HWND window, RECT* frame, RECT* work_area) {
          WorkAreaOf(MonitorForStrip(window), work_area);
 }
 
+// Whether `point` is over one of this process's overlay windows.
+//
+// Asked by the menu's dismissal hook, which runs on the platform thread and
+// must therefore touch no member of anything: the window class is what every
+// overlay shares and nothing else does, so the answer comes from the desktop
+// rather than from state that would need a lock.
+//
+// A press on the strip is the strip's own — the chevron that replaces this
+// sheet with the next one is such a press — so it is never swallowed (spec
+// 33.7, "Two chevrons in quick succession").
+bool PointIsOverOwnOverlay(POINT point) {
+  const HWND under = ::WindowFromPoint(point);
+  if (under == nullptr) {
+    return false;
+  }
+  const HWND root = ::GetAncestor(under, GA_ROOT);
+  wchar_t class_name[64]{};
+  const int length =
+      ::GetClassNameW(root, class_name, static_cast<int>(std::size(class_name)));
+  return length > 0 && std::wcscmp(class_name, kOverlayClassName) == 0;
+}
+
 }  // namespace
+
+OverlayWindows* OverlayWindows::hooked_ = nullptr;
+HHOOK OverlayWindows::mouse_hook_ = nullptr;
+HHOOK OverlayWindows::keyboard_hook_ = nullptr;
+UINT OverlayWindows::swallowed_button_up_ = 0;
 
 OverlayPlacement OverlayPlacement::FromMap(const flutter::EncodableMap& map) {
   OverlayPlacement placement;
@@ -206,6 +284,130 @@ void OverlayWindows::SetMainWindow(HWND main_window) {
 void OverlayWindows::SetCommandHandler(CommandHandler handler) {
   std::lock_guard<std::mutex> lock(mutex_);
   on_command_ = std::move(handler);
+}
+
+void OverlayWindows::SetMenuSelectionHandler(MenuSelectionHandler handler) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  on_menu_selection_ = std::move(handler);
+}
+
+void OverlayWindows::SetMenuDismissHandler(DismissHandler handler) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  on_menu_dismiss_ = std::move(handler);
+}
+
+void OverlayWindows::SetCameraMovedHandler(CameraMovedHandler handler) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  on_camera_moved_ = std::move(handler);
+}
+
+void OverlayWindows::NoteCommand(const std::string& command,
+                                 std::optional<double> anchor_x) {
+  // Kept, not forwarded: the menu that needs it is opened by a later call from
+  // Dart, once the application has decided which devices to offer. The value
+  // first, the flag second, so a reader that sees the flag set sees the x that
+  // goes with it.
+  command_anchor_x_.store(anchor_x.value_or(0));
+  has_command_anchor_.store(anchor_x.has_value());
+  if (on_command_) {
+    on_command_(command, anchor_x);
+  }
+}
+
+void OverlayWindows::RequestMenuDismissal(bool host_initiated) const {
+  if (on_menu_dismiss_) {
+    on_menu_dismiss_(host_initiated);
+  }
+}
+
+void OverlayWindows::InstallMenuHooks() {
+  if (mouse_hook_ != nullptr || keyboard_hook_ != nullptr) {
+    return;
+  }
+  hooked_ = this;
+  swallowed_button_up_ = 0;
+  const HINSTANCE instance = ::GetModuleHandleW(nullptr);
+  mouse_hook_ =
+      ::SetWindowsHookExW(WH_MOUSE_LL, &OverlayWindows::MouseHook, instance, 0);
+  keyboard_hook_ =
+      ::SetWindowsHookExW(WH_KEYBOARD_LL, &OverlayWindows::KeyboardHook, instance, 0);
+  if (mouse_hook_ == nullptr && keyboard_hook_ == nullptr) {
+    // Neither hook could be installed — a policy that forbids them, or a
+    // desktop this process cannot reach. The menu still closes on a choice, on
+    // the strip moving, on a display change and with the session; it just does
+    // not close by itself when the user looks away.
+    hooked_ = nullptr;
+  }
+}
+
+void OverlayWindows::RemoveMenuHooks() {
+  if (mouse_hook_ != nullptr) {
+    ::UnhookWindowsHookEx(mouse_hook_);
+    mouse_hook_ = nullptr;
+  }
+  if (keyboard_hook_ != nullptr) {
+    ::UnhookWindowsHookEx(keyboard_hook_);
+    keyboard_hook_ = nullptr;
+  }
+  hooked_ = nullptr;
+  swallowed_button_up_ = 0;
+}
+
+LRESULT CALLBACK OverlayWindows::MouseHook(int code, WPARAM wparam, LPARAM lparam) {
+  // A hook that is not asked to act passes the message on untouched, and does
+  // it first: everything below runs on every mouse event in the session.
+  if (code != HC_ACTION || hooked_ == nullptr) {
+    return ::CallNextHookEx(nullptr, code, wparam, lparam);
+  }
+  const UINT message = static_cast<UINT>(wparam);
+  if (swallowed_button_up_ != 0 && message == swallowed_button_up_) {
+    // The press that closed the menu was swallowed, so its release is too: a
+    // window left holding a button nobody pressed is worse than a lost click.
+    swallowed_button_up_ = 0;
+    return 1;
+  }
+  UINT release = 0;
+  switch (message) {
+    case WM_LBUTTONDOWN:
+      release = WM_LBUTTONUP;
+      break;
+    case WM_RBUTTONDOWN:
+      release = WM_RBUTTONUP;
+      break;
+    case WM_MBUTTONDOWN:
+      release = WM_MBUTTONUP;
+      break;
+    default:
+      return ::CallNextHookEx(nullptr, code, wparam, lparam);
+  }
+  const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam);
+  if (mouse == nullptr || PointIsOverOwnOverlay(mouse->pt)) {
+    // Inside the menu, or on the strip: the menu's own rows and the chevron
+    // that replaces it both have to receive their click.
+    return ::CallNextHookEx(nullptr, code, wparam, lparam);
+  }
+  swallowed_button_up_ = release;
+  hooked_->RequestMenuDismissal(/*host_initiated=*/true);
+  // Not forwarded to what is underneath (spec 33.7): the click closed a sheet
+  // the user had open, and pressing whatever was behind it as well is a second
+  // action they did not ask for.
+  return 1;
+}
+
+LRESULT CALLBACK OverlayWindows::KeyboardHook(int code, WPARAM wparam,
+                                              LPARAM lparam) {
+  if (code != HC_ACTION || hooked_ == nullptr) {
+    return ::CallNextHookEx(nullptr, code, wparam, lparam);
+  }
+  const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lparam);
+  const bool pressed = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+  if (!pressed || key == nullptr || key->vkCode != VK_ESCAPE) {
+    return ::CallNextHookEx(nullptr, code, wparam, lparam);
+  }
+  hooked_->RequestMenuDismissal(/*host_initiated=*/true);
+  // Esc closed the sheet and nothing else. Forwarding it as well would also
+  // cancel whatever dialog the recorded application happens to have open.
+  return 1;
 }
 
 RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement,
@@ -291,14 +493,16 @@ bool OverlayWindows::ShowControlStrip(const OverlayPlacement& placement,
     RememberStripPlacement(resolved, from_remembered_position);
     return true;
   }
-  auto window =
-      std::make_unique<OverlayWindow>(kControlStripEntrypoint, "control_strip", true);
-  const CommandHandler handler = on_command_;
+  auto window = std::make_unique<OverlayWindow>(kControlStripEntrypoint, "control_strip",
+                                               OverlayRole::kControlStrip);
+  // The strip closes the sheet when it starts to move (spec 33.7); it asks the
+  // host to do it rather than doing it itself, for the same reason the menu
+  // does — nothing may destroy a window from inside a stack that window owns.
+  window->SetDismissHandler(on_menu_dismiss_);
   if (!window->Create(
-          frame, [handler](const std::string& command) {
-            if (handler) {
-              handler(command);
-            }
+          frame,
+          [this](const std::string& command, std::optional<double> anchor_x) {
+            NoteCommand(command, anchor_x);
           },
           // Remembers the measurement and nothing else. The window is resized
           // by the window itself, on a later turn of the message loop; doing
@@ -349,6 +553,16 @@ void OverlayWindows::HideControlStrip() {
     control_strip_->Destroy();
     control_strip_.reset();
   }
+  // The menu hangs off the strip and cannot outlive it: the session ending is
+  // exactly the case 33.7 spells "the sheet closes with the session". Closed
+  // here rather than deferred, because the call that asked for it is on the
+  // platform thread and nothing of the menu's is on the stack.
+  if (input_menu_) {
+    RemoveMenuHooks();
+    input_menu_->Destroy();
+    input_menu_.reset();
+  }
+  has_command_anchor_.store(false);
 }
 
 bool OverlayWindows::ShowCameraPreview(const OverlayPlacement& placement,
@@ -356,22 +570,35 @@ bool OverlayWindows::ShowCameraPreview(const OverlayPlacement& placement,
   std::lock_guard<std::mutex> lock(mutex_);
   const RECT frame = ResolveFrame(placement);
   if (camera_preview_) {
+    camera_preview_->SetPreviewGeometry(preview_geometry_);
     camera_preview_->SetFrame(frame);
     return true;
   }
-  auto window =
-      std::make_unique<OverlayWindow>(kCameraPreviewEntrypoint, "camera_preview", false);
-  const CommandHandler handler = on_command_;
+  auto window = std::make_unique<OverlayWindow>(kCameraPreviewEntrypoint,
+                                               "camera_preview",
+                                               OverlayRole::kCameraPreview);
+  window->SetPreviewGeometry(preview_geometry_);
+  window->SetCameraMovedHandler(on_camera_moved_);
   if (!window->Create(
-          frame, [handler](const std::string& command) {
-            if (handler) {
-              handler(command);
-            }
+          frame,
+          [this](const std::string& command, std::optional<double> anchor_x) {
+            NoteCommand(command, anchor_x);
           },
           [](double, double) {}, true, error)) {
     return false;
   }
   camera_preview_ = std::move(window);
+  // After the window exists, so the region is applied to a real frame.
+  camera_preview_->SetFrame(frame);
+  return true;
+}
+
+bool OverlayWindows::MoveCameraPreview(const OverlayPlacement& placement) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!camera_preview_) {
+    return false;
+  }
+  camera_preview_->SetFrame(ResolveFrame(placement));
   return true;
 }
 
@@ -380,6 +607,145 @@ void OverlayWindows::HideCameraPreview() {
   if (camera_preview_) {
     camera_preview_->Destroy();
     camera_preview_.reset();
+  }
+}
+
+void OverlayWindows::SetCameraPreviewGeometry(
+    const CameraPreviewGeometry& geometry) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  preview_geometry_ = geometry;
+  if (camera_preview_) {
+    camera_preview_->SetPreviewGeometry(geometry);
+  }
+}
+
+bool OverlayWindows::CameraPreviewPosition(double* x, double* y) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!camera_preview_) {
+    return false;
+  }
+  return camera_preview_->PreviewPosition(x, y);
+}
+
+RECT OverlayWindows::ResolveMenuFrame(const OverlayPlacement& placement) const {
+  const HWND strip = control_strip_ ? control_strip_->window() : nullptr;
+  const HMONITOR monitor =
+      strip != nullptr ? MonitorForStrip(strip)
+                       : (main_window_ != nullptr
+                              ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
+                              : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+  const MONITORINFO info = GeometryOrPrimary(monitor);
+  const double scale = MonitorScale(monitor);
+  const LONG width = static_cast<LONG>(placement.width * scale + 0.5);
+  const LONG height = static_cast<LONG>(placement.height * scale + 0.5);
+  const LONG gap = static_cast<LONG>(kInputMenuGapPoints * scale + 0.5);
+
+  RECT anchor_frame{};
+  if (strip == nullptr || ::GetWindowRect(strip, &anchor_frame) == FALSE) {
+    // No strip to hang off: the menu is placed as if the strip were a point at
+    // the top centre of the usable area, which is where the strip's default
+    // dock is. It cannot be left unplaced — Dart asked for a window.
+    const LONG centre = info.rcWork.left + (info.rcWork.right - info.rcWork.left) / 2;
+    anchor_frame.left = centre;
+    anchor_frame.right = centre;
+    anchor_frame.top = info.rcWork.top;
+    anchor_frame.bottom = info.rcWork.top;
+  }
+  // The chevron's centre in the strip's own coordinates, in logical points, so
+  // the menu opens under the control that was pressed. Without one — a command
+  // that named no spot — the strip's own centre is the honest fallback.
+  const LONG anchor_x =
+      has_command_anchor_.load()
+          ? anchor_frame.left +
+                static_cast<LONG>(command_anchor_x_.load() * scale + 0.5)
+          : anchor_frame.left + (anchor_frame.right - anchor_frame.left) / 2;
+  if (input_menu_) {
+    input_menu_->SetMenuAnchor(anchor_frame, anchor_x, gap);
+  }
+  return ResolveInputMenuFrame(info.rcWork, anchor_frame, anchor_x, width, height, gap);
+}
+
+bool OverlayWindows::ShowInputMenu(const OverlayPlacement& placement,
+                                   const flutter::EncodableMap& state,
+                                   std::string* error) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (input_menu_) {
+    // One at a time: the second chevron re-places and re-renders the window the
+    // first one opened rather than opening a second (spec 33.4).
+    const RECT frame = ResolveMenuFrame(placement);
+    input_menu_->SetFrame(frame);
+    input_menu_->Invoke("inputMenuState", flutter::EncodableValue(state));
+    return true;
+  }
+  auto window = std::make_unique<OverlayWindow>(kInputMenuEntrypoint, "input_menu",
+                                               OverlayRole::kInputMenu);
+  window->SetDismissHandler(on_menu_dismiss_);
+  window->SetMenuSelectionHandler(on_menu_selection_);
+  input_menu_ = std::move(window);
+  const RECT frame = ResolveMenuFrame(placement);
+  if (!input_menu_->Create(
+          frame,
+          [this](const std::string& command, std::optional<double> anchor_x) {
+            NoteCommand(command, anchor_x);
+          },
+          // The menu is the one overlay whose measured size re-places it: it
+          // may have opened above the strip, and a window that grew about its
+          // top-left from there would slide down over the strip it belongs to.
+          [](double, double) {}, false, error)) {
+    input_menu_.reset();
+    return false;
+  }
+  input_menu_->Invoke("inputMenuState", flutter::EncodableValue(state));
+  // Only once the window is really on screen: a hook installed for a menu that
+  // failed to open would swallow the next click the user made anywhere.
+  InstallMenuHooks();
+  return true;
+}
+
+void OverlayWindows::UpdateInputMenu(const flutter::EncodableMap& state) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (input_menu_) {
+    // Re-rendered in place, never reopened: a device that appears or disappears
+    // must not close the sheet the user is reading (spec 33.7).
+    input_menu_->Invoke("inputMenuState", flutter::EncodableValue(state));
+  }
+}
+
+void OverlayWindows::HideInputMenu() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!input_menu_) {
+    return;
+  }
+  RemoveMenuHooks();
+  input_menu_->Destroy();
+  input_menu_.reset();
+}
+
+void OverlayWindows::NudgeControlStrip(double dx, double dy) {
+  std::unique_ptr<OverlayWindow> menu;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!control_strip_ || control_strip_->window() == nullptr) {
+      return;
+    }
+    // Logical points in, physical pixels out, against the display the strip is
+    // actually on: eight points is eight points on every monitor.
+    const double scale = MonitorScale(MonitorForStrip(control_strip_->window()));
+    control_strip_->Nudge(RoundToPixel(dx * scale), RoundToPixel(dy * scale));
+    // The strip moved, so the sheet closes (spec 33.4). Taken out under the
+    // lock and destroyed outside it, like every other teardown here.
+    if (input_menu_) {
+      RemoveMenuHooks();
+      menu = std::move(input_menu_);
+    }
+  }
+  if (menu) {
+    menu->Destroy();
+    // The strip moved out from under a sheet the application still believes is
+    // open, and a keyboard nudge is the strip moving exactly as a drag is
+    // (spec 33.3, 33.4). Reported after the lock is released, like every other
+    // handler call here.
+    RequestMenuDismissal(/*host_initiated=*/true);
   }
 }
 
@@ -425,7 +791,7 @@ void OverlayWindows::UpdateControlStrip(const flutter::EncodableMap& state) {
 }
 
 void OverlayWindows::UpdateCameraPreview(bool mirrored, bool matches_composited_pip,
-                                         double aspect_ratio) {
+                                         const CameraPreviewDraw& draw) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!camera_preview_) {
     return;
@@ -438,7 +804,18 @@ void OverlayWindows::UpdateCameraPreview(bool mirrored, bool matches_composited_
   state[flutter::EncodableValue("mirrored")] = flutter::EncodableValue(mirrored);
   state[flutter::EncodableValue("matchesCompositedPip")] =
       flutter::EncodableValue(matches_composited_pip);
-  state[flutter::EncodableValue("aspectRatio")] = flutter::EncodableValue(aspect_ratio);
+  state[flutter::EncodableValue("aspectRatio")] =
+      flutter::EncodableValue(draw.aspect_ratio);
+  // The crop and the mask travel with the shape, because the preview has to
+  // draw what the compositor draws: design 1p promises they are the same
+  // object, and a letterboxed rectangle on screen with a cropped circle in the
+  // file is the defect that promise exists to prevent (spec 33.5). Resolved by
+  // the host — ResolveCameraPreviewDraw — because Dart has neither the camera's
+  // shape nor the encoder canvas to work them out from.
+  state[flutter::EncodableValue("fit")] =
+      flutter::EncodableValue(std::string(CameraPipFitName(draw.fit)));
+  state[flutter::EncodableValue("cornerRadiusRatio")] =
+      flutter::EncodableValue(draw.corner_radius_ratio);
   camera_preview_->Invoke("cameraPreviewState", flutter::EncodableValue(state));
 }
 
@@ -458,6 +835,12 @@ std::vector<HWND> OverlayWindows::ExcludedWindows() const {
   }
   if (camera_preview_ && camera_preview_->window() != nullptr) {
     windows.push_back(camera_preview_->window());
+  }
+  // The third overlay is in the exclusion set on exactly the same terms as the
+  // other two. A menu that appears in the recording is the failure spec 6 is
+  // written about (spec 33.4).
+  if (input_menu_ && input_menu_->window() != nullptr) {
+    windows.push_back(input_menu_->window());
   }
   return windows;
 }
@@ -492,6 +875,13 @@ void OverlayWindows::SetMainWindowVisible(bool visible) {
 
 void OverlayWindows::DisposeAll() {
   std::lock_guard<std::mutex> lock(mutex_);
+  // The hooks first: they are global, they name this object, and nothing may
+  // reach a destroyed one through them.
+  RemoveMenuHooks();
+  if (input_menu_) {
+    input_menu_->Destroy();
+    input_menu_.reset();
+  }
   if (control_strip_) {
     control_strip_->Destroy();
     control_strip_.reset();
@@ -500,6 +890,7 @@ void OverlayWindows::DisposeAll() {
     camera_preview_->Destroy();
     camera_preview_.reset();
   }
+  has_command_anchor_.store(false);
   if (main_window_hidden_ && main_window_ != nullptr) {
     ::ShowWindow(main_window_, SW_SHOW);
     main_window_hidden_ = false;
@@ -507,13 +898,72 @@ void OverlayWindows::DisposeAll() {
 }
 
 OverlayWindows::OverlayWindow::OverlayWindow(std::string entrypoint,
-                                             std::string channel_owner, bool movable)
+                                             std::string channel_owner,
+                                             OverlayRole role)
     : entrypoint_(std::move(entrypoint)),
       channel_owner_(std::move(channel_owner)),
-      movable_(movable) {}
+      role_(role) {}
 
 OverlayWindows::OverlayWindow::~OverlayWindow() {
   Destroy();
+}
+
+bool OverlayWindows::OverlayWindow::draggable() const {
+  switch (role_) {
+    case OverlayRole::kControlStrip:
+      return true;
+    case OverlayRole::kCameraPreview:
+      // Only in display mode, where the preview *is* the picture-in-picture
+      // (design 1p). In window mode it is a separate captioned object and
+      // dragging it would move a window that stands for nothing (design 1e).
+      return geometry_.is_tile;
+    case OverlayRole::kInputMenu:
+      break;
+  }
+  return false;
+}
+
+void OverlayWindows::OverlayWindow::SetPreviewGeometry(
+    const CameraPreviewGeometry& geometry) {
+  geometry_ = geometry;
+  ApplyPreviewShape();
+}
+
+void OverlayWindows::OverlayWindow::SetCameraMovedHandler(
+    CameraMovedHandler handler) {
+  on_camera_moved_ = std::move(handler);
+}
+
+void OverlayWindows::OverlayWindow::SetDismissHandler(DismissHandler handler) {
+  on_dismiss_ = std::move(handler);
+}
+
+void OverlayWindows::OverlayWindow::SetMenuSelectionHandler(
+    MenuSelectionHandler handler) {
+  on_menu_selection_ = std::move(handler);
+}
+
+void OverlayWindows::OverlayWindow::SetMenuAnchor(const RECT& anchor_frame,
+                                                  LONG anchor_x, LONG gap) {
+  has_anchor_ = true;
+  anchor_frame_ = anchor_frame;
+  anchor_x_ = anchor_x;
+  anchor_gap_ = gap;
+}
+
+RECT OverlayWindows::OverlayWindow::MenuFrameFor(LONG width, LONG height) const {
+  RECT work_area{};
+  if (!has_anchor_ || !WorkAreaOf(MonitorForStrip(window_), &work_area)) {
+    // Nothing to resolve against. The caller keeps the frame it has, which is
+    // where the menu already is.
+    RECT current{};
+    if (window_ != nullptr) {
+      ::GetWindowRect(window_, &current);
+    }
+    return current;
+  }
+  return ResolveInputMenuFrame(work_area, anchor_frame_, anchor_x_, width, height,
+                               anchor_gap_);
 }
 
 bool OverlayWindows::OverlayWindow::Create(
@@ -647,11 +1097,54 @@ void OverlayWindows::OverlayWindow::SetFrame(const RECT& frame) {
   if (controller_ != nullptr && controller_->view() != nullptr) {
     ::MoveWindow(controller_->view()->GetNativeWindow(), 0, 0, width, height, TRUE);
   }
+  // The region is in window coordinates, so every resize invalidates it. Every
+  // path that resizes this window ends here, which makes this the one place it
+  // has to be re-applied.
+  ApplyPreviewShape();
   // Deliberately does not remember where that put the strip. Every path that
   // moves the window ends here, and most of them are the ground moving under
   // it rather than the user moving it: a clamp that wrote its result back would
   // ratchet the fraction towards the near edge on every taskbar change. Only
   // the paths that are the user's own doing remember, and they say so.
+}
+
+void OverlayWindows::OverlayWindow::ApplyPreviewShape() {
+  if (role_ != OverlayRole::kCameraPreview || window_ == nullptr) {
+    return;
+  }
+  RECT frame{};
+  if (::GetWindowRect(window_, &frame) == FALSE) {
+    return;
+  }
+  const LONG width = frame.right - frame.left;
+  const LONG height = frame.bottom - frame.top;
+  const double radius =
+      geometry_.is_tile
+          ? (std::min)(geometry_.camera.corner_radius_ratio * width,
+                       (std::min)(width, height) / 2.0)
+          : 0.0;
+  if (width <= 0 || height <= 0 || !(radius > 0)) {
+    // A square tile is the whole window. Clearing the region rather than
+    // setting a rectangular one, so a preset changed back leaves nothing
+    // behind.
+    ::SetWindowRgn(window_, nullptr, TRUE);
+    return;
+  }
+  // Right and bottom are exclusive, so a region that is to include the last row
+  // and column is built one larger than the window.
+  const int diameter = static_cast<int>(radius * 2.0 + 0.5);
+  const HRGN region =
+      diameter >= (std::min)(width, height)
+          ? ::CreateEllipticRgn(0, 0, width + 1, height + 1)
+          : ::CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter);
+  if (region == nullptr) {
+    return;
+  }
+  // SetWindowRgn takes ownership on success and the system frees it; on failure
+  // it is still this function's to delete.
+  if (::SetWindowRgn(window_, region, TRUE) == 0) {
+    ::DeleteObject(region);
+  }
 }
 
 // The whole drag protocol (spec 33.3), and deliberately not a per-move message
@@ -678,10 +1171,17 @@ void OverlayWindows::OverlayWindow::BeginMove() {
   const bool button_down =
       ::GetAsyncKeyState(VK_LBUTTON) < 0 ||
       (::GetSystemMetrics(SM_SWAPBUTTON) != 0 && ::GetAsyncKeyState(VK_RBUTTON) < 0);
-  if (!ShouldBeginStripMove(movable_, move_pending_, button_down)) {
+  if (!ShouldBeginOverlayMove(draggable(), move_pending_, button_down)) {
     return;
   }
   move_pending_ = true;
+  // The strip moving closes whatever sheet is open (spec 33.7), and asking for
+  // it before the modal loop is entered is what keeps this off the stack of a
+  // loop that can free this object. Host-initiated: the user dragged the strip,
+  // not the menu, so nothing has told the application the sheet is gone.
+  if (role_ == OverlayRole::kControlStrip && on_dismiss_) {
+    on_dismiss_(/*host_initiated=*/true);
+  }
   // ReleaseCapture drops the capture the hosted Flutter view took on the press;
   // without it the move loop never sees the mouse. WM_NCLBUTTONDOWN with
   // HTCAPTION then starts that loop on a window that has no caption to click,
@@ -714,7 +1214,14 @@ void OverlayWindows::OverlayWindow::BeginMove() {
 
 void OverlayWindows::OverlayWindow::FinishMove() {
   move_pending_ = false;
-  if (!movable_ || window_ == nullptr) {
+  if (window_ == nullptr) {
+    return;
+  }
+  if (role_ == OverlayRole::kCameraPreview) {
+    FinishCameraMove();
+    return;
+  }
+  if (role_ != OverlayRole::kControlStrip) {
     return;
   }
   RECT frame{};
@@ -735,8 +1242,107 @@ void OverlayWindows::OverlayWindow::FinishMove() {
   RememberPosition();
 }
 
+RECT OverlayWindows::OverlayWindow::CanvasRectToScreen(const RectD& rect) const {
+  const RECT& bounds = geometry_.canvas_bounds;
+  const double bounds_width = static_cast<double>(bounds.right - bounds.left);
+  const double bounds_height = static_cast<double>(bounds.bottom - bounds.top);
+  RECT frame{};
+  if (bounds_width <= 0 || bounds_height <= 0 || geometry_.canvas_width <= 0 ||
+      geometry_.canvas_height <= 0) {
+    return frame;
+  }
+  const double to_screen_x = bounds_width / geometry_.canvas_width;
+  const double to_screen_y = bounds_height / geometry_.canvas_height;
+  frame.left = bounds.left + RoundToPixel(rect.x * to_screen_x);
+  frame.top = bounds.top + RoundToPixel(rect.y * to_screen_y);
+  frame.right = frame.left + RoundToPixel(rect.width * to_screen_x);
+  frame.bottom = frame.top + RoundToPixel(rect.height * to_screen_y);
+  return frame;
+}
+
+bool OverlayWindows::OverlayWindow::PreviewPosition(double* x, double* y) const {
+  if (role_ != OverlayRole::kCameraPreview || !geometry_.is_tile ||
+      window_ == nullptr || x == nullptr || y == nullptr) {
+    // Window mode answers null on purpose: the preview there is a separate
+    // captioned object, and reporting its corner as the tile's would move the
+    // picture-in-picture to wherever the user parked a window that does not
+    // stand for it (design 1e).
+    return false;
+  }
+  const RECT& bounds = geometry_.canvas_bounds;
+  const double bounds_width = static_cast<double>(bounds.right - bounds.left);
+  const double bounds_height = static_cast<double>(bounds.bottom - bounds.top);
+  RECT frame{};
+  if (bounds_width <= 0 || bounds_height <= 0 ||
+      ::GetWindowRect(window_, &frame) == FALSE) {
+    return false;
+  }
+  return PipPositionRatio(
+      (frame.left - bounds.left) * geometry_.canvas_width / bounds_width,
+      (frame.top - bounds.top) * geometry_.canvas_height / bounds_height,
+      geometry_.canvas_width, geometry_.canvas_height, x, y);
+}
+
+void OverlayWindows::OverlayWindow::FinishCameraMove() {
+  if (!geometry_.is_tile || window_ == nullptr) {
+    return;
+  }
+  CameraOverlayConfig moved = geometry_.camera;
+  if (!PreviewPosition(&moved.position_x, &moved.position_y)) {
+    return;
+  }
+  moved.has_position = true;
+  // Through the compositor's own arithmetic, so the window cannot come to rest
+  // anywhere the tile could not: clamped to the margin, and snapped onto a
+  // corner from within 2% of the canvas width (spec 33.5).
+  const PipDraw draw =
+      ResolvePipDraw(moved, geometry_.canvas_width, geometry_.canvas_height,
+                     geometry_.frame_width, geometry_.frame_height);
+  // The settled fraction, read back off the rectangle that resolution landed
+  // on: what the host stores and what the compositor draws have to be the same
+  // number, or the file and the window disagree by a snap.
+  if (!PipPositionRatio(draw.dest.x, draw.dest.y, geometry_.canvas_width,
+                        geometry_.canvas_height, &moved.position_x,
+                        &moved.position_y)) {
+    return;
+  }
+  const RECT frame = CanvasRectToScreen(draw.dest);
+  if (frame.right > frame.left && frame.bottom > frame.top) {
+    SetFrame(frame);
+  }
+  // The moved configuration is deliberately not written back here. This runs on
+  // the platform thread without OverlayWindows' lock — a drag cannot take it,
+  // because the modal move loop pumps the queue that lock is held across — and
+  // `geometry_` is read on the camera thread by PushFrame under exactly that
+  // lock. The host writes it instead, through SetCameraPreviewGeometry, on the
+  // way back from this call.
+  if (on_camera_moved_) {
+    on_camera_moved_(moved.position_x, moved.position_y);
+  }
+}
+
+void OverlayWindows::OverlayWindow::Nudge(LONG dx, LONG dy) {
+  if (role_ != OverlayRole::kControlStrip || window_ == nullptr) {
+    return;
+  }
+  RECT frame{};
+  RECT work_area{};
+  if (!WindowAndWorkArea(window_, &frame, &work_area)) {
+    return;
+  }
+  const RECT moved = NudgeStripFrame(
+      work_area, frame, dx, dy,
+      StripSnapPixels(MonitorScale(MonitorForStrip(window_))));
+  if (moved.left != frame.left || moved.top != frame.top) {
+    SetFrame(moved);
+  }
+  // The keyboard is the user moving the strip exactly as a drag is, so it
+  // rewrites the fraction the same way (spec 33.3).
+  RememberPosition();
+}
+
 void OverlayWindows::OverlayWindow::ClampIntoWorkArea() {
-  if (!movable_ || window_ == nullptr) {
+  if (role_ != OverlayRole::kControlStrip || window_ == nullptr) {
     return;
   }
   RECT frame{};
@@ -754,7 +1360,7 @@ void OverlayWindows::OverlayWindow::ClampIntoWorkArea() {
 }
 
 void OverlayWindows::OverlayWindow::ReresolveRememberedFraction() {
-  if (!movable_ || window_ == nullptr) {
+  if (role_ != OverlayRole::kControlStrip || window_ == nullptr) {
     return;
   }
   if (!has_ratio_) {
@@ -785,7 +1391,7 @@ void OverlayWindows::OverlayWindow::ReresolveRememberedFraction() {
 }
 
 void OverlayWindows::OverlayWindow::RememberPosition() {
-  if (!movable_ || window_ == nullptr) {
+  if (role_ != OverlayRole::kControlStrip || window_ == nullptr) {
     return;
   }
   RECT frame{};
@@ -808,7 +1414,7 @@ void OverlayWindows::OverlayWindow::RememberPosition() {
 void OverlayWindows::OverlayWindow::RememberRestoredPosition(double x, double y) {
   // A fraction that is not a number is not a position, and the last one is
   // better than a fabricated corner.
-  if (!movable_ || std::isnan(x) || std::isnan(y)) {
+  if (role_ != OverlayRole::kControlStrip || std::isnan(x) || std::isnan(y)) {
     return;
   }
   has_ratio_ = true;
@@ -854,17 +1460,30 @@ void OverlayWindows::OverlayWindow::ApplyPendingContentSize() {
   // display and placed on the other.
   const HMONITOR monitor = MonitorForStrip(window_);
   const double scale = MonitorScale(monitor);
+  const LONG measured_width = static_cast<LONG>(width * scale + 0.5);
+  const LONG measured_height = static_cast<LONG>(height * scale + 0.5);
   RECT frame = current;
-  frame.right = frame.left + static_cast<LONG>(width * scale + 0.5);
-  frame.bottom = frame.top + static_cast<LONG>(height * scale + 0.5);
+  frame.right = frame.left + measured_width;
+  frame.bottom = frame.top + measured_height;
   if (frame.right == current.right && frame.bottom == current.bottom) {
+    return;
+  }
+  if (role_ == OverlayRole::kInputMenu) {
+    // The menu is placed, not grown. It may have opened *above* the strip, and
+    // a window that grew about its top-left from there would slide down over
+    // the strip it belongs to; re-resolving from the anchor puts it on
+    // whichever side its real size fits (spec 33.4).
+    SetFrame(MenuFrameFor(measured_width, measured_height));
+    if (on_content_size_) {
+      on_content_size_(width, height);
+    }
     return;
   }
   // A strip parked against the right or bottom edge of the usable area would
   // otherwise grow straight out of it: the window grows about its top-left, and
   // 33.3 clamps on every show, not only on the first one.
   RECT work_area{};
-  if (movable_ && WorkAreaOf(monitor, &work_area)) {
+  if (role_ == OverlayRole::kControlStrip && WorkAreaOf(monitor, &work_area)) {
     frame = ClampToWorkArea(work_area, frame);
   }
   SetFrame(frame);
@@ -887,26 +1506,63 @@ void OverlayWindows::OverlayWindow::PushFrame(const uint8_t* bgra, uint32_t widt
       texture_id_ < 0) {
     return;
   }
+  // The part of the frame the compositor is going to draw, resolved by the same
+  // call it draws with. The preview shows the crop rather than the whole
+  // sensor, because the tile it stands for is the crop (design 1p, spec 33.5).
+  // A window-mode preview has no tile, and shows the frame whole.
+  uint32_t crop_x = 0;
+  uint32_t crop_y = 0;
+  uint32_t crop_width = width;
+  uint32_t crop_height = height;
+  if (geometry_.is_tile) {
+    const RectD source =
+        ResolvePipDraw(geometry_.camera, geometry_.canvas_width,
+                       geometry_.canvas_height, width, height)
+            .source;
+    // Clamped into the frame that actually arrived: the geometry may describe
+    // the camera that was running a moment ago.
+    const double left = (std::max)(0.0, source.x);
+    const double top = (std::max)(0.0, source.y);
+    crop_x = static_cast<uint32_t>(left);
+    crop_y = static_cast<uint32_t>(top);
+    crop_width = crop_x >= width
+                     ? 0
+                     : (std::min)(width - crop_x, static_cast<uint32_t>(source.width));
+    crop_height =
+        crop_y >= height
+            ? 0
+            : (std::min)(height - crop_y, static_cast<uint32_t>(source.height));
+  }
+  if (crop_width == 0 || crop_height == 0) {
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    const size_t row_bytes = static_cast<size_t>(width) * 4;
-    frame_pixels_.resize(row_bytes * height);
+    const size_t row_bytes = static_cast<size_t>(crop_width) * 4;
+    frame_pixels_.resize(row_bytes * crop_height);
     // The engine uploads a pixel-buffer texture as RGBA8888
     // (external_texture_pixelbuffer.cc), while the camera path is BGRA
     // throughout, so the channels are swapped exactly here — once, on the
     // small preview image, and never on the encoded frame.
-    for (uint32_t row = 0; row < height; ++row) {
-      const uint8_t* source = bgra + static_cast<size_t>(row) * stride;
+    //
+    // Alpha is forced opaque rather than copied: the camera frame carries the
+    // tile's mask there (video_compositor.h), and the preview's own shape is
+    // the window region, not a transparency the unlayered overlay could show
+    // anyway.
+    for (uint32_t row = 0; row < crop_height; ++row) {
+      const uint8_t* source =
+          bgra + static_cast<size_t>(row + crop_y) * stride +
+          static_cast<size_t>(crop_x) * 4;
       uint8_t* destination = frame_pixels_.data() + row * row_bytes;
-      for (uint32_t column = 0; column < width; ++column) {
+      for (uint32_t column = 0; column < crop_width; ++column) {
         destination[column * 4 + 0] = source[column * 4 + 2];
         destination[column * 4 + 1] = source[column * 4 + 1];
         destination[column * 4 + 2] = source[column * 4 + 0];
-        destination[column * 4 + 3] = source[column * 4 + 3];
+        destination[column * 4 + 3] = 0xFF;
       }
     }
-    frame_width_ = width;
-    frame_height_ = height;
+    frame_width_ = crop_width;
+    frame_height_ = crop_height;
   }
   registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
 }
@@ -917,17 +1573,67 @@ void OverlayWindows::OverlayWindow::HandleCall(
   const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
   if (call.method_name() == "command") {
     if (arguments != nullptr && on_command_) {
-      on_command_(StringAt(*arguments, "command"));
+      // The anchor rides on this call rather than on the event channel, so that
+      // channel goes on emitting bare command names and a decoder that has not
+      // learned the chevrons ignores them (spec 33.4).
+      on_command_(StringAt(*arguments, "command"),
+                  OptionalDoubleAt(*arguments, "anchorX"));
+    }
+    result->Success();
+    return;
+  }
+  if (call.method_name() == "chooseInputDevice") {
+    if (arguments == nullptr) {
+      result->NotImplemented();
+      return;
+    }
+    if (on_menu_selection_) {
+      // The map as it arrived. What the choice means is the application's
+      // business, not this layer's (spec 33.4).
+      on_menu_selection_(*arguments);
+    }
+    // A device row closes the menu, and asks the host to do it: a window
+    // destroyed from inside its own engine's channel callback would free the
+    // stack that is running. The camera sheet's shape presets, its corners and
+    // `Reset position` leave it open — the tile changes underneath it.
+    //
+    // Not host-initiated: the choice above is already on its way to the
+    // application, which closes the menu itself in response. A dismissal beside
+    // it would report the same close twice.
+    if (MenuChoiceClosesMenu(OptionalStringAt(*arguments, "preset").has_value(),
+                             OptionalStringAt(*arguments, "corner").has_value(),
+                             BoolAt(*arguments, "resetPosition", false)) &&
+        on_dismiss_) {
+      on_dismiss_(/*host_initiated=*/false);
+    }
+    result->Success();
+    return;
+  }
+  if (call.method_name() == "dismissInputMenu") {
+    // Esc, while the menu window happens to hold focus. The application never
+    // saw the key — the menu runs in its own engine — so this is a close it has
+    // to be told about, and the host reports it as a dismissal on
+    // `relay/overlay/events` (spec 33.4).
+    if (on_dismiss_) {
+      on_dismiss_(/*host_initiated=*/true);
     }
     result->Success();
     return;
   }
   if (call.method_name() == "beginMove") {
-    // Only the strip is draggable. The preview's frame is the composited
-    // picture-in-picture's and is set by the compositor (spec 33.5), so a drag
-    // there is not a window move and must not silently succeed as one.
-    if (!movable_ || window_ == nullptr) {
-      result->NotImplemented();
+    // The strip always, the preview only while it is the tile (design 1p). A
+    // window-mode preview drag moves nothing, so nothing is started.
+    //
+    // Answered as a success rather than NotImplemented: on the Dart side
+    // `invokeMethod` turns NotImplemented into a thrown MissingPluginException,
+    // and the drag handler calls this unawaited, so the throw would surface as
+    // an unhandled async error during an ordinary gesture. The method plainly
+    // exists; what does not exist is a window to move. The two also disagree by
+    // construction — Dart mounts the handler on `matchesCompositedPip` while
+    // `draggable()` additionally requires the recorded display to still be
+    // nameable — so this path is reachable in display mode too.
+    if (!draggable() || window_ == nullptr) {
+      result->Success();
       return;
     }
     // Posted, never run here, for the reason "contentSize" below is: the move
@@ -996,6 +1702,13 @@ LRESULT OverlayWindows::OverlayWindow::HandleMessage(HWND window, UINT message,
       break;
     case WM_DISPLAYCHANGE:
       ReresolveRememberedFraction();
+      // The display configuration changed, so the sheet closes (spec 33.4).
+      // Raised by whichever window sees it first, and by every other one after
+      // it: closing a menu that is already closed is a no-op, and the host
+      // reports the dismissal only for the menu it still believes is open.
+      if (on_dismiss_) {
+        on_dismiss_(/*host_initiated=*/true);
+      }
       break;
     case WM_SETTINGCHANGE:
       // A taskbar shown, hidden, resized or moved to another edge. The strip
@@ -1004,6 +1717,9 @@ LRESULT OverlayWindows::OverlayWindow::HandleMessage(HWND window, UINT message,
       // the pixels, is what brings the strip back when the taskbar goes away.
       if (wparam == static_cast<WPARAM>(SPI_SETWORKAREA)) {
         ReresolveRememberedFraction();
+        if (on_dismiss_) {
+          on_dismiss_(/*host_initiated=*/true);
+        }
       }
       break;
     default:

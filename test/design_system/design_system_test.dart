@@ -745,6 +745,334 @@ void main() {
     });
   });
 
+  group('InputMenuSheet (§33.4)', () {
+    InputMenuOverlayState state({
+      List<InputMenuItem> items = const <InputMenuItem>[],
+      bool loading = false,
+      String? emptyMessage,
+      String? notice,
+      InputLevel? level,
+    }) => InputMenuOverlayState(
+      kind: MediaDeviceKind.microphone,
+      title: 'Microphone',
+      items: items,
+      loading: loading,
+      emptyMessage: emptyMessage,
+      notice: notice,
+      level: level,
+    );
+
+    Future<void> mount(
+      WidgetTester tester,
+      InputMenuOverlayState s, {
+      ValueChanged<InputMenuItem>? onChoose,
+    }) async {
+      await tester.pumpWidget(
+        host(InputMenuSheet(state: s, onChoose: onChoose ?? (_) {})),
+      );
+    }
+
+    testWidgets('a list that is still loading says so, in one row', (
+      WidgetTester tester,
+    ) async {
+      // Never an empty panel, and never a list that appears to have loaded.
+      await mount(tester, state(loading: true));
+
+      expect(find.text('Looking for devices…'), findsOneWidget);
+      expect(find.byType(AppOptionTile), findsNothing);
+    });
+
+    testWidgets('nothing found is said, not left blank', (
+      WidgetTester tester,
+    ) async {
+      await mount(tester, state(emptyMessage: 'No microphone found'));
+
+      expect(find.text('No microphone found'), findsOneWidget);
+    });
+
+    testWidgets('a device that cannot be opened cannot be chosen', (
+      WidgetTester tester,
+    ) async {
+      int chosen = 0;
+      await mount(
+        tester,
+        state(
+          items: const <InputMenuItem>[
+            InputMenuItem(id: 'a', label: 'Shure MV7'),
+            InputMenuItem(
+              id: 'b',
+              label: 'Studio Interface',
+              meta: 'in use',
+              enabled: false,
+            ),
+          ],
+        ),
+        onChoose: (_) => chosen++,
+      );
+
+      await tester.tap(find.text('Studio Interface'));
+      expect(chosen, 0);
+
+      await tester.tap(find.text('Shure MV7'));
+      expect(chosen, 1);
+    });
+
+    testWidgets('a lost device is named under the list', (
+      WidgetTester tester,
+    ) async {
+      await mount(
+        tester,
+        state(
+          items: const <InputMenuItem>[InputMenuItem(label: 'System default')],
+          notice: '“Shure MV7” was not found · using the default',
+        ),
+      );
+
+      expect(find.textContaining('was not found'), findsOneWidget);
+    });
+
+    testWidgets('the meter appears only when a level is being reported', (
+      WidgetTester tester,
+    ) async {
+      await mount(tester, state());
+      expect(find.byType(AppLevelMeter), findsNothing);
+
+      await mount(tester, state(level: const InputLevel(peak: 0.8, rms: 0.6)));
+      expect(find.byType(AppLevelMeter), findsOneWidget);
+      expect(find.text('TEST — SPEAK NOW'), findsOneWidget);
+    });
+
+    testWidgets('a silent level says so rather than reading as working', (
+      WidgetTester tester,
+    ) async {
+      await mount(tester, state(level: InputLevel.silent));
+
+      expect(find.text('TEST — NO SOUND'), findsOneWidget);
+    });
+
+    testWidgets('the camera sheet carries the shapes, and raises one', (
+      WidgetTester tester,
+    ) async {
+      // §33.4: the camera's answer to the microphone's meter. Without it the
+      // shape could only be chosen before recording started.
+      CameraPipPreset? chosen;
+      await tester.pumpWidget(
+        host(
+          InputMenuSheet(
+            state: const InputMenuOverlayState(
+              kind: MediaDeviceKind.camera,
+              title: 'Camera',
+              presets: CameraPipPreset.values,
+              selectedPreset: CameraPipPreset.square,
+            ),
+            onChoose: (_) {},
+            onChoosePreset: (CameraPipPreset p) => chosen = p,
+          ),
+        ),
+      );
+
+      expect(find.byType(CameraPresetTiles), findsOneWidget);
+      await tester.tap(find.text('Circle'));
+
+      expect(chosen, CameraPipPreset.circle);
+    });
+
+    testWidgets('a sheet that cannot apply a preset draws none', (
+      WidgetTester tester,
+    ) async {
+      // A dead control on a window floating over someone else's screen is
+      // worse than no control: there is nothing to explain why it does nothing.
+      await tester.pumpWidget(
+        host(
+          const InputMenuSheet(
+            state: InputMenuOverlayState(
+              kind: MediaDeviceKind.camera,
+              title: 'Camera',
+              presets: CameraPipPreset.values,
+              canResetPosition: true,
+            ),
+            onChoose: _noChoice,
+          ),
+        ),
+      );
+
+      expect(find.byType(CameraPresetTiles), findsNothing);
+      expect(find.text('Reset position'), findsNothing);
+    });
+
+    testWidgets('window mode offers four named corners instead of a drag', (
+      WidgetTester tester,
+    ) async {
+      // §33.5: with a window source the preview is not the tile, so there is
+      // nothing on screen to drag and nothing that would show where a drag had
+      // put it. A named corner is legible without a preview.
+      CameraOverlayCorner? chosen;
+      await tester.pumpWidget(
+        host(
+          InputMenuSheet(
+            state: const InputMenuOverlayState(
+              kind: MediaDeviceKind.camera,
+              title: 'Camera',
+              presets: CameraPipPreset.values,
+              corners: CameraOverlayCorner.values,
+              selectedCorner: CameraOverlayCorner.bottomRight,
+            ),
+            onChoose: (_) {},
+            onChoosePreset: (_) {},
+            onChooseCorner: (CameraOverlayCorner c) => chosen = c,
+          ),
+        ),
+      );
+
+      for (final CameraOverlayCorner corner in CameraOverlayCorner.values) {
+        expect(find.text(corner.label), findsOneWidget);
+      }
+      await tester.tap(find.text('Top left'));
+
+      expect(chosen, CameraOverlayCorner.topLeft);
+    });
+
+    testWidgets('a display source is offered no corners at all', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          InputMenuSheet(
+            state: const InputMenuOverlayState(
+              kind: MediaDeviceKind.camera,
+              title: 'Camera',
+              presets: CameraPipPreset.values,
+            ),
+            onChoose: (_) {},
+            onChoosePreset: (_) {},
+            onChooseCorner: (_) {},
+          ),
+        ),
+      );
+
+      expect(find.text('POSITION'), findsNothing);
+      expect(find.text('Lower right'), findsNothing);
+    });
+
+    testWidgets('Reset position appears only once the tile has moved', (
+      WidgetTester tester,
+    ) async {
+      int reset = 0;
+      Future<void> mountCamera({required bool moved}) => tester.pumpWidget(
+        host(
+          InputMenuSheet(
+            state: InputMenuOverlayState(
+              kind: MediaDeviceKind.camera,
+              title: 'Camera',
+              presets: CameraPipPreset.values,
+              canResetPosition: moved,
+            ),
+            onChoose: (_) {},
+            onChoosePreset: (_) {},
+            onResetPosition: () => reset++,
+          ),
+        ),
+      );
+
+      await mountCamera(moved: false);
+      expect(find.text('Reset position'), findsNothing);
+
+      await mountCamera(moved: true);
+      await tester.tap(find.text('Reset position'));
+      expect(reset, 1);
+    });
+  });
+
+  group('the strip carets (§33.4)', () {
+    testWidgets('a caret is drawn only for an input with a menu', (
+      WidgetTester tester,
+    ) async {
+      await loadDesignFonts();
+      await tester.pumpWidget(
+        host(
+          RecordingControlStrip(
+            elapsed: Duration.zero,
+            isPaused: false,
+            microphoneEnabled: true,
+            cameraEnabled: false,
+            systemAudioEnabled: true,
+            onOpenMicrophoneMenu: (_) {},
+            onOpenCameraMenu: (_) {},
+          ),
+          size: const Size(700, 200),
+        ),
+      );
+
+      // An input the platform gives no choice about has nothing to disclose,
+      // and a control that can never do anything is not a disabled control.
+      expect(find.bySemanticsLabel('Choose a microphone'), findsOneWidget);
+      expect(find.bySemanticsLabel('Choose a camera'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Choose a system-audio device'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a caret reports its own centre, in window coordinates', (
+      WidgetTester tester,
+    ) async {
+      // The host places the menu under it and cannot work that out for itself.
+      await loadDesignFonts();
+      double? anchor;
+      await tester.pumpWidget(
+        host(
+          RecordingControlStrip(
+            elapsed: Duration.zero,
+            isPaused: false,
+            microphoneEnabled: true,
+            cameraEnabled: false,
+            systemAudioEnabled: true,
+            onOpenMicrophoneMenu: (double x) => anchor = x,
+          ),
+          size: const Size(700, 200),
+        ),
+      );
+
+      await tester.tap(find.bySemanticsLabel('Choose a microphone'));
+      await tester.pump();
+
+      expect(anchor, isNotNull);
+      expect(
+        anchor,
+        closeTo(
+          tester.getCenter(find.bySemanticsLabel('Choose a microphone')).dx,
+          0.5,
+        ),
+      );
+    });
+
+    testWidgets('pressing a caret does not toggle the input beside it', (
+      WidgetTester tester,
+    ) async {
+      await loadDesignFonts();
+      int toggles = 0;
+      await tester.pumpWidget(
+        host(
+          RecordingControlStrip(
+            elapsed: Duration.zero,
+            isPaused: false,
+            microphoneEnabled: true,
+            cameraEnabled: false,
+            systemAudioEnabled: true,
+            onToggleMicrophone: () => toggles++,
+            onOpenMicrophoneMenu: (_) {},
+          ),
+          size: const Size(700, 200),
+        ),
+      );
+
+      await tester.tap(find.bySemanticsLabel('Choose a microphone'));
+      await tester.pump();
+
+      expect(toggles, 0);
+    });
+  });
+
   group('camera picture-in-picture geometry (§7)', () {
     test('the defaults are the accepted ADR values', () {
       const CameraOverlayConfiguration configuration =
@@ -752,7 +1080,10 @@ void main() {
       expect(configuration.widthRatio, 0.16);
       expect(configuration.aspectRatio, closeTo(16 / 9, 0.0001));
       expect(configuration.followsSourceAspectRatio, isTrue);
-      expect(configuration.cornerRadius, 0);
+      expect(configuration.cornerRadiusRatio, 0);
+      expect(configuration.preset, CameraPipPreset.camera);
+      expect(configuration.position, isNull);
+      expect(configuration.fit, CameraPipFit.contain);
       expect(configuration.marginRatio, 0.01);
       expect(configuration.corner, CameraOverlayCorner.bottomRight);
       expect(configuration.mirrorPreview, isTrue);
@@ -914,3 +1245,7 @@ void main() {
 }
 
 void _noop() {}
+
+/// A sheet whose callbacks are absent is the point of the test above, so this
+/// stands in for the one that is required.
+void _noChoice(InputMenuItem _) {}

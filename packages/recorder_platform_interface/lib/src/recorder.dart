@@ -1,3 +1,5 @@
+import 'dart:ui' show Offset;
+
 import 'models/camera_overlay_configuration.dart';
 import 'models/capture_source.dart';
 import 'models/media_device.dart';
@@ -64,6 +66,23 @@ abstract interface class MediaDeviceProvider {
   /// Stops what [startInputMetering] began. Idempotent, and a no-op when
   /// nothing is metering.
   Future<void> stopInputMetering(MediaDeviceKind kind);
+
+  /// Swaps the device an input is using **while a session is running** (§33.2).
+  ///
+  /// Valid in `recording` and `paused`. The platform re-points the live capture:
+  /// it does not restart the session, does not close the output file, and does
+  /// not produce a second track — the file keeps one video track and one mixed
+  /// audio track (§11).
+  ///
+  /// Failure degrades and never stops a recording. A device that will not open
+  /// leaves the previous one running and raises a non-fatal error; the swap gap
+  /// is silence at a known position on the monotonic timeline (§8), never a
+  /// drift.
+  ///
+  /// [deviceId] null means the platform default. Called outside a session it is
+  /// a no-op: what the next recording opens is `RecordingConfiguration`'s
+  /// business.
+  Future<void> selectInputDevice(MediaDeviceKind kind, {String? deviceId});
 }
 
 /// The recorder contract (§20).
@@ -111,6 +130,21 @@ abstract interface class Recorder
   /// Idempotent, and a no-op where there is no session. Never deletes a
   /// recording (§18).
   Future<void> releaseSession();
+
+  /// Re-points the camera picture-in-picture mid-session (§33.5).
+  ///
+  /// Applied between frames, for the next frame. The encoder's canvas never
+  /// changes, so the output stays one continuous video track. A no-op outside
+  /// a session: what the next recording opens is
+  /// [RecordingConfiguration.cameraOverlay]'s business.
+  Future<void> setCameraOverlay(CameraOverlayConfiguration configuration);
+
+  /// Where the camera preview window is now, as a fraction of the canvas.
+  ///
+  /// Null when there is no preview, or when it is not the tile — in window mode
+  /// the preview is a separate captioned object and dragging it moves the
+  /// preview, not the picture-in-picture (design `1e`, §33.5).
+  Future<Offset?> cameraPreviewPosition();
 
   Future<void> setMicrophoneEnabled(bool enabled);
 
@@ -182,6 +216,38 @@ abstract interface class OverlayWindowController {
   /// clearing it: failing to read a position is not the user having moved the
   /// strip back.
   Future<OverlayStripPosition?> controlStripPosition();
+
+  /// Shows the input menu at [placement], anchored under the chevron that asked
+  /// for it (§33.4).
+  ///
+  /// A non-activating window: opening it must not take key focus from the
+  /// application being recorded. Only one exists — showing it again replaces
+  /// whatever was open — and it is registered with the capture filter's
+  /// exclusion list on the same terms as the strip and the preview (§6).
+  Future<void> showInputMenu(
+    OverlayPlacement placement,
+    InputMenuOverlayState state,
+  );
+
+  /// Pushes a fresh snapshot into an open menu, so a device that appears or
+  /// disappears re-renders it in place rather than closing it (§33.7).
+  Future<void> updateInputMenu(InputMenuOverlayState state);
+
+  Future<void> hideInputMenu();
+
+  /// Choices made in the input menu.
+  ///
+  /// A second stream off the same event channel rather than a widening of
+  /// [commands]: a command is a bare name and always will be, and a choice
+  /// carries a device id. Decoding by shape keeps a host that only ever emits
+  /// names working untouched.
+  Stream<InputMenuSelection> get menuSelections;
+
+  /// Moves the control strip by [dx], [dy] logical points (§33.3).
+  ///
+  /// The keyboard path, for a strip that cannot be reached with a pointer. The
+  /// host clamps and snaps exactly as it does after a drag.
+  Future<void> nudgeControlStrip(double dx, double dy);
 
   /// Shows the camera preview at [placement].
   ///

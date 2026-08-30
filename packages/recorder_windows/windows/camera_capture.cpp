@@ -93,8 +93,38 @@ bool CameraCapture::Start(ID3D11Device* device, VideoCompositor* compositor,
   on_error_ = std::move(on_error);
   stopping_.store(false);
   running_.store(true);
+  {
+    // Re-armed before the thread exists, so a wait cannot be answered by the
+    // previous run's result.
+    std::lock_guard<std::mutex> lock(open_mutex_);
+    open_settled_ = false;
+    opened_ = false;
+  }
   thread_ = std::thread(&CameraCapture::CaptureThread, this);
   return true;
+}
+
+bool CameraCapture::WaitUntilOpen(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(open_mutex_);
+  // A timeout is not "still opening, ask again": the caller is holding a
+  // recording open while it waits, and a camera that has not answered by then
+  // is one to leave the previous device running for (spec 33.2).
+  if (!open_cv_.wait_for(lock, timeout, [this] { return open_settled_; })) {
+    return false;
+  }
+  return opened_;
+}
+
+void CameraCapture::SettleOpen(bool opened) {
+  {
+    std::lock_guard<std::mutex> lock(open_mutex_);
+    if (open_settled_) {
+      return;
+    }
+    open_settled_ = true;
+    opened_ = opened;
+  }
+  open_cv_.notify_all();
 }
 
 void CameraCapture::Stop() {
@@ -103,6 +133,11 @@ void CameraCapture::Stop() {
   // reported as a non-fatal error long before this.
   stopping_.store(true);
   running_.store(false);
+  // Before the join, not after it: a stop that arrives while another thread is
+  // still waiting on the handshake must not leave it there for the whole
+  // timeout. Settling twice is a no-op, so the capture thread's own answer
+  // still wins when it got there first.
+  SettleOpen(false);
   if (thread_.joinable()) {
     thread_.join();
   }
@@ -327,15 +362,35 @@ void CameraCapture::PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t
   const winrt::com_ptr<ID3D11Texture2D> texture = textures_[next_texture_];
   next_texture_ = (next_texture_ + 1) % textures_.size();
 
+  // The shape the compositor is going to draw this frame in, asked for here
+  // because here is where the pixels are already being touched: the fourth byte
+  // of MFVideoFormat_RGB32 is undefined, so it has to be written on every path
+  // anyway, and writing the mask's coverage into it instead of a blind 255
+  // costs a compare per pixel (video_compositor.h).
+  const CameraFrameMask mask = compositor_->CameraMask(width, height);
+
   D3D11_MAPPED_SUBRESOURCE mapped{};
   if (FAILED(context_->Map(texture.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
     return;
   }
+  // A rectangular mask needs no shape in the alpha channel at all: the crop is
+  // the stream's source rectangle, so what lies outside it is never read, and
+  // the compositor does not blend an unrounded tile. Only the fourth byte still
+  // has to be written, because Media Foundation leaves it undefined.
+  const bool rectangular = CameraMaskIsRectangular(mask);
   auto* destination = static_cast<uint8_t*>(mapped.pData);
   for (uint32_t row = 0; row < height; ++row) {
-    std::memcpy(destination + static_cast<size_t>(row) * mapped.RowPitch,
+    uint8_t* line = destination + static_cast<size_t>(row) * mapped.RowPitch;
+    std::memcpy(line,
                 top_down + static_cast<size_t>(row) * static_cast<uint32_t>(stride),
                 row_bytes);
+    if (rectangular) {
+      for (uint32_t column = 0; column < width; ++column) {
+        line[static_cast<size_t>(column) * 4 + 3] = 0xFF;
+      }
+      continue;
+    }
+    ApplyCameraMaskRow(mask, static_cast<double>(row) + 0.5, width, line);
   }
   context_->Unmap(texture.get(), 0);
   compositor_->SetCameraFrame(texture, width, height);
@@ -346,6 +401,7 @@ void CameraCapture::CaptureThread() {
   const HRESULT startup = ::MFStartup(MF_VERSION, MFSTARTUP_LITE);
   if (FAILED(startup)) {
     ReportFailure("Media Foundation could not be started for the camera.", startup);
+    SettleOpen(false);
     running_.store(false);
     if (SUCCEEDED(com)) {
       ::CoUninitialize();
@@ -355,8 +411,10 @@ void CameraCapture::CaptureThread() {
 
   std::string error;
   if (!OpenReader(&error)) {
+    SettleOpen(false);
     ReportFailure(error, E_FAIL);
   } else {
+    SettleOpen(true);
     LONG default_stride = DefaultStrideFor(width_.load());
 
     while (running_.load() && !stopping_.load()) {

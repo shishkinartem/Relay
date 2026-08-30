@@ -157,10 +157,53 @@ enum class PipCorner { kTopLeft, kTopRight, kBottomLeft, kBottomRight };
 
 PipCorner PipCornerFromName(const std::string& name);
 
+// The three shapes and sizes the tile comes in (spec 33.5). Mirrors
+// CameraPipPreset in recorder_platform_interface; the enumerator name is what
+// crosses the channel, so the spelling here is part of the contract.
+enum class CameraPipPreset { kCamera, kSquare, kCircle };
+
+const char* CameraPipPresetName(CameraPipPreset preset);
+
+// An unknown name is the `camera` preset — the default, and the behaviour that
+// shipped before presets existed. A fallback rather than a refusal here, and
+// deliberately unlike MediaDeviceKindFromName: a preset nobody recognises still
+// has to draw a picture-in-picture, and the one it draws is the one that crops
+// nothing.
+CameraPipPreset CameraPipPresetFromName(const std::string& name);
+
+// How the camera frame fills its tile (spec 33.5).
+enum class CameraPipFit {
+  // The whole frame, letterboxed if the tile is a different shape. Nothing is
+  // lost.
+  kContain,
+  // The centre of the frame, cropped to the tile's shape. Something is lost,
+  // and the user asked for it by choosing a shape the camera is not.
+  kCover,
+};
+
+const char* CameraPipFitName(CameraPipFit fit);
+CameraPipFit CameraPipFitFromName(const std::string& name);
+
+// The bounds spec 33.5 states, mirrored from CameraOverlayConfiguration in
+// Dart. A tile below the floor cannot be read; one above the ceiling is no
+// longer picture-in-picture.
+inline constexpr double kCameraPresetWidthCap = 0.16;
+inline constexpr double kSmallPresetWidthRatio = 0.10;
+inline constexpr double kMinPipWidthRatio = 0.08;
+inline constexpr double kMaxPipWidthRatio = 0.50;
+// The roundest a tile can be, as a fraction of its own width: at exactly half
+// the width of a square tile the rounded rectangle is a circle, and there is no
+// shape beyond it. Mirrors the assertion CameraOverlayConfiguration makes in
+// Dart, so a ratio that arrives out of range is clamped rather than drawn.
+inline constexpr double kMaxCornerRadiusRatio = 0.50;
+// How close to a corner the tile snaps, as a fraction of canvas width.
+inline constexpr double kPipSnapRatio = 0.02;
+
 // Camera picture-in-picture geometry. Every value is configuration pushed from
 // Dart; the compositor must not hard-code any of it (spec 7, 28).
 struct CameraOverlayConfig {
-  double width_ratio = 0.16;
+  CameraPipPreset preset = CameraPipPreset::kCamera;
+  double width_ratio = kCameraPresetWidthCap;
   // The tile's shape when the camera's own shape is unknown, or when
   // follows_source_aspect_ratio is off.
   double aspect_ratio = 16.0 / 9.0;
@@ -168,9 +211,19 @@ struct CameraOverlayConfig {
   // filled by cropping the frame or stretching it; taking the camera's shape
   // removes the choice (spec 7).
   bool follows_source_aspect_ratio = true;
-  double corner_radius = 0.0;
+  // Corner radius as a fraction of the tile's *width*; 0.5 is a circle. A ratio
+  // and not pixels, because one configuration has to describe the same shape on
+  // a 720p and a 1080p canvas (spec 33.5).
+  double corner_radius_ratio = 0.0;
   double margin_ratio = 0.01;
   PipCorner corner = PipCorner::kBottomRight;
+  CameraPipFit fit = CameraPipFit::kContain;
+  // The tile's top-left as a fraction of the canvas. False is not "unset": it
+  // is a live reference to `corner`, so a canvas that changes shape keeps the
+  // tile in the corner rather than at whatever fraction that corner used to be.
+  bool has_position = false;
+  double position_x = 0;
+  double position_y = 0;
   bool mirror_preview = true;
   bool mirror_output = false;
 };
@@ -219,12 +272,132 @@ struct RectD {
   double height = 0;
 };
 
+// The width the tile is drawn at, as a fraction of the canvas (spec 33.5).
+//
+// `source_width` is the camera's own width in pixels, 0 when nothing has been
+// captured yet. On the `camera` preset it lowers the width so a small sensor is
+// never upscaled past its own pixels; it does nothing to the fixed presets,
+// whose size is the point. Mirrors
+// CameraOverlayConfiguration.effectiveWidthRatio.
+double EffectivePipWidthRatio(const CameraOverlayConfig& config, double canvas_width,
+                              uint32_t source_width);
+
 // Pure geometry, shared by the compositor and the preview placement so the
 // picture-in-picture the user sees matches the one in the file.
 // source_aspect_ratio is the camera's own width/height; 0 means unknown, in
 // which case the configured fallback aspect ratio is used.
+//
+// The result is always fully inside the canvas and never closer to an edge than
+// the margin, whatever `position_x`/`position_y` said — the bounds live here
+// rather than in whatever dragged the tile, so they hold however the value
+// arrived. A free position that stops within kPipSnapRatio of a margin lands on
+// it exactly (spec 33.5). Mirrors CameraOverlayConfiguration.resolveRect.
 RectD ResolvePipRect(const CameraOverlayConfig& config, double canvas_width,
-                     double canvas_height, double source_aspect_ratio = 0);
+                     double canvas_height, double source_aspect_ratio = 0,
+                     uint32_t source_width = 0);
+
+// The fraction a tile at `left`, `top` on this canvas would be stored as: the
+// inverse of ResolvePipRect's free branch, so a drag that reports pixels can be
+// turned back into a position that survives a canvas of another size.
+//
+// False when the canvas has no extent to measure against — a fraction of
+// nothing says nothing, and the caller must keep whatever it had rather than
+// report a position of 0, 0. That is the null cameraPreviewPosition asks for.
+bool PipPositionRatio(double left, double top, double canvas_width,
+                      double canvas_height, double* out_x, double* out_y);
+
+// One drawn picture-in-picture: which part of the camera frame is read, where
+// on the canvas it lands, and the corner radius of the mask between them.
+//
+// The single authority for both the composited tile and the preview window, so
+// a circle in the preview cannot be a square in the file (design 1p, 33.7's
+// "Preview and output disagree about the crop").
+struct PipDraw {
+  // The part of the camera frame that reaches the canvas, in frame pixels. The
+  // whole frame under kContain; the centred crop of the tile's shape under
+  // kCover.
+  RectD source;
+  // Where it is drawn, in canvas pixels.
+  RectD dest;
+  // In canvas pixels, never more than half the shorter side of `dest` — at
+  // exactly half of a square tile it is a circle.
+  double corner_radius = 0;
+};
+
+PipDraw ResolvePipDraw(const CameraOverlayConfig& config, double canvas_width,
+                       double canvas_height, uint32_t frame_width,
+                       uint32_t frame_height);
+
+// What the preview window is told to draw its texture as — the three fields of
+// `cameraPreviewState` only the host can resolve (spec 33.5,
+// platform-channel-contract "relay/overlay/view").
+//
+// Dart has neither the camera's own shape nor the encoder canvas, so it cannot
+// work out either the shape of the picture it is being handed or the crop and
+// mask the preset asks for. Design 1p promises the preview *is* the composited
+// picture-in-picture, and a circle on screen with a square in the file is the
+// defect that promise exists to prevent.
+struct CameraPreviewDraw {
+  // The shape the texture the host is pushing actually has, which is not always
+  // the camera's: in display mode the frame is cropped to the tile before it is
+  // uploaded, so the preview draws it at the tile's shape.
+  double aspect_ratio = 16.0 / 9.0;
+  CameraPipFit fit = CameraPipFit::kContain;
+  double corner_radius_ratio = 0.0;
+};
+
+// `is_tile` is the resolved answer OverlayWindows crops frames by — display
+// mode *and* a recorded display that can still be named — not merely the source
+// type, because the two halves have to describe the same picture.
+//
+// In window mode the preview is a separate captioned object that is
+// deliberately not the tile (design 1e): it is handed the frame whole, so it is
+// drawn at the camera's own shape and neither the crop nor the mask applies to
+// it, whatever the configuration says.
+CameraPreviewDraw ResolveCameraPreviewDraw(const CameraOverlayConfig& config,
+                                           bool is_tile, const PipDraw& draw,
+                                           uint32_t frame_width,
+                                           uint32_t frame_height);
+
+// The alpha mask baked into a camera frame before it is uploaded, in *camera
+// frame* pixels (video_compositor.h explains why the mask travels in the frame's
+// alpha channel rather than as a mask texture).
+//
+// The crop always has the tile's shape, so one scale maps the tile onto the
+// frame on both axes and a circle inscribed in the tile is a circle inscribed in
+// the crop.
+struct CameraFrameMask {
+  RectD crop;
+  double corner_radius = 0;
+};
+
+CameraFrameMask ResolveCameraFrameMask(const CameraOverlayConfig& config,
+                                       double canvas_width, double canvas_height,
+                                       uint32_t frame_width, uint32_t frame_height);
+
+// How much of the pixel centred on `x`, `y` the mask covers, in [0, 1].
+//
+// A rounded mask ramps across one pixel at its boundary rather than cutting
+// hard: a hard cut leaves a circle drawn as a staircase, and the alpha channel
+// this lands in carries the coverage for nothing. A rectangular one cuts hard,
+// because its edge is the tile's own edge and nothing is being shaped.
+double CameraMaskCoverage(const CameraFrameMask& mask, double x, double y);
+
+// Writes one scanline's coverage into the alpha byte of each pixel of `bgra`,
+// which holds `width` BGRA pixels and is left otherwise untouched.
+//
+// A row at a time and not a pixel at a time because the only expensive part of
+// a rounded rectangle is its corners: every row is one fully covered span with
+// at most a pixel of ramp at each end, and finding that span costs one square
+// root for the row rather than one for every pixel in it. Same arithmetic as
+// CameraMaskCoverage, which is asserted rather than assumed.
+void ApplyCameraMaskRow(const CameraFrameMask& mask, double y, uint32_t width,
+                        uint8_t* bgra);
+
+// True when the mask takes a plain rectangle out of the frame, which is every
+// preset but the circle — and the case the compositor draws without asking
+// anything of the frame's alpha channel at all.
+bool CameraMaskIsRectangular(const CameraFrameMask& mask);
 
 // Largest centred rectangle of the source aspect ratio that fits the canvas.
 // Produces the letterbox/pillarbox bars required by fixedCanvasLetterbox.
@@ -264,15 +437,34 @@ LONG StripSnapPixels(double scale);
 // multi-monitor desktop need not be on a display at all.
 bool IsUsableWorkArea(const RECT& work_area);
 
+// Whether a choice made in the input menu closes the sheet (spec 33.4).
+//
+// A device row does, the `Off` row included: the choice is made and the window
+// has done its job. The camera sheet's three extra answers do not — a shape
+// preset, a corner and `Reset position` all change the tile on screen
+// *underneath* the sheet, and comparing them should not cost a reopen each
+// time — so the host forwards them and leaves the window exactly where it is. A
+// close that did not happen also raises no dismissal: there is nothing for the
+// application to stop believing.
+bool MenuChoiceClosesMenu(bool has_preset, bool has_corner, bool resets_position);
+
+// How far the input menu sits from the strip it hangs off, in logical points.
+inline constexpr double kInputMenuGapPoints = 6.0;
+
 // Whether a beginMove that has reached the front of the message queue should
-// still be handed to the operating system's move loop (spec 33.3).
+// still be handed to the operating system's move loop (spec 33.3, 33.5).
 //
 // `button_down` is the state of the pointer's button now, not when the gesture
 // was posted: the request is acted on a later turn of the loop, and by then the
 // user may have let go. A move loop entered with nothing held has nothing to
 // end it — the platform tracks the pointer until the *next* press — so the
-// strip would follow the cursor across the desktop until the user clicked.
-bool ShouldBeginStripMove(bool movable, bool move_in_flight, bool button_down);
+// window would follow the cursor across the desktop until the user clicked.
+//
+// `draggable` is the strip always, and the camera preview only in display mode,
+// where the preview *is* the picture-in-picture (design 1p). In window mode the
+// preview is a separate captioned object and dragging it would move a window
+// that stands for nothing (design 1e).
+bool ShouldBeginOverlayMove(bool draggable, bool move_in_flight, bool button_down);
 
 // Moves `frame` back inside `work_area`, keeping its size.
 //
@@ -307,6 +499,27 @@ bool StripPositionRatio(const RECT& work_area, const RECT& frame, double* out_x,
 // snap that would push a strip wider than the usable area off the edge cannot.
 // Idempotent: an already-snapped frame finds its own edge at distance zero.
 RECT SnapStripFrame(const RECT& work_area, const RECT& frame, LONG snap);
+
+// The keyboard path onto the same arithmetic (spec 33.3): move by `dx`, `dy`
+// physical pixels, then snap and clamp exactly as the end of a drag does, so
+// arrow keys and a pointer cannot leave the strip in two different places.
+RECT NudgeStripFrame(const RECT& work_area, const RECT& frame, LONG dx, LONG dy,
+                     LONG snap);
+
+// Where the input menu goes: below the strip when there is room under it, above
+// it otherwise, horizontally centred on the control that asked for it, and
+// clamped to the usable area (spec 33.4).
+//
+// `anchor_frame` is the strip's frame and `anchor_x` the pressed control's
+// centre, both in screen pixels — only Flutter knows where a control ended up
+// inside the strip, so the x travels in from there (relay/overlay/view's
+// `anchorX`). `gap` is the distance between the strip and the menu.
+//
+// Neither side fitting means the menu is taller than the usable area; it then
+// takes the space below and is clamped, because a menu overlapping the strip is
+// legible and a menu off the screen is not.
+RECT ResolveInputMenuFrame(const RECT& work_area, const RECT& anchor_frame,
+                           LONG anchor_x, LONG width, LONG height, LONG gap);
 
 std::wstring Widen(const std::string& utf8);
 std::string Narrow(const std::wstring& wide);

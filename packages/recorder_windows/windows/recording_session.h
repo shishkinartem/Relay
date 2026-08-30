@@ -100,10 +100,37 @@ class RecordingSession {
   bool SetCameraEnabled(bool enabled, RecorderError* error);
   bool SetSystemAudioEnabled(bool enabled, RecorderError* error);
 
+  // Re-points the tile mid-session (spec 33.5). Applied between frames, for the
+  // next frame; the encoder canvas never changes, so the file keeps one
+  // continuous video track (spec 11).
+  void SetCameraOverlay(const CameraOverlayConfig& camera);
+
+  // Swaps the device one input is using, without restarting the session
+  // (spec 33.2).
+  //
+  // The new device is opened, and only once it is really open is the old one
+  // closed — so a device that will not open leaves the previous one running and
+  // is reported as a non-fatal error rather than costing the user their audio
+  // or their camera. `device_id` empty is the platform default. Answering false
+  // never ends the recording.
+  //
+  // Blocks for as long as the new device takes to open, so it belongs on the
+  // plugin's serial worker rather than on the thread drawing the UI.
+  bool SelectInputDevice(MediaDeviceKind kind, const std::string& device_id,
+                         RecorderError* error);
+
   SessionState state() const;
   bool has_camera_frames() const;
   double camera_aspect_ratio() const;
+  uint32_t camera_frame_width() const;
+  uint32_t camera_frame_height() const;
+  uint32_t canvas_width() const;
+  uint32_t canvas_height() const;
   RectD pip_rect() const;
+  // What the compositor will draw the tile as, for the camera it currently
+  // holds. The preview window's frame, crop and mask all come from here, which
+  // is what keeps it the same object as the tile (design 1p).
+  PipDraw camera_pip_draw() const;
 
   // Finalizes an orphaned `.part` artefact into a playable file. Returns false
   // when nothing recoverable is in it. Never deletes the artefact (spec 18).
@@ -118,6 +145,14 @@ class RecordingSession {
   void SetState(SessionState state);
   void OnCapturedFrame(const CaptureEngine::Frame& frame);
   void OnPipelineError(const RecorderError& error);
+  // Starts a camera on `device_id`, wired to this session's compositor and
+  // preview. Shared by prepare-time start, the runtime toggle and the swap, so
+  // all three open a camera the same way.
+  std::unique_ptr<CameraCapture> StartCamera(const std::string& device_id,
+                                             std::string* error);
+  bool SwapCamera(const std::string& device_id, RecorderError* error);
+  bool SwapAudio(MediaDeviceKind kind, const std::string& device_id,
+                 RecorderError* error);
   void EncodeLoop();
   void TimerLoop();
   void DrainAudio(bool flush);
@@ -146,7 +181,31 @@ class RecordingSession {
   SessionClock clock_;
   CaptureEngine capture_;
   VideoCompositor compositor_;
-  CameraCapture camera_;
+  // Held by pointer, not by value, because a swap opens the replacement before
+  // it closes the incumbent: for a moment two captures exist, both feeding the
+  // compositor's latest-wins slot, and the loser is destroyed when the swap
+  // returns (spec 33.2). Null whenever no camera is running.
+  //
+  // Guarded by its own mutex rather than by `mutex_`: it is written on the
+  // serial worker (a swap) and read on the platform thread (the preview's
+  // geometry), and `mutex_` is held across state callbacks that reach both.
+  // Never held while a capture is stopped — that joins a thread which can be
+  // inside a preview or error callback of its own.
+  mutable std::mutex camera_mutex_;
+  std::unique_ptr<CameraCapture> camera_;
+
+  // What the live capture is using now, which is not the same thing as what the
+  // session was prepared with: a swap changes it (spec 33.2). Its own lock
+  // because the serial worker writes it during a swap while the platform thread
+  // reads it to restart a camera that was toggled off and on.
+  mutable std::mutex devices_mutex_;
+  std::string live_camera_device_id_;
+  std::string live_microphone_device_id_;
+  std::string live_system_audio_device_id_;
+
+  // The device `kind` is capturing from, empty for the platform default.
+  std::string LiveDeviceId(MediaDeviceKind kind) const;
+  void SetLiveDeviceId(MediaDeviceKind kind, const std::string& device_id);
   MediaWriter writer_;
 
   // 3 s per source at 48 kHz stereo (~1.1 MB each): long enough to absorb an

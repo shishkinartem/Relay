@@ -163,6 +163,7 @@ class AppIconButton extends StatefulWidget {
     this.width,
     this.iconSize = 15,
     this.foreground,
+    this.background,
     this.tooltip,
     this.hitSlop = EdgeInsets.zero,
   });
@@ -182,6 +183,13 @@ class AppIconButton extends StatefulWidget {
   /// Overrides the resolved foreground — used for the muted state, where the
   /// system dims the glyph rather than changing the frame.
   final Color? foreground;
+
+  /// Overrides the resolved fill.
+  ///
+  /// For the strip's device carets, which are attached to a control rather than
+  /// being one: a solid accent square beside a solid accent square reads as two
+  /// buttons, so the caret takes the accent's tint instead (§33.4).
+  final Color? background;
 
   final String? tooltip;
 
@@ -259,7 +267,7 @@ class _AppIconButtonState extends State<AppIconButton> {
                     height: widget.size,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: palette.background,
+                      color: widget.background ?? palette.background,
                       border: Border.all(color: palette.border),
                     ),
                     child: AppIcon(

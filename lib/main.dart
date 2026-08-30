@@ -11,6 +11,7 @@ import 'app/relay_app.dart';
 import 'app/startup_failure_app.dart';
 import 'features/recorder/presentation/overlay/camera_preview_window.dart';
 import 'features/recorder/presentation/overlay/control_strip_window.dart';
+import 'features/recorder/presentation/overlay/input_menu_window.dart';
 import 'features/recorder/presentation/overlay/overlay_binding.dart';
 
 Future<void> main() async {
@@ -101,4 +102,16 @@ void controlStripMain() {
 void cameraPreviewMain() {
   OverlayBinding.ensureInitialized();
   runApp(const CameraPreviewWindow());
+}
+
+/// Entry point for the input menu's own Flutter engine (§33.4).
+///
+/// A third always-on-top window, excluded from capture on the same terms as
+/// the other two. It exists rather than living inside the strip because the
+/// strip keeps one size in every session state (§6): a list inside it would
+/// resize an always-on-top window during the very click that opened it.
+@pragma('vm:entry-point')
+void inputMenuMain() {
+  OverlayBinding.ensureInitialized();
+  runApp(const InputMenuWindow());
 }

@@ -8,7 +8,10 @@
 #include <winrt/base.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -49,6 +52,14 @@ class AudioCapture {
   // the session is paused are discarded rather than queued.
   bool Start(const SessionClock* clock, ErrorHandler on_error, std::string* error);
 
+  // Waits for the capture thread to settle on whether it has a running stream,
+  // and reports what it settled on. False on a timeout as well as on a failure.
+  //
+  // Start() returns as soon as the thread exists, so a swap that must leave the
+  // previous endpoint running until the new one is really open has no other way
+  // to know (spec 33.2). Safe to call more than once.
+  bool WaitUntilOpen(std::chrono::milliseconds timeout);
+
   // Idempotent.
   void Stop();
 
@@ -67,6 +78,8 @@ class AudioCapture {
   void CloseEndpoint();
   void ReportFailure(const std::string& message, HRESULT hr);
   void ReportFallback();
+  // Releases whoever is waiting in WaitUntilOpen with the answer.
+  void SettleOpen(bool opened);
 
   const Kind kind_;
   AudioRingBuffer* const sink_;
@@ -86,6 +99,14 @@ class AudioCapture {
   HANDLE stop_event_ = nullptr;
   std::thread thread_;
   std::atomic<bool> running_{false};
+
+  // Whether the capture thread has decided it has a running stream, and what it
+  // decided. Written once per run by that thread, read by whoever is waiting on
+  // the handshake above.
+  std::mutex open_mutex_;
+  std::condition_variable open_cv_;
+  bool open_settled_ = false;
+  bool opened_ = false;
 };
 
 }  // namespace relay

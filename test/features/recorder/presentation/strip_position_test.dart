@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import 'package:relay/core/settings/app_settings.dart';
 import 'package:relay/design_system/design_system.dart';
+import 'package:relay/features/recorder/application/recorder_view_model.dart';
 
 import '../../../support/harness.dart';
 
@@ -137,6 +138,67 @@ void main() {
       }
 
       expect(await measure(movable: true), await measure(movable: false));
+    });
+  });
+
+  group('the arrow keys', () {
+    Future<TestHarness> recording() async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+      harness.overlays.nudges.clear();
+      return harness;
+    }
+
+    test('each direction moves the strip one step', () async {
+      final TestHarness harness = await recording();
+
+      harness.overlays.commandController
+        ..add(OverlayCommand.nudgeStripLeft)
+        ..add(OverlayCommand.nudgeStripRight)
+        ..add(OverlayCommand.nudgeStripUp)
+        ..add(OverlayCommand.nudgeStripDown);
+      await Future<void>.delayed(Duration.zero);
+
+      const double step = RecorderViewModel.stripNudgeStep;
+      expect(harness.overlays.nudges, <Offset>[
+        const Offset(-step, 0),
+        const Offset(step, 0),
+        const Offset(0, -step),
+        const Offset(0, step),
+      ]);
+    });
+
+    test('Shift takes a coarser step in the same direction', () async {
+      final TestHarness harness = await recording();
+
+      harness.overlays.commandController
+        ..add(OverlayCommand.nudgeStripLeftFar)
+        ..add(OverlayCommand.nudgeStripDownFar);
+      await Future<void>.delayed(Duration.zero);
+
+      const double far = RecorderViewModel.stripCoarseNudgeStep;
+      expect(far, greaterThan(RecorderViewModel.stripNudgeStep));
+      expect(harness.overlays.nudges, <Offset>[
+        const Offset(-far, 0),
+        const Offset(0, far),
+      ]);
+    });
+
+    test('a nudge outside a session reaches no window', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      harness.overlays.commandController.add(OverlayCommand.nudgeStripLeft);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        harness.overlays.nudges,
+        isEmpty,
+        reason: 'there is no strip to move between sessions',
+      );
     });
   });
 

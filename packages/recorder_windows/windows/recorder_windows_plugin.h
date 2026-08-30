@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -75,6 +76,23 @@ class RecorderWindowsPlugin : public flutter::Plugin {
 
   void EmitRecorderEvent(flutter::EncodableMap event);
   void EmitOverlayCommand(const std::string& command);
+  // A choice made in the input menu, beside the bare command names the same
+  // channel emits. Dart decodes by shape — a String is a command, a Map is a
+  // choice — so nothing here may turn a command into a map (spec 33.4).
+  //
+  // `choice` is the menu engine's own arguments map, forwarded as it arrived: a
+  // device row, a shape preset, a corner or `Reset position`, which differ only
+  // in which keys they carry. The one field the host owns is `dismissed`, which
+  // a choice never is.
+  void EmitMenuChoice(flutter::EncodableMap choice);
+  // The host closed the menu behind the application's back — a click outside,
+  // Esc, the strip moving, a display change. It applies nothing; it exists so
+  // the application stops believing a window that is already gone is still open
+  // (spec 33.4, platform-channel-contract "input-menu map").
+  void EmitMenuDismissal(MediaDeviceKind kind);
+  // The one place either of the two reaches the overlay event sink, so a choice
+  // and a dismissal cannot drift apart in how they are delivered.
+  void EmitOverlayChoiceMap(flutter::EncodableMap map);
   void EmitInputLevel(MediaDeviceKind kind, const InputLevelSample& level);
   // Named no kind: what Windows reports is an audio endpoint change, and
   // "re-read everything" is the only instruction that is also true of the
@@ -82,11 +100,50 @@ class RecorderWindowsPlugin : public flutter::Plugin {
   void EmitDevicesChanged();
   void WireSessionEvents();
 
-  // Re-resolves an absolute preview frame against the camera's real shape, so
-  // the preview window lands exactly where the compositor draws the
-  // picture-in-picture. Dart can only resolve it from the configured fallback
-  // aspect ratio; the camera's own shape is known here (spec 7, design 1p).
+  // The display being recorded, or null when the configuration does not name
+  // one any more — a window recording, or a monitor that has been unplugged.
+  //
+  // One resolution shared by both halves of the preview's placement.
+  // AlignPreviewToCamera converts the tile into the logical points a placement
+  // is resolved in, UpdatePreviewGeometry hands the overlay layer the physical
+  // pixels a drag is measured against, and they have to be the same display:
+  // measured against the one holding the *main window* instead, a
+  // mixed-resolution desktop placed the preview at the wrong scale, and a drag
+  // measured against any rectangle but the recorded display's would let the
+  // tile leave the recording.
+  HMONITOR RecordedDisplay() const;
+
+  // Re-resolves an absolute preview frame against the tile the compositor is
+  // actually going to draw, so the preview window lands exactly on it. Dart can
+  // only resolve the rectangle from the configured fallback aspect ratio; the
+  // camera's own shape and the encoder canvas are both known here (spec 7,
+  // design 1p).
   void AlignPreviewToCamera(OverlayPlacement* placement) const;
+
+  // Hands the overlay layer everything the preview needs to *be* the tile: the
+  // configuration, the canvas, the camera's frame size and where that canvas
+  // lands on screen. Called whenever any of them changes.
+  void UpdatePreviewGeometry();
+
+  // What the preview window is told to draw, from the geometry the last
+  // UpdatePreviewGeometry resolved — the same answer the frames are cropped by,
+  // so the shape reported and the picture pushed cannot disagree.
+  CameraPreviewDraw PreviewDraw() const;
+
+  // Re-resolves the preview against the tile as it is now and re-pushes its
+  // state: the shape, the crop and the mask all move with the tile (design 1p).
+  //
+  // `reposition` moves the window as well, which every caller wants except the
+  // drag that just moved it — the window is already where the user let go, put
+  // there by this same arithmetic, and re-placing it would be a second move for
+  // nothing. Only a preview that is already on screen: nothing here may open
+  // one.
+  void RefreshCameraPreview(bool reposition);
+
+  // Pushes the camera configuration at the live session and re-points the
+  // preview to match it. `from_preview` is a position the user just dragged the
+  // preview to, which must not be pushed back at the window that reported it.
+  void ApplyCameraOverlay(const CameraOverlayConfig& camera, bool from_preview);
 
   HWND MainWindow() const;
   flutter::EncodableMap Capabilities() const;
@@ -120,9 +177,36 @@ class RecorderWindowsPlugin : public flutter::Plugin {
   // pull the session out from under it.
   std::shared_ptr<RecordingSession> session_;
   RecordingConfig last_config_;
+  // The geometry last handed to the overlay layer, kept so the state pushed to
+  // the preview is resolved from the same answer its frames are cropped by:
+  // `is_tile` is false not only in window mode but whenever the recorded
+  // display cannot be named, and a preview that is not the tile is fed the
+  // frame whole. Platform thread only, like everything else that places a
+  // window.
+  CameraPreviewGeometry preview_geometry_;
+  // The camera frame size the preview was last resolved against, packed as
+  // width << 32 | height.
+  //
+  // The tile takes the camera's shape, and the camera's shape is not known
+  // until it delivers: the preview is placed from the configured fallback
+  // before the device has opened (design 1p). Written on the camera thread,
+  // which is why it is an atomic, and compared rather than read — one
+  // re-resolution per resolution, not one per frame.
+  std::atomic<uint64_t> preview_frame_size_{0};
+  // Which input the menu on screen belongs to, or nothing when the application
+  // does not believe one is open. Taken rather than read when a dismissal is
+  // reported, so a display change seen by three overlay windows is still one
+  // dismissal (spec 33.4). Platform thread only: every path that opens, closes
+  // or dismisses the menu runs there.
+  std::optional<MediaDeviceKind> open_menu_kind_;
   // Written on the platform thread and read on the serial worker: a task
   // queued before dispose and drained after it must not re-arm anything.
   std::atomic<bool> disposed_{false};
+  // One device swap at a time. Taken on the platform thread, where the request
+  // arrives, and released on the worker that performed it: the worker is
+  // serial, so a flag taken there would queue the second swap instead of
+  // dropping it, which is the opposite of spec 6's one-command-at-a-time rule.
+  std::atomic<bool> swapping_device_{false};
 };
 
 }  // namespace relay

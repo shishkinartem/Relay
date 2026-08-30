@@ -49,6 +49,48 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     return 16.0 / 9.0
   }
 
+  /// The camera's own width in pixels.
+  ///
+  /// The `camera` preset caps the tile at the sensor's own width, so a small
+  /// camera is never upscaled past its own pixels (§33.5). Read from the active
+  /// format first and from a delivered frame second — the same order, and for
+  /// the same reason, as `aspectRatio`: the preview is placed as soon as
+  /// `start()` returns, which is before the first frame arrives.
+  ///
+  /// Nil before a device is open, where the cap has nothing to compare against
+  /// and the configured width stands.
+  var pixelWidth: Int? {
+    for input in session.inputs {
+      guard let deviceInput = input as? AVCaptureDeviceInput else { continue }
+      let dimensions = CMVideoFormatDescriptionGetDimensions(
+        deviceInput.device.activeFormat.formatDescription)
+      if dimensions.width > 0 {
+        return Int(dimensions.width)
+      }
+    }
+    if let buffer = copyLatestFrame() {
+      let width = CVPixelBufferGetWidth(buffer)
+      if width > 0 {
+        return width
+      }
+    }
+    return nil
+  }
+
+  /// The device this capture currently holds, or nil when it holds none.
+  ///
+  /// Read before a mid-session swap, for two answers: a swap to the device
+  /// already open is a no-op, and a swap that fails has somewhere to go back to
+  /// (§33.7).
+  var currentDevice: AVCaptureDevice? {
+    for input in session.inputs {
+      if let deviceInput = input as? AVCaptureDeviceInput {
+        return deviceInput.device
+      }
+    }
+    return nil
+  }
+
   /// Opens `device`, which the session resolved from the configuration — nil
   /// where the machine has no camera at all (§33.2).
   ///
@@ -201,6 +243,16 @@ final class MicrophoneCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     stateLock.lock()
     running = value
     stateLock.unlock()
+  }
+
+  /// The device this capture currently holds. See `CameraCapture.currentDevice`.
+  var currentDevice: AVCaptureDevice? {
+    for input in session.inputs {
+      if let deviceInput = input as? AVCaptureDeviceInput {
+        return deviceInput.device
+      }
+    }
+    return nil
   }
 
   /// Opens `device` — the one the session resolved, or the meter's own default.

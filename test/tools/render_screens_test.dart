@@ -121,6 +121,155 @@ void main() {
     );
   });
 
+  testWidgets('the input menu, in every state it can be in', (
+    WidgetTester tester,
+  ) async {
+    // §33.4. Four sheets side by side, which is how the design draws them and
+    // the only way to see that "off", "broken" and "still loading" do not look
+    // alike.
+    InputMenuOverlayState menu({
+      List<InputMenuItem> items = const <InputMenuItem>[],
+      bool loading = false,
+      String? emptyMessage,
+      String? notice,
+      InputLevel? level,
+    }) => InputMenuOverlayState(
+      kind: MediaDeviceKind.microphone,
+      title: 'Microphone',
+      items: items,
+      loading: loading,
+      emptyMessage: emptyMessage,
+      notice: notice,
+      level: level,
+    );
+
+    const List<InputMenuItem> devices = <InputMenuItem>[
+      InputMenuItem(label: 'System default', meta: 'Shure MV7', selected: true),
+      InputMenuItem(id: 'mic:mv7', label: 'Shure MV7', meta: 'USB'),
+      InputMenuItem(
+        id: 'mic:builtin',
+        label: 'MacBook Pro Microphone',
+        meta: 'built-in',
+      ),
+      InputMenuItem(label: 'Microphone off'),
+    ];
+
+    await capture(
+      tester,
+      'menu_states',
+      RelayTheme(
+        child: ColoredBox(
+          color: AppColors.surface,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                for (final InputMenuOverlayState state
+                    in <InputMenuOverlayState>[
+                      menu(
+                        items: devices,
+                        level: const InputLevel(peak: 0.74, rms: 0.62),
+                      ),
+                      menu(loading: true),
+                      menu(emptyMessage: 'No microphone found'),
+                      menu(
+                        items: devices,
+                        notice: '“Shure MV7” was not found · using the default',
+                        level: InputLevel.silent,
+                      ),
+                      // The camera's sheet: the same skeleton, with the three
+                      // shapes where the microphone has its meter (§33.4).
+                      const InputMenuOverlayState(
+                        kind: MediaDeviceKind.camera,
+                        title: 'Camera',
+                        items: <InputMenuItem>[
+                          InputMenuItem(
+                            label: 'System default',
+                            meta: 'FaceTime HD Camera',
+                            selected: true,
+                          ),
+                          InputMenuItem(
+                            id: 'camera:brio',
+                            label: 'Logitech Brio',
+                            meta: 'USB',
+                          ),
+                          InputMenuItem(label: 'Camera off'),
+                        ],
+                        presets: CameraPipPreset.values,
+                        selectedPreset: CameraPipPreset.circle,
+                        canResetPosition: true,
+                      ),
+                      // Window mode: four named corners instead of the drag,
+                      // and no `Reset position` — a corner is not something to
+                      // undo.
+                      const InputMenuOverlayState(
+                        kind: MediaDeviceKind.camera,
+                        title: 'Camera',
+                        items: <InputMenuItem>[
+                          InputMenuItem(
+                            label: 'System default',
+                            meta: 'FaceTime HD Camera',
+                            selected: true,
+                          ),
+                          InputMenuItem(label: 'Camera off'),
+                        ],
+                        presets: CameraPipPreset.values,
+                        selectedPreset: CameraPipPreset.camera,
+                        corners: CameraOverlayCorner.values,
+                        selectedCorner: CameraOverlayCorner.bottomRight,
+                      ),
+                    ]) ...<Widget>[
+                  InputMenuSheet(
+                    state: state,
+                    onChoose: (_) {},
+                    onChoosePreset: (_) {},
+                    onChooseCorner: (_) {},
+                    onResetPosition: () {},
+                  ),
+                  const SizedBox(width: 24),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+      size: const Size(1880, 600),
+    );
+  });
+
+  testWidgets('1f control strip with its device carets', (
+    WidgetTester tester,
+  ) async {
+    await capture(
+      tester,
+      '1f_control_strip_with_carets',
+      RelayTheme(
+        child: ColoredBox(
+          color: AppColors.surface,
+          child: Padding(
+            padding: const EdgeInsets.all(28),
+            child: Row(
+              children: <Widget>[
+                RecordingControlStrip(
+                  elapsed: const Duration(minutes: 14, seconds: 32),
+                  isPaused: false,
+                  microphoneEnabled: true,
+                  cameraEnabled: false,
+                  systemAudioEnabled: true,
+                  onMoveRequested: () {},
+                  onOpenMicrophoneMenu: (_) {},
+                  onOpenCameraMenu: (_) {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      size: const Size(560, 110),
+    );
+  });
+
   testWidgets('1a source picker at the wide breakpoint', (
     WidgetTester tester,
   ) async {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 
 /// The always-on-top surfaces, as the session sees them.
@@ -17,8 +18,25 @@ abstract interface class SessionOverlays {
 
   Future<void> hideControlStrip();
 
+  /// Moves the strip by one keyboard step, in logical points (§33.3).
+  ///
+  /// The host clamps and snaps it exactly as it does at the end of a drag, so
+  /// the keyboard cannot put the strip somewhere the pointer could not.
+  Future<void> nudgeControlStrip(double dx, double dy);
+
   /// Where the strip is now, for persisting. Null when it cannot be read.
   Future<OverlayStripPosition?> controlStripPosition();
+
+  /// Shows the device list for [kind]. Placement is the host's (§33.4).
+  Future<void> showInputMenu(MediaDeviceKind kind, InputMenuOverlayState state);
+
+  /// Re-renders an open menu in place.
+  Future<void> updateInputMenu(InputMenuOverlayState state);
+
+  Future<void> hideInputMenu();
+
+  /// Choices made in the menu.
+  Stream<InputMenuSelection> get menuSelections;
 
   /// Pushes a snapshot for the strip to draw.
   Future<void> push(RecordingOverlayState state);
@@ -93,6 +111,64 @@ class OverlayPresenter implements SessionOverlays {
   @override
   Future<OverlayStripPosition?> controlStripPosition() =>
       _overlays.controlStripPosition();
+
+  /// The menu is placed entirely by the host, and only its *size* travels.
+  ///
+  /// Below the strip when there is room and above it otherwise, aligned to the
+  /// chevron that asked for it, clamped to the usable area — none of which this
+  /// side can compute: it knows neither where the user dragged the strip nor
+  /// where Flutter laid the chevron out inside it. What is sent is an estimate
+  /// the menu's own engine corrects the moment it measures itself, exactly as
+  /// the strip's window does (§6).
+  @override
+  Future<void> showInputMenu(
+    MediaDeviceKind kind,
+    InputMenuOverlayState state,
+  ) => _overlays.showInputMenu(
+    OverlayPlacement.anchored(
+      size: estimatedMenuSize(state),
+      anchor: OverlayAnchor.topCenter,
+      margin: 7,
+    ),
+    state,
+  );
+
+  /// A first guess at the window's size, corrected by the engine's own
+  /// measurement. Too small clips a frame; too large shows dead space for one.
+  @visibleForTesting
+  Size estimatedMenuSize(InputMenuOverlayState state) {
+    const double header = 30;
+    const double row = 30;
+    const double meter = 34;
+    const double notice = 30;
+    final int rows = state.loading || state.items.isEmpty
+        ? 1
+        : state.items.length;
+    return Size(
+      inputMenuWidth,
+      header +
+          rows * row +
+          (state.level == null ? 0 : meter) +
+          (state.notice == null ? 0 : notice),
+    );
+  }
+
+  /// The design's device sheet is 268 points wide (§33.4).
+  static const double inputMenuWidth = 268;
+
+  @override
+  Future<void> updateInputMenu(InputMenuOverlayState state) =>
+      _overlays.updateInputMenu(state);
+
+  @override
+  Future<void> hideInputMenu() => _overlays.hideInputMenu();
+
+  @override
+  Stream<InputMenuSelection> get menuSelections => _overlays.menuSelections;
+
+  @override
+  Future<void> nudgeControlStrip(double dx, double dy) =>
+      _overlays.nudgeControlStrip(dx, dy);
 
   @override
   Future<void> hideControlStrip() {

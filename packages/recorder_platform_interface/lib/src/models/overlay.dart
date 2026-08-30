@@ -2,6 +2,9 @@ import 'dart:ui' show Rect, Size;
 
 import 'package:flutter/foundation.dart';
 
+import 'camera_overlay_configuration.dart';
+import 'media_device.dart';
+
 /// The always-on-top surfaces the application owns.
 ///
 /// Both are separate top-level windows, never child layers of a captured
@@ -12,6 +15,13 @@ enum OverlayWindowKind {
 
   /// The live camera preview (design `1e` / `1p`).
   cameraPreview,
+
+  /// The device list a control's chevron opens (§33.4).
+  ///
+  /// Its own window rather than part of the strip: the strip keeps one size in
+  /// every session state (§6), and a menu inside it would resize an
+  /// always-on-top window during the very click that opened it.
+  inputMenu,
 }
 
 /// A command raised by the control strip and routed back to the application.
@@ -20,7 +30,35 @@ enum OverlayCommand {
   toggleCamera,
   toggleSystemAudio,
   pauseOrResume,
-  stop;
+  stop,
+
+  /// A chevron was pressed. One command per input rather than one carrying a
+  /// kind, so this channel keeps emitting bare names and a host that has not
+  /// learned the new ones ignores them instead of misreading a payload.
+  openMicrophoneMenu,
+  openCameraMenu,
+  openSystemAudioMenu,
+
+  /// The strip's own menu asked to put it back where it started (§33.3).
+  resetStripPosition,
+
+  /// An arrow key moved the strip one step (§33.3).
+  ///
+  /// The keyboard path exists because the drag does not serve everyone: it
+  /// needs a sustained pointer gesture on a small window that is deliberately
+  /// hard to hit by accident. One command per direction, for the same reason
+  /// the chevrons have one each — this channel carries bare names.
+  nudgeStripLeft,
+  nudgeStripRight,
+  nudgeStripUp,
+  nudgeStripDown,
+
+  /// The same held with Shift: a coarse step, for crossing a display without
+  /// holding a key down (§33.3).
+  nudgeStripLeftFar,
+  nudgeStripRightFar,
+  nudgeStripUpFar,
+  nudgeStripDownFar;
 
   /// Null for a name this build does not know.
   ///
@@ -40,6 +78,309 @@ enum OverlayCommand {
 /// Where the control strip is docked relative to the current display (§5).
 enum OverlayAnchor { topCenter, bottomCenter }
 
+/// A device the input menu offers (§33.4).
+@immutable
+class InputMenuItem {
+  const InputMenuItem({
+    required this.label,
+    this.id,
+    this.meta,
+    this.selected = false,
+    this.enabled = true,
+  });
+
+  /// The device id, or null for the two rows that are not devices: `System
+  /// default` and `Off`.
+  final String? id;
+
+  final String label;
+
+  /// The word beside the label — `built-in`, `in use`, the default's name.
+  final String? meta;
+
+  final bool selected;
+
+  /// False for a device the platform lists but cannot open. Shown and not
+  /// selectable, so its absence is legible (§33.7).
+  final bool enabled;
+
+  Map<String, Object?> toMap() => <String, Object?>{
+    'id': id,
+    'label': label,
+    'meta': meta,
+    'selected': selected,
+    'enabled': enabled,
+  };
+
+  static InputMenuItem fromMap(Map<String, Object?> map) => InputMenuItem(
+    id: map['id'] as String?,
+    label: map['label'] as String? ?? '',
+    meta: map['meta'] as String?,
+    selected: map['selected'] as bool? ?? false,
+    enabled: map['enabled'] as bool? ?? true,
+  );
+}
+
+/// Everything the input-menu window renders (§33.4).
+@immutable
+class InputMenuOverlayState {
+  const InputMenuOverlayState({
+    required this.kind,
+    required this.title,
+    this.items = const <InputMenuItem>[],
+    this.loading = false,
+    this.emptyMessage,
+    this.notice,
+    this.level,
+    this.presets = const <CameraPipPreset>[],
+    this.selectedPreset,
+    this.canResetPosition = false,
+    this.corners = const <CameraOverlayCorner>[],
+    this.selectedCorner,
+  });
+
+  final MediaDeviceKind kind;
+  final String title;
+  final List<InputMenuItem> items;
+
+  /// The shape presets, under the list — the camera sheet's answer to the
+  /// microphone's level meter (§33.4). Empty for every other kind.
+  ///
+  /// Carried as the presets themselves rather than as rows, because they are
+  /// the one part of this window that is not a list: the sheet draws each at
+  /// its own proportions, which is what makes the choice legible before it is
+  /// made.
+  final List<CameraPipPreset> presets;
+  final CameraPipPreset? selectedPreset;
+
+  /// Whether the tile has been dragged away from its default corner, so the
+  /// sheet can offer to put it back. False draws no row at all rather than a
+  /// dead one.
+  final bool canResetPosition;
+
+  /// The four corners, offered in window mode only (§33.5).
+  ///
+  /// With a display source the tile is dragged and the preview *is* the tile,
+  /// so a corner list would be a second and worse answer to a question already
+  /// answered better. Empty draws none.
+  final List<CameraOverlayCorner> corners;
+  final CameraOverlayCorner? selectedCorner;
+
+  /// One disabled row while the platform answers — never an empty panel, and
+  /// never a list that appears to have loaded (§33.7).
+  final bool loading;
+
+  /// Shown instead of the list when there is nothing to offer.
+  final String? emptyMessage;
+
+  /// A line under the list: the device that was lost, the permission that is
+  /// missing.
+  final String? notice;
+
+  /// The microphone's live level, or null for a kind that is not metered.
+  final InputLevel? level;
+
+  Map<String, Object?> toMap() => <String, Object?>{
+    'kind': kind.name,
+    'title': title,
+    'loading': loading,
+    'emptyMessage': emptyMessage,
+    'notice': notice,
+    'level': level?.toMap(),
+    'items': <Object?>[for (final InputMenuItem item in items) item.toMap()],
+    'presets': <Object?>[for (final CameraPipPreset p in presets) p.name],
+    'selectedPreset': selectedPreset?.name,
+    'canResetPosition': canResetPosition,
+    'corners': <Object?>[for (final CameraOverlayCorner c in corners) c.name],
+    'selectedCorner': selectedCorner?.name,
+  };
+
+  static InputMenuOverlayState fromMap(Map<String, Object?> map) {
+    final Object? level = map['level'];
+    return InputMenuOverlayState(
+      // A menu for a kind this build does not know cannot be drawn; the
+      // microphone is the safe stand-in because it is the one every platform
+      // has, and the host is what decides whether the window opens at all.
+      kind:
+          MediaDeviceKind.fromName(map['kind'] as String?) ??
+          MediaDeviceKind.microphone,
+      title: map['title'] as String? ?? '',
+      loading: map['loading'] as bool? ?? false,
+      emptyMessage: map['emptyMessage'] as String?,
+      notice: map['notice'] as String?,
+      level: level is Map<Object?, Object?>
+          ? InputLevel.fromMap(level.cast<String, Object?>())
+          : null,
+      items: <InputMenuItem>[
+        for (final Object? entry
+            in (map['items'] as List<Object?>? ?? const <Object?>[]))
+          InputMenuItem.fromMap(
+            (entry! as Map<Object?, Object?>).cast<String, Object?>(),
+          ),
+      ],
+      // A preset name this build does not know is dropped, not defaulted: the
+      // three shapes are the same three on both sides, and one that decoded
+      // into `camera` would silently show the wrong tile as selected.
+      presets: <CameraPipPreset>[
+        for (final Object? entry
+            in (map['presets'] as List<Object?>? ?? const <Object?>[]))
+          if (CameraPipPreset.tryFromName(entry as String?)
+              case final CameraPipPreset p)
+            p,
+      ],
+      selectedPreset: CameraPipPreset.tryFromName(
+        map['selectedPreset'] as String?,
+      ),
+      canResetPosition: map['canResetPosition'] as bool? ?? false,
+      corners: <CameraOverlayCorner>[
+        for (final Object? entry
+            in (map['corners'] as List<Object?>? ?? const <Object?>[]))
+          if (CameraOverlayCorner.tryFromName(entry as String?)
+              case final CameraOverlayCorner c)
+            c,
+      ],
+      selectedCorner: CameraOverlayCorner.tryFromName(
+        map['selectedCorner'] as String?,
+      ),
+    );
+  }
+}
+
+/// What the input menu reports back: a choice, or the fact that it closed.
+///
+/// Both, on one type, because the application has to hear both. A dismissal
+/// that told nobody left the application believing a menu was open that had
+/// already gone — so the chevron needed two presses to reopen it, and the meter
+/// the menu had started went on holding a microphone nobody was watching.
+@immutable
+class InputMenuSelection {
+  const InputMenuSelection({
+    required this.kind,
+    this.deviceId,
+    this.off = false,
+    this.dismissed = false,
+    this.preset,
+    this.corner,
+    this.resetPosition = false,
+  });
+
+  /// A shape preset was pressed in the camera sheet (§33.5).
+  const InputMenuSelection.preset(this.kind, CameraPipPreset this.preset)
+    : deviceId = null,
+      off = false,
+      dismissed = false,
+      corner = null,
+      resetPosition = false;
+
+  /// A corner was chosen in the camera sheet's window-mode placement row.
+  const InputMenuSelection.corner(this.kind, CameraOverlayCorner this.corner)
+    : deviceId = null,
+      off = false,
+      dismissed = false,
+      preset = null,
+      resetPosition = false;
+
+  /// `Reset position` was pressed in the camera sheet.
+  const InputMenuSelection.resetTilePosition(this.kind)
+    : deviceId = null,
+      off = false,
+      dismissed = false,
+      preset = null,
+      corner = null,
+      resetPosition = true;
+
+  /// The menu closed without a choice — a click outside, the strip moving, the
+  /// display changing. Nothing is applied; the application just stops believing
+  /// the window is there.
+  const InputMenuSelection.dismissed(this.kind)
+    : deviceId = null,
+      off = false,
+      dismissed = true,
+      preset = null,
+      corner = null,
+      resetPosition = false;
+
+  final MediaDeviceKind kind;
+
+  /// Null with [off] false means `System default`.
+  final String? deviceId;
+
+  /// The `Off` row, which is the existing toggle rather than a device.
+  final bool off;
+
+  final bool dismissed;
+
+  /// Set only by the camera sheet. Unlike a device choice this leaves the sheet
+  /// open: the tile changes shape on screen under it, and trying the other two
+  /// should not cost a reopen each time.
+  final CameraPipPreset? preset;
+
+  /// Window mode's answer to the drag, and like [preset] it leaves the sheet
+  /// open.
+  final CameraOverlayCorner? corner;
+
+  final bool resetPosition;
+
+  static InputMenuSelection? tryFromMap(Map<String, Object?> map) {
+    final MediaDeviceKind? kind = MediaDeviceKind.fromName(
+      map['kind'] as String?,
+    );
+    if (kind == null) {
+      return null;
+    }
+    return InputMenuSelection(
+      kind: kind,
+      deviceId: map['deviceId'] as String?,
+      off: map['off'] as bool? ?? false,
+      dismissed: map['dismissed'] as bool? ?? false,
+      preset: CameraPipPreset.tryFromName(map['preset'] as String?),
+      corner: CameraOverlayCorner.tryFromName(map['corner'] as String?),
+      resetPosition: map['resetPosition'] as bool? ?? false,
+    );
+  }
+
+  Map<String, Object?> toMap() => <String, Object?>{
+    'kind': kind.name,
+    'deviceId': deviceId,
+    'off': off,
+    'dismissed': dismissed,
+    'preset': preset?.name,
+    'corner': corner?.name,
+    'resetPosition': resetPosition,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is InputMenuSelection &&
+      other.kind == kind &&
+      other.deviceId == deviceId &&
+      other.off == off &&
+      other.dismissed == dismissed &&
+      other.preset == preset &&
+      other.corner == corner &&
+      other.resetPosition == resetPosition;
+
+  @override
+  int get hashCode => Object.hash(
+    kind,
+    deviceId,
+    off,
+    dismissed,
+    preset,
+    corner,
+    resetPosition,
+  );
+
+  @override
+  String toString() => switch (this) {
+    _ when dismissed => 'InputMenuSelection($kind, dismissed)',
+    _ when resetPosition => 'InputMenuSelection($kind, reset position)',
+    _ when preset != null => 'InputMenuSelection($kind, ${preset!.name})',
+    _ when corner != null => 'InputMenuSelection($kind, ${corner!.name})',
+    _ => 'InputMenuSelection($kind, ${off ? 'off' : deviceId ?? 'default'})',
+  };
+}
+
 /// Everything the control-strip window renders (design `1f`, `1g`).
 ///
 /// Pushed from the application engine to the overlay engine as one immutable
@@ -56,6 +397,9 @@ class RecordingOverlayState {
     this.cameraAvailable = true,
     this.systemAudioAvailable = true,
     this.isStopping = false,
+    this.microphoneHasMenu = false,
+    this.cameraHasMenu = false,
+    this.systemAudioHasMenu = false,
   });
 
   final bool isPaused;
@@ -68,6 +412,15 @@ class RecordingOverlayState {
   final bool systemAudioAvailable;
   final bool isStopping;
 
+  /// Whether this input has a device list to disclose (§33.4).
+  ///
+  /// From `RecorderCapabilities.selectableDeviceKinds`, carried in the snapshot
+  /// so the strip never asks which operating system it is on (§28). False draws
+  /// no caret at all rather than a dead one.
+  final bool microphoneHasMenu;
+  final bool cameraHasMenu;
+  final bool systemAudioHasMenu;
+
   Map<String, Object?> toMap() => <String, Object?>{
     'isPaused': isPaused,
     'elapsedMs': elapsed.inMilliseconds,
@@ -78,6 +431,9 @@ class RecordingOverlayState {
     'cameraAvailable': cameraAvailable,
     'systemAudioAvailable': systemAudioAvailable,
     'isStopping': isStopping,
+    'microphoneHasMenu': microphoneHasMenu,
+    'cameraHasMenu': cameraHasMenu,
+    'systemAudioHasMenu': systemAudioHasMenu,
   };
 
   static RecordingOverlayState fromMap(Map<String, Object?> map) =>
@@ -93,6 +449,9 @@ class RecordingOverlayState {
         cameraAvailable: map['cameraAvailable'] as bool? ?? true,
         systemAudioAvailable: map['systemAudioAvailable'] as bool? ?? true,
         isStopping: map['isStopping'] as bool? ?? false,
+        microphoneHasMenu: map['microphoneHasMenu'] as bool? ?? false,
+        cameraHasMenu: map['cameraHasMenu'] as bool? ?? false,
+        systemAudioHasMenu: map['systemAudioHasMenu'] as bool? ?? false,
       );
 
   @override
@@ -106,7 +465,10 @@ class RecordingOverlayState {
       other.microphoneAvailable == microphoneAvailable &&
       other.cameraAvailable == cameraAvailable &&
       other.systemAudioAvailable == systemAudioAvailable &&
-      other.isStopping == isStopping;
+      other.isStopping == isStopping &&
+      other.microphoneHasMenu == microphoneHasMenu &&
+      other.cameraHasMenu == cameraHasMenu &&
+      other.systemAudioHasMenu == systemAudioHasMenu;
 
   @override
   int get hashCode => Object.hash(
@@ -119,6 +481,9 @@ class RecordingOverlayState {
     cameraAvailable,
     systemAudioAvailable,
     isStopping,
+    microphoneHasMenu,
+    cameraHasMenu,
+    systemAudioHasMenu,
   );
 }
 
@@ -133,6 +498,8 @@ class CameraPreviewOverlayState {
     this.mirrored = true,
     this.matchesCompositedPip = false,
     this.aspectRatio = 16 / 9,
+    this.fit = CameraPipFit.contain,
+    this.cornerRadiusRatio = 0,
   });
 
   final int? textureId;
@@ -147,11 +514,18 @@ class CameraPreviewOverlayState {
   /// the texture at this shape instead of stretching it to fill the window.
   final double aspectRatio;
 
+  /// The preset's crop and mask, so the preview draws what the compositor draws
+  /// (§33.5). `1p` promises they are the same object.
+  final CameraPipFit fit;
+  final double cornerRadiusRatio;
+
   Map<String, Object?> toMap() => <String, Object?>{
     'textureId': textureId,
     'mirrored': mirrored,
     'matchesCompositedPip': matchesCompositedPip,
     'aspectRatio': aspectRatio,
+    'fit': fit.name,
+    'cornerRadiusRatio': cornerRadiusRatio,
   };
 
   static CameraPreviewOverlayState fromMap(Map<String, Object?> map) =>
@@ -160,6 +534,10 @@ class CameraPreviewOverlayState {
         mirrored: map['mirrored'] as bool? ?? true,
         matchesCompositedPip: map['matchesCompositedPip'] as bool? ?? false,
         aspectRatio: (map['aspectRatio'] as num? ?? 16 / 9).toDouble(),
+        fit: CameraPipFit.fromName(map['fit'] as String?),
+        cornerRadiusRatio: (map['cornerRadiusRatio'] as num? ?? 0)
+            .toDouble()
+            .clamp(0.0, 0.5),
       );
 }
 

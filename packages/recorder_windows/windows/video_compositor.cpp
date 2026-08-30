@@ -63,6 +63,23 @@ bool VideoCompositor::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
     return false;
   }
 
+  // Whether the masked tile can be drawn at all on this adapter. Asked once
+  // here rather than per frame, and a `false` is a rounded tile with square
+  // corners, never a failed recording (see the header).
+  //
+  // Both halves are required and neither implies the other. MaxInputStreams is
+  // how many streams the processor can blend at once, and the masked tile is
+  // the second of two; ALPHA_STREAM is whether it honours an input stream's
+  // alpha channel at all, which is the mechanism the mask travels by. An
+  // adapter with two input streams and no alpha stream would compose the tile
+  // opaquely — a circle drawn as a square, silently, which is exactly the
+  // fallback this flag exists to take instead.
+  D3D11_VIDEO_PROCESSOR_CAPS caps{};
+  supports_masked_tile_ =
+      SUCCEEDED(enumerator_->GetVideoProcessorCaps(&caps)) &&
+      caps.MaxInputStreams >= kMaskedTileStreams &&
+      (caps.FeatureCaps & D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ALPHA_STREAM) != 0;
+
   D3D11_VIDEO_COLOR background{};
   background.RGBA.R = 0.0f;
   background.RGBA.G = 0.0f;
@@ -77,8 +94,13 @@ bool VideoCompositor::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
   output_space.YCbCr_Matrix = 1;          // BT.709
   output_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
   video_context_->VideoProcessorSetOutputColorSpace(processor_.get(), &output_space);
-  video_context_->VideoProcessorSetStreamFrameFormat(
-      processor_.get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+  // Every stream this compositor ever enables, not only the first: the masked
+  // tile is drawn as stream 1 and a stream whose frame format was never set is
+  // one the driver is free to interpret as interlaced.
+  for (UINT stream = 0; stream < kMaskedTileStreams; ++stream) {
+    video_context_->VideoProcessorSetStreamFrameFormat(
+        processor_.get(), stream, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+  }
 
   D3D11_TEXTURE2D_DESC desc{};
   desc.Width = canvas_width_;
@@ -140,6 +162,16 @@ bool VideoCompositor::camera_enabled() const {
   return camera_enabled_;
 }
 
+void VideoCompositor::SetCameraOverlay(const CameraOverlayConfig& camera) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  camera_config_ = camera;
+}
+
+CameraOverlayConfig VideoCompositor::camera_overlay() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return camera_config_;
+}
+
 void VideoCompositor::SetCameraFrame(winrt::com_ptr<ID3D11Texture2D> frame,
                                      uint32_t width, uint32_t height) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -148,9 +180,23 @@ void VideoCompositor::SetCameraFrame(winrt::com_ptr<ID3D11Texture2D> frame,
   camera_height_ = height;
 }
 
-RectD VideoCompositor::pip_rect() const {
+PipDraw VideoCompositor::CameraPipDraw(uint32_t frame_width,
+                                       uint32_t frame_height) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return ResolvePipRect(camera_config_, canvas_width_, canvas_height_);
+  return ResolvePipDraw(camera_config_, canvas_width_, canvas_height_,
+                        frame_width == 0 ? camera_width_ : frame_width,
+                        frame_height == 0 ? camera_height_ : frame_height);
+}
+
+CameraFrameMask VideoCompositor::CameraMask(uint32_t frame_width,
+                                            uint32_t frame_height) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return ResolveCameraFrameMask(camera_config_, canvas_width_, canvas_height_,
+                                frame_width, frame_height);
+}
+
+RectD VideoCompositor::pip_rect() const {
+  return CameraPipDraw().dest;
 }
 
 winrt::com_ptr<ID3D11VideoProcessorInputView> VideoCompositor::InputViewFor(
@@ -177,41 +223,61 @@ winrt::com_ptr<ID3D11VideoProcessorInputView> VideoCompositor::InputViewFor(
   return view;
 }
 
-bool VideoCompositor::BlitStream(ID3D11Texture2D* texture, const RECT& source_rect,
-                                 const RECT& dest_rect, bool restrict_output,
-                                 bool mirror_horizontal, std::string* error) {
-  const winrt::com_ptr<ID3D11VideoProcessorInputView> input = InputViewFor(texture);
-  if (!input) {
-    *error = "A capture surface could not be bound to the video processor.";
+bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target,
+                           std::string* error) {
+  if (layers == nullptr || count == 0 || count > kMaskedTileStreams) {
+    *error = "The compositor was asked to draw nothing.";
     return false;
   }
 
-  video_context_->VideoProcessorSetStreamSourceRect(processor_.get(), 0, TRUE,
-                                                    &source_rect);
-  video_context_->VideoProcessorSetStreamDestRect(processor_.get(), 0, TRUE, &dest_rect);
-  if (restrict_output) {
-    video_context_->VideoProcessorSetOutputTargetRect(processor_.get(), TRUE, &dest_rect);
+  // Input views first, and all of them, so a surface that cannot be bound fails
+  // before any stream state has been touched.
+  winrt::com_ptr<ID3D11VideoProcessorInputView> inputs[kMaskedTileStreams];
+  for (size_t i = 0; i < count; ++i) {
+    inputs[i] = InputViewFor(layers[i].texture);
+    if (!inputs[i]) {
+      *error = "A capture surface could not be bound to the video processor.";
+      return false;
+    }
+  }
+
+  D3D11_VIDEO_PROCESSOR_STREAM streams[kMaskedTileStreams]{};
+  for (size_t i = 0; i < count; ++i) {
+    const UINT index = static_cast<UINT>(i);
+    video_context_->VideoProcessorSetStreamSourceRect(processor_.get(), index, TRUE,
+                                                      &layers[i].source);
+    video_context_->VideoProcessorSetStreamDestRect(processor_.get(), index, TRUE,
+                                                    &layers[i].dest);
+    // Per-pixel alpha is what shapes the tile, and the planar alpha switch is
+    // what asks the driver to blend the stream at all; at 1.0 it changes no
+    // pixel the frame's own alpha did not already decide. Turned off again for
+    // an unmasked layer, because this state is the processor's and outlives the
+    // blit that set it.
+    video_context_->VideoProcessorSetStreamAlpha(
+        processor_.get(), index, layers[i].blend_alpha ? TRUE : FALSE, 1.0f);
+    if (video_context1_) {
+      // Preview mirroring is the overlay's business; only mirrorOutput reaches
+      // the file (spec 7).
+      video_context1_->VideoProcessorSetStreamMirror(
+          processor_.get(), index, TRUE,
+          layers[i].mirror_horizontal ? TRUE : FALSE, FALSE);
+    }
+    streams[i].Enable = TRUE;
+    streams[i].OutputIndex = 0;
+    streams[i].InputFrameOrField = 0;
+    streams[i].PastFrames = 0;
+    streams[i].FutureFrames = 0;
+    streams[i].pInputSurface = inputs[i].get();
+  }
+  if (target != nullptr) {
+    video_context_->VideoProcessorSetOutputTargetRect(processor_.get(), TRUE, target);
   } else {
     video_context_->VideoProcessorSetOutputTargetRect(processor_.get(), FALSE, nullptr);
   }
-  if (video_context1_) {
-    // Preview mirroring is the overlay's business; only mirrorOutput reaches
-    // the file (spec 7).
-    video_context1_->VideoProcessorSetStreamMirror(processor_.get(), 0, TRUE,
-                                                   mirror_horizontal ? TRUE : FALSE,
-                                                   FALSE);
-  }
-
-  D3D11_VIDEO_PROCESSOR_STREAM stream{};
-  stream.Enable = TRUE;
-  stream.OutputIndex = 0;
-  stream.InputFrameOrField = 0;
-  stream.PastFrames = 0;
-  stream.FutureFrames = 0;
-  stream.pInputSurface = input.get();
 
   const HRESULT hr = video_context_->VideoProcessorBlt(
-      processor_.get(), canvas_views_[next_canvas_].get(), 0, 1, &stream);
+      processor_.get(), canvas_views_[next_canvas_].get(), 0,
+      static_cast<UINT>(count), streams);
   if (FAILED(hr)) {
     *error = "VideoProcessorBlt failed (" + HResultToString(hr) + ").";
     return false;
@@ -255,44 +321,54 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
     }
   }
 
-  RECT source_rect{};
-  source_rect.right = static_cast<LONG>(source_width);
-  source_rect.bottom = static_cast<LONG>(source_height);
-  const RECT dest_rect = ToRect(LetterboxRect(source_width, source_height, canvas_width_,
-                                              canvas_height_));
-  if (!BlitStream(source, source_rect, dest_rect, false, false, error)) {
-    return false;
-  }
+  Layer desktop;
+  desktop.texture = source;
+  desktop.source.right = static_cast<LONG>(source_width);
+  desktop.source.bottom = static_cast<LONG>(source_height);
+  desktop.dest = ToRect(
+      LetterboxRect(source_width, source_height, canvas_width_, canvas_height_));
 
-  if (draw_camera) {
-    // The camera fills its picture-in-picture rectangle without distortion: it
-    // is letterboxed inside the configured rectangle exactly like the source is
-    // inside the canvas.
-    //
-    // Gap, deliberately not invented: CameraOverlayConfiguration.cornerRadius
-    // has no equivalent in the Direct3D 11 video processor, so a non-zero
-    // radius is not rounded in the file. The default is 0 and the ADR calls for
-    // square corners; rounding would need a shader pass and a decision that
-    // does not exist yet.
-    const RectD pip = ResolvePipRect(
-        camera_config, canvas_width_, canvas_height_,
-        camera_height == 0 ? 0
-                           : static_cast<double>(camera_width) /
-                                 static_cast<double>(camera_height));
-    const RectD fitted =
-        LetterboxRect(camera_width, camera_height, pip.width, pip.height);
-    RectD placed = fitted;
-    placed.x += pip.x;
-    placed.y += pip.y;
-    RECT camera_source{};
-    camera_source.right = static_cast<LONG>(camera_width);
-    camera_source.bottom = static_cast<LONG>(camera_height);
-    if (!BlitStream(camera.get(), camera_source, ToRect(placed), true,
-                    camera_config.mirror_output, error)) {
+  if (!draw_camera) {
+    if (!Blit(&desktop, 1, nullptr, error)) {
       return false;
     }
-    // Restore full-canvas output for the next frame's first pass.
-    video_context_->VideoProcessorSetOutputTargetRect(processor_.get(), FALSE, nullptr);
+    *out_canvas = canvases_[next_canvas_];
+    next_canvas_ = (next_canvas_ + 1) % canvases_.size();
+    return true;
+  }
+
+  // Which part of the camera frame is read and where it lands, from the one
+  // function the preview window is also placed and cropped by (design 1p). The
+  // frame is never distorted: `contain` letterboxes it inside the tile and
+  // `cover` takes the centre of it, and nothing but an explicit shape preset
+  // ever asks for the second (spec 33.5).
+  const PipDraw pip = ResolvePipDraw(camera_config, canvas_width_, canvas_height_,
+                                     camera_width, camera_height);
+  Layer tile;
+  tile.texture = camera.get();
+  tile.source = ToRect(pip.source);
+  tile.dest = ToRect(pip.dest);
+  tile.mirror_horizontal = camera_config.mirror_output;
+  // A rounded tile carries its shape in the frame's alpha channel, which only
+  // the two-stream path composites (see the header). Everything else keeps the
+  // two-blit path it has always used, so an ordinary recording is composed
+  // exactly as it was before presets existed.
+  const bool masked = pip.corner_radius > 0 && supports_masked_tile_;
+  if (masked) {
+    tile.blend_alpha = true;
+    const Layer layers[kMaskedTileStreams] = {desktop, tile};
+    if (!Blit(layers, kMaskedTileStreams, nullptr, error)) {
+      return false;
+    }
+  } else {
+    if (!Blit(&desktop, 1, nullptr, error)) {
+      return false;
+    }
+    // The target rectangle is the tile's own, so the rest of the canvas the
+    // first pass just wrote is not touched.
+    if (!Blit(&tile, 1, &tile.dest, error)) {
+      return false;
+    }
   }
 
   *out_canvas = canvases_[next_canvas_];

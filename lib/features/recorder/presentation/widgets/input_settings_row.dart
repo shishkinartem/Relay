@@ -213,6 +213,10 @@ class _Details extends StatelessWidget {
           const SizedBox(height: 7),
           AppMonoText('“$unresolved” was not found · using the default'),
         ],
+        if (kind == MediaDeviceKind.camera) ...<Widget>[
+          const SizedBox(height: 9),
+          const _CameraPresets(),
+        ],
         if (vm.canMeter(kind)) ...<Widget>[
           const SizedBox(height: 9),
           _Meter(kind: kind, label: label, inputEnabled: inputEnabled),
@@ -340,5 +344,34 @@ class _Meter extends StatelessWidget {
       return 'Test — unavailable';
     }
     return silent ? 'Test — no sound' : 'Test — speak now';
+  }
+}
+
+/// The tile's shape and size: three presets, not a number (§33.5).
+///
+/// `Camera` keeps the sensor's own shape and crops nothing — the default, and
+/// the behaviour that shipped before presets existed. `Square` and `Circle` are
+/// small and take the centre of the frame, which is the point of choosing them.
+class _CameraPresets extends StatelessWidget {
+  const _CameraPresets();
+
+  @override
+  Widget build(BuildContext context) {
+    final RecorderViewModel vm = AppScope.of(context).recorder;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        const AppKicker('Shape and size'),
+        const SizedBox(height: 7),
+        // The same component the camera sheet draws during recording: one
+        // choice, drawn once, so the two cannot disagree about what a preset
+        // looks like (§33.5).
+        CameraPresetTiles(
+          selected: vm.cameraPreset,
+          onChoose: vm.setCameraPreset,
+        ),
+      ],
+    );
   }
 }

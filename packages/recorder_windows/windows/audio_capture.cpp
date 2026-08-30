@@ -156,9 +156,39 @@ bool AudioCapture::Start(const SessionClock* clock, ErrorHandler on_error,
     *error = "The audio capture thread could not be created.";
     return false;
   }
+  {
+    // Re-armed before the thread exists, so a wait cannot be answered by a
+    // previous run's result.
+    std::lock_guard<std::mutex> lock(open_mutex_);
+    open_settled_ = false;
+    opened_ = false;
+  }
   running_.store(true);
   thread_ = std::thread(&AudioCapture::CaptureThread, this);
   return true;
+}
+
+bool AudioCapture::WaitUntilOpen(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(open_mutex_);
+  // A timeout is not "still opening, ask again": the caller is holding a
+  // recording open while it waits, and an endpoint that has not answered by
+  // then is one to leave the previous device running for (spec 33.2).
+  if (!open_cv_.wait_for(lock, timeout, [this] { return open_settled_; })) {
+    return false;
+  }
+  return opened_;
+}
+
+void AudioCapture::SettleOpen(bool opened) {
+  {
+    std::lock_guard<std::mutex> lock(open_mutex_);
+    if (open_settled_) {
+      return;
+    }
+    open_settled_ = true;
+    opened_ = opened;
+  }
+  open_cv_.notify_all();
 }
 
 void AudioCapture::Stop() {
@@ -166,6 +196,11 @@ void AudioCapture::Stop() {
     ::SetEvent(stop_event_);
   }
   running_.store(false);
+  // Before the join, not after it: a stop arriving while another thread waits
+  // on the handshake must not leave it there for the whole timeout. Settling
+  // twice is a no-op, so the capture thread's own answer still wins when it got
+  // there first.
+  SettleOpen(false);
   if (thread_.joinable()) {
     thread_.join();
   }
@@ -216,12 +251,15 @@ void AudioCapture::CaptureThread() {
 
   std::string error;
   if (!OpenEndpoint(&error)) {
+    SettleOpen(false);
     ReportFailure(error, E_FAIL);
   } else {
     const HRESULT hr = client_->Start();
     if (FAILED(hr)) {
+      SettleOpen(false);
       ReportFailure("The audio stream could not be started.", hr);
     } else {
+      SettleOpen(true);
       if (meter_ != nullptr) {
         // This capture owns the device from here until the loop exits, so the
         // meter reads its levels instead of opening a handle of its own

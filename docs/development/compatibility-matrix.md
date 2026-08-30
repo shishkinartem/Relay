@@ -15,8 +15,19 @@ Verified on macOS 26.5.2 (arm64) with Flutter 3.47.1:
 
 - the application builds, launches and registers `RecorderMacos`;
 - source enumeration returns displays before windows, with still thumbnails;
-- both overlay windows are created and reach the capture exclusion list —
-  asserted by `integration_test/macos_recording_test.dart`;
+- the three overlay windows are created and **report** ids from
+  `excludedWindowIds` — which is all `integration_test/macos_recording_test.dart`
+  asserts, and the claim it used to be given credit for was stronger than that.
+  It checks `excludedWindowIds().length >= 2`; it never checks that those ids
+  reached an `SCContentFilter`. That mattered: until 2026-08-30 the filter's
+  exclusion list was empty in **every** session, because `prepare` builds the
+  filter before any overlay is ordered front and a panel that is not on screen
+  is absent from `SCShareableContent`. Only `sharingType = .none` was keeping
+  the overlays out of the file, and the test was green throughout. The filter is
+  now rebuilt whenever an overlay appears (`refreshCaptureExclusions`), and the
+  assertion is still the weak one — strengthening it needs a check that the
+  recorded frames contain no overlay pixels, which is a real capture on a real
+  host;
 - the permission preflight reports and requests correctly.
 
 `integration_test/macos_recording_test.dart` additionally records a real
@@ -123,7 +134,7 @@ the Flutter- and OS-bound half so it can be executed on its own.
 | Platform | Where | How to run | State |
 |---|---|---|---|
 | macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | **96 tests passing** (run 2026-08-30) |
-| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | 68 cases written, **never compiled** — `cmake`, `ctest` and `cl` are all absent from this host |
+| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | 152 cases written, **never compiled** — `cmake`, `ctest` and `cl` are all absent from this host |
 
 Both suites assert the same properties on purpose. The two platforms hand-write
 the same wire spellings and re-implement the same geometry, and nothing in the
@@ -168,7 +179,7 @@ been through a compiler on this host, so the endpoint enumeration, the camera
 enumeration through Media Foundation, the default-first ordering, the
 reference-counted meter, the IMMNotificationClient watcher and every divergence
 listed under *Where the two halves actually diverge* are read off the source and
-not measured. The 104 cases in windows/test/recorder_types_test.cpp cover the pure
+not measured. The 152 cases in windows/test/recorder_types_test.cpp cover the pure
 half only, and they have not been compiled here.
 
 NOT RUN: Windows stop/abort teardown ordering
@@ -230,18 +241,31 @@ if it does not, that same resize makes it strictly worse. Whoever has a Windows
 machine should drag the strip across a scale boundary, log the view's device
 pixel ratio and the host window's DPI on each side, and only then choose.
 
-Keyboard movement and the strip's own `Reset position` are not implemented on
-either platform — see §33.3, which records why they wait for the action sheet.
+**Keyboard movement and `Reset position` now exist**, both answered by the host
+so neither needs the strip's window to keep key focus. `resetStripPosition` and
+the eight nudge commands travel as bare names on `relay/overlay/events`; the
+application turns each into the one `nudgeControlStrip(dx, dy)` call both hosts
+already implement, which clamps and snaps exactly as the end of a drag does.
+
+The arrow keys carry a real limit, stated in §33.3 rather than hidden: a key is
+only delivered to a focused window, and the strip's panel is non-activating, so
+the arrows work after the user has clicked the strip — not while the recorded
+application is in front. Claiming a global hotkey would be worse than the limit:
+a recorder that swallows the arrow keys of every application it records is a
+bug. `Reset position` is raised by a click and needs no focus at all.
 
 ## Known gaps
 
 - **Windows is written but not built.** No MSVC toolchain on the development
   host — see *Not verified* above.
-- **`deviceId` on `startInputMetering` is not honoured by either platform.** The
-  Dart half sends it and the contract requires the meter to follow it; both
-  native meters still open the platform default. A bar under a non-default
-  microphone row is therefore metering the wrong device on macOS and Windows
-  alike — see *Where the two halves actually diverge*.
+- ~~**`deviceId` on `startInputMetering` is not honoured by either platform.**~~
+  **Closed.** Both hosts now take the id from the call — macOS at
+  `RecorderMacosPlugin.startInputMetering` → `meter.start(kind:deviceId:)`,
+  Windows at `meter_.Start(kind, StringAt(*arguments, "deviceId"))` — and a
+  start naming a different device re-points the tap instead of opening a second
+  one. Read off the source on both sides; measured on neither, because the
+  Windows half has still never been compiled here and the macOS half needs a
+  second microphone to tell the two taps apart.
 - **`getInputDevices` can fail on Windows**, where the contract says it always
   answers: an absent or unrecognised `kind` and a full COM worker queue are both
   rejections there and empty lists (or impossible) on macOS.

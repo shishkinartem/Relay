@@ -238,10 +238,17 @@ the user the rest of the list.
   "cameraDeviceId": null,
   "microphoneDeviceId": "mic:0x2f",
   "systemAudioDeviceId": null,
-  "cameraOverlay": { "widthRatio": 0.16, "aspectRatio": 1.7777,
+  // §33.5. `preset` names the shape; the numbers beside it are that preset
+  // resolved, so a host that does not know a preset name still draws the right
+  // tile. `positionX`/`positionY` are the dragged position as a fraction of the
+  // canvas, and are **both null together** — half a position is no position,
+  // and null means `corner` instead.
+  "cameraOverlay": { "preset": "camera",
+                     "widthRatio": 0.16, "aspectRatio": 1.7777,
                      "followsSourceAspectRatio": true,
-                     "cornerRadius": 0.0, "marginRatio": 0.01,
-                     "corner": "bottomRight",
+                     "fit": "contain", "cornerRadiusRatio": 0.0,
+                     "marginRatio": 0.01, "corner": "bottomRight",
+                     "positionX": null, "positionY": null,
                      "mirrorPreview": true, "mirrorOutput": false },
   "composition": { "aspectRatioPolicy": "containWithinPreset",
                    "geometryChangePolicy": "fixedCanvasLetterbox" }
@@ -289,6 +296,75 @@ it. The alternative — a second, stable display-id spelling maintained on both
 platforms purely for this — costs more than the case is worth. Recorded in
 `../development/compatibility-matrix.md`.
 
+### input-menu map
+
+```jsonc
+{
+  "kind": "microphone",
+  "title": "Microphone",
+  "loading": false,          // one disabled row while the platform answers
+  "emptyMessage": null,      // shown instead of the list when there is nothing
+  "notice": null,            // a line under the list: a device that was lost
+  "level": {"peak": 0.62, "rms": 0.41},   // null for a kind that is not metered
+  "items": [
+    {"id": null, "label": "System default", "meta": "Shure MV7",
+     "selected": true, "enabled": true},
+    {"id": "mic:mv7", "label": "Shure MV7", "meta": "USB",
+     "selected": false, "enabled": true},
+    {"id": null, "label": "Microphone off", "selected": false, "enabled": true}
+  ],
+  // Camera only; empty on every other kind (§33.4).
+  "presets": ["camera", "square", "circle"],
+  "selectedPreset": "circle",     // null means the default, `camera`
+  "canResetPosition": true,       // the tile has been dragged off its corner
+  // Window mode only; empty with a display source, where the tile is dragged.
+  "corners": ["topLeft", "topRight", "bottomLeft", "bottomRight"],
+  "selectedCorner": "bottomRight"
+}
+```
+
+`presets` carries the presets themselves rather than more list rows because they
+are the one part of this window that is not a list: the sheet draws each at its
+own proportions, which is what makes the choice legible before it is made. A
+preset name a build does not recognise is **dropped**, never defaulted — one
+that decoded to `camera` would show the wrong tile as the selected one.
+
+An `id` of `null` is one of the two rows that are not devices: `System default`,
+and the `Off` row, which is the strip's own toggle reached from another place.
+The choice comes back on `relay/overlay/events` **as a map**, beside the bare
+command strings that channel already emits — a String is a command, a Map is a
+choice:
+
+```jsonc
+{"kind": "microphone", "deviceId": "mic:mv7", "off": false, "dismissed": false}
+```
+
+The camera sheet raises two more, on the same map and the same call:
+
+```jsonc
+{"kind": "camera", "preset": "circle"}        // a shape preset (§33.5)
+{"kind": "camera", "corner": "topLeft"}       // window mode's placement row
+{"kind": "camera", "resetPosition": true}     // put the tile back in its corner
+```
+
+**None of the three camera rows closes the sheet** — a preset, a corner and
+`resetPosition` alike. The tile changes on screen underneath it, and comparing
+three shapes or four corners must not cost a reopen each time, so the host
+forwards them and leaves the window exactly where it is. A **device row** and
+**`off`** are the choices that close the sheet, and the host closes it before
+forwarding. A row that leaves the sheet open must not also send a dismissal.
+
+**A dismissal is sent too**, as `{"kind": "microphone", "dismissed": true}` with
+no device. It applies nothing — the host has already closed the window. It
+exists because the application is what draws the chevron: a menu the host closed
+on a click outside would otherwise leave the application believing the window is
+still open, and the next press on that chevron would be read as the toggle that
+closes it. The user presses twice to reopen a menu that is not there.
+
+The host sends it whenever it closes the menu on its own — a click outside, the
+strip being dragged, a display change — and *not* when it closes in response to
+`hideInputMenu`, which the application already knows about.
+
 ### recording-file map
 
 ```jsonc
@@ -335,6 +411,10 @@ the wrong meter, so the spelling must match `MediaDeviceKind`.
 | `showControlStrip` | placement map | `null` |
 | `hideControlStrip` | — | `null` |
 | `controlStripPosition` | — | strip-position map, or `null` |
+| `nudgeControlStrip` | `{ dx, dy }` logical points | `null` |
+| `showInputMenu` | placement map + `state`: input-menu map | `null` |
+| `updateInputMenu` | input-menu map | `null` |
+| `hideInputMenu` | — | `null` |
 | `showCameraPreview` | placement map + `matchesCompositedPip: bool`, optional `cameraOverlay` | `null` |
 | `hideCameraPreview` | — | `null` |
 | `updateControlStrip` | overlay-state map | `null` |
@@ -405,19 +485,32 @@ overlays out of the file (§6).
 
 Emits the raised `OverlayCommand` name as a bare `String`:
 `toggleMicrophone`, `toggleCamera`, `toggleSystemAudio`, `pauseOrResume`,
-`stop`.
+`stop`, `openMicrophoneMenu`, `openCameraMenu`, `openSystemAudioMenu`,
+`resetStripPosition`, and the eight nudges — `nudgeStripLeft`, `…Right`,
+`…Up`, `…Down`, and each again with the `Far` suffix for the Shift step
+(§33.3).
+
+A name this build does not know is **dropped**, never mapped to a fallback
+member: falling back would press a button nobody pressed, and the member it
+would have fallen back to is `stop`.
+
+The nudges are commands rather than a single call carrying a delta because this
+channel deliberately carries bare names — a Map on it is a device choice, and a
+String is a command. The application turns each name into the one
+`nudgeControlStrip(dx, dy)` call the host already answers, so the step size is
+the application's decision and both hosts stay unaware of it.
 
 ## `relay/overlay/view`
 
 Registered on the *secondary* engines only. Native runs those engines at the
-Dart entrypoints `controlStripMain` and `cameraPreviewMain`.
+Dart entrypoints `controlStripMain`, `cameraPreviewMain` and `inputMenuMain`.
 
 Native → overlay:
 
 | Method | Arguments |
 |---|---|
 | `controlStripState` | overlay-state map |
-| `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio }` |
+| `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio, fit, cornerRadiusRatio }` |
 
 Overlay → native:
 
@@ -425,7 +518,24 @@ Overlay → native:
 |---|---|
 | `command` | `{ command: String }` — forwarded to `relay/overlay/events` |
 | `contentSize` | `{ width, height }` — resizes the window to fit its content |
-| `beginMove` | — hands the drag to the platform's own window-move loop |
+| `beginMove` | — hands the drag to the platform's own window-move loop; a **success with nothing started** on a window that cannot move |
+| `chooseInputDevice` | `{ kind, deviceId, off }` — a row of the input menu was chosen; or `{ kind, preset }` / `{ kind, corner }` / `{ kind, resetPosition }` from the camera sheet, which the host forwards **without** closing the window |
+| `dismissInputMenu` | — Esc, while the menu window happens to hold focus |
+
+`command` also carries an optional `anchorX`: the pressed control's centre **in
+the overlay window's own coordinates**. It exists for the chevrons — only
+Flutter knows where a control ended up, and the host has to put the menu under
+the one that was pressed. It travels on this call rather than on the events
+channel so that channel keeps emitting bare names.
+
+**A `beginMove` that moves nothing still succeeds.** The window-mode camera
+preview is not the tile, so there is nothing to drag; the host starts no move
+loop and answers success anyway. `NotImplemented` would be wrong twice over —
+the method exists, and Dart's `invokeMethod` turns it into a thrown
+`MissingPluginException` in a handler that calls this unawaited, so an ordinary
+gesture would raise an unhandled async error. The two sides also cannot agree
+perfectly by construction: Dart mounts the drag on `matchesCompositedPip`, and a
+host additionally requires the recorded display to still be nameable.
 
 **`beginMove` is called once per gesture.** The strip's own Flutter side detects
 a press on its background that has travelled 4 px and asks the host to take

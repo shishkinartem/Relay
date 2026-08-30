@@ -42,6 +42,9 @@ class RecordingControlStrip extends StatelessWidget {
     this.systemAudioAvailable = true,
     this.isStopping = false,
     this.onMoveRequested,
+    this.onOpenMicrophoneMenu,
+    this.onOpenCameraMenu,
+    this.onOpenSystemAudioMenu,
     this.onToggleMicrophone,
     this.onToggleCamera,
     this.onToggleSystemAudio,
@@ -83,6 +86,18 @@ class RecordingControlStrip extends StatelessWidget {
   /// Null leaves the strip where it is docked — which is what a widget test
   /// wants, and what a platform that cannot move a window has to fall back to.
   final VoidCallback? onMoveRequested;
+
+  /// Opens that input's device list. The argument is the caret's centre in the
+  /// strip's own coordinates, which is the only thing the host cannot work out
+  /// for itself — it knows where the window is, not where Flutter laid the
+  /// control out inside it (§33.4).
+  ///
+  /// Null draws no caret at all rather than a dead one: an input the platform
+  /// gives no choice about has nothing to disclose, and a control that can
+  /// never do anything is not a disabled control.
+  final ValueChanged<double>? onOpenMicrophoneMenu;
+  final ValueChanged<double>? onOpenCameraMenu;
+  final ValueChanged<double>? onOpenSystemAudioMenu;
 
   final VoidCallback? onToggleMicrophone;
   final VoidCallback? onToggleCamera;
@@ -162,6 +177,8 @@ class RecordingControlStrip extends StatelessWidget {
             available: microphoneAvailable,
             label: microphoneEnabled ? 'Microphone on' : 'Microphone off',
             onPressed: onToggleMicrophone,
+            menuLabel: 'Choose a microphone',
+            onOpenMenu: onOpenMicrophoneMenu,
           ),
           _InputToggle(
             enabledIcon: AppIcons.camera,
@@ -170,6 +187,8 @@ class RecordingControlStrip extends StatelessWidget {
             available: cameraAvailable,
             label: cameraEnabled ? 'Camera on' : 'Camera off',
             onPressed: onToggleCamera,
+            menuLabel: 'Choose a camera',
+            onOpenMenu: onOpenCameraMenu,
           ),
           _InputToggle(
             enabledIcon: AppIcons.systemAudio,
@@ -178,6 +197,8 @@ class RecordingControlStrip extends StatelessWidget {
             available: systemAudioAvailable,
             label: systemAudioEnabled ? 'System audio on' : 'System audio off',
             onPressed: onToggleSystemAudio,
+            menuLabel: 'Choose a system-audio device',
+            onOpenMenu: onOpenSystemAudioMenu,
           ),
           const _StripDivider(leading: gap / 2, trailing: gap / 2),
           // One control in one square, in both states: the glyph and the fill
@@ -290,6 +311,8 @@ class _InputToggle extends StatelessWidget {
     required this.available,
     required this.label,
     required this.onPressed,
+    required this.menuLabel,
+    required this.onOpenMenu,
   });
 
   final AppIconData enabledIcon;
@@ -298,15 +321,88 @@ class _InputToggle extends StatelessWidget {
   final bool available;
   final String label;
   final VoidCallback? onPressed;
+  final String menuLabel;
+  final ValueChanged<double>? onOpenMenu;
 
   @override
-  Widget build(BuildContext context) => AppIconButton(
-    icon: enabled ? enabledIcon : disabledIcon,
-    semanticLabel: available ? label : '$label — unavailable',
-    size: 32,
-    variant: enabled ? AppButtonVariant.primary : AppButtonVariant.secondary,
-    foreground: enabled ? null : AppColors.neutral600,
-    hitSlop: RecordingControlStrip.controlSlop,
-    onPressed: available ? onPressed : null,
-  );
+  Widget build(BuildContext context) {
+    final Widget toggle = AppIconButton(
+      icon: enabled ? enabledIcon : disabledIcon,
+      semanticLabel: available ? label : '$label — unavailable',
+      size: 32,
+      variant: enabled ? AppButtonVariant.primary : AppButtonVariant.secondary,
+      foreground: enabled ? null : AppColors.neutral600,
+      hitSlop: RecordingControlStrip.controlSlop,
+      onPressed: available ? onPressed : null,
+    );
+    final ValueChanged<double>? open = onOpenMenu;
+    if (open == null) {
+      return toggle;
+    }
+    // The caret keeps only half a gap of slop, on its trailing side: the
+    // leading half belongs to the square it is attached to, and a caret that
+    // claimed both would take presses aimed at the toggle.
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        toggle,
+        _MenuCaret(label: menuLabel, enabled: enabled, onOpen: open),
+      ],
+    );
+  }
+}
+
+/// The chevron beside an input, and the only part of the strip that knows
+/// where it is: the host places the menu under it and cannot work that out for
+/// itself (§33.4).
+class _MenuCaret extends StatelessWidget {
+  const _MenuCaret({
+    required this.label,
+    required this.enabled,
+    required this.onOpen,
+  });
+
+  final String label;
+  final bool enabled;
+  final ValueChanged<double> onOpen;
+
+  static const double width = 13;
+
+  @override
+  Widget build(BuildContext context) {
+    // A `Builder` rather than a `GlobalKey`: a key created in `build` is a new
+    // key on every rebuild, which throws away the element it identifies. The
+    // builder's own context resolves to this caret's render object, which is
+    // all the measurement needs.
+    return Builder(
+      builder: (BuildContext context) => AppIconButton(
+        icon: AppIcons.chevronDown,
+        semanticLabel: label,
+        size: 32,
+        width: width,
+        iconSize: 11,
+        variant: AppButtonVariant.secondary,
+        // Attached to the square beside it, not a second button: the accent's
+        // tint rather than its fill, so the pair reads as one control with a
+        // disclosure (§33.4).
+        background: enabled ? AppColors.accentHoverTint : null,
+        foreground: enabled ? AppColors.accent700 : AppColors.neutral600,
+        hitSlop: const EdgeInsets.only(
+          right: RecordingControlStrip.gap / 2,
+          top: 7,
+          bottom: 7,
+        ),
+        onPressed: () {
+          final RenderObject? render = context.findRenderObject();
+          if (render is! RenderBox || !render.hasSize) {
+            return;
+          }
+          // Window coordinates, because this engine's window hosts nothing but
+          // the strip: its origin and the window's are the same point.
+          final Offset origin = render.localToGlobal(Offset.zero);
+          onOpen(origin.dx + render.size.width / 2);
+        },
+      ),
+    );
+  }
 }

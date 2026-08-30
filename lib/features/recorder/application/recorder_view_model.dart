@@ -109,6 +109,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   StreamSubscription<RecorderEvent>? _recorderEvents;
   StreamSubscription<OverlayCommand>? _overlayCommands;
+  StreamSubscription<InputMenuSelection>? _menuSelections;
   StreamSubscription<UploadEvent>? _uploadEvents;
 
   SessionState _state = const SessionIdle();
@@ -174,6 +175,109 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// Whether [kind]'s detail section is open on the launch screen.
   bool isInputExpanded(MediaDeviceKind kind) =>
       settings.expandedInputs.contains(kind);
+
+  // ── the camera tile: three presets and a place to put it (§33.5) ─────────
+
+  CameraPipPreset get cameraPreset => settings.cameraPipPreset;
+
+  /// The tile as the compositor and the preview both resolve it.
+  ///
+  /// Built from the preset every time rather than stored: the preset *is* the
+  /// size and the shape, and a stored configuration would be a second copy of
+  /// the same answer that could disagree with it.
+  CameraOverlayConfiguration get cameraOverlay =>
+      CameraOverlayConfiguration.forPreset(
+        settings.cameraPipPreset,
+        position: settings.cameraPipPosition,
+        corner: settings.cameraPipCorner,
+      );
+
+  /// Chooses the tile's shape and size. Applied to a live recording between
+  /// frames; the encoder's canvas never changes (§33.5).
+  Future<void> setCameraPreset(CameraPipPreset preset) async {
+    if (preset == settings.cameraPipPreset) {
+      return;
+    }
+    await _settings.update(settings.copyWith(cameraPipPreset: preset));
+    notifyListeners();
+    await _pushCameraOverlay();
+  }
+
+  /// Puts the tile in a named corner (§33.5).
+  ///
+  /// The window-mode answer to the drag: there the preview is a separate
+  /// captioned object rather than the tile (design `1e`), so there is nothing
+  /// on screen to drag and nothing that would show where a drag had put it. A
+  /// named corner is legible without a preview, which is why it is the choice
+  /// offered instead of a free position.
+  ///
+  /// Choosing one clears any free position: the two are alternative answers to
+  /// the same question, and a stored fraction would silently win over the
+  /// corner the user just picked.
+  Future<void> setCameraCorner(CameraOverlayCorner corner) async {
+    if (corner == settings.cameraPipCorner &&
+        settings.cameraPipPosition == null) {
+      return;
+    }
+    await _settings.update(
+      settings.copyWith(cameraPipCorner: corner, cameraPipPosition: null),
+    );
+    notifyListeners();
+    await _pushCameraOverlay();
+  }
+
+  /// Puts the tile back in its corner (§33.5).
+  Future<void> resetCameraPipPosition() async {
+    if (settings.cameraPipPosition == null) {
+      return;
+    }
+    await _settings.update(settings.copyWith(cameraPipPosition: null));
+    notifyListeners();
+    await _pushCameraOverlay();
+  }
+
+  /// Best-effort: a tile that could not be re-pointed keeps drawing where it
+  /// was, which is wrong but harmless, and is not worth ending a recording for.
+  Future<void> _pushCameraOverlay() async {
+    if (_state is! SessionActive) {
+      return;
+    }
+    try {
+      await _recorder
+          .setCameraOverlay(cameraOverlay)
+          .timeout(platformCallTimeout);
+    } on Object catch (e) {
+      _logger.warn(
+        'camera_overlay_not_applied',
+        fields: <String, Object?>{'error': e.runtimeType.toString()},
+      );
+    }
+  }
+
+  /// Persists where the user dragged the tile.
+  ///
+  /// Read at teardown, like the strip's position and for the same reason: a
+  /// mid-session experiment that ends in a crash does not become the next
+  /// recording's default (§33.5). Null in window mode, where the preview is not
+  /// the tile — there is nothing to remember from a drag that moved a captioned
+  /// object.
+  Future<void> _rememberCameraPipPosition() async {
+    try {
+      final Offset? position = await _recorder.cameraPreviewPosition().timeout(
+        platformCallTimeout,
+      );
+      if (position == null || position == settings.cameraPipPosition) {
+        return;
+      }
+      await _settings.update(settings.copyWith(cameraPipPosition: position));
+    } on Object catch (e) {
+      _logger.warn(
+        'camera_pip_position_not_read',
+        fields: <String, Object?>{'error': e.runtimeType.toString()},
+      );
+    }
+  }
+
   List<IncompleteRecordingArtifact> get pendingArtifacts => _recovery.pending;
   PermissionReport get permissionReport => _permissions.report;
   bool get isBusy => _busy;
@@ -221,6 +325,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       ),
     );
     _overlayCommands = _overlays.commands.listen(_onOverlayCommand);
+    _menuSelections = _overlays.menuSelections.listen(_onMenuSelection);
     _uploadEvents = _uploads.events.listen(_onUploadEvent);
 
     WidgetsBinding.instance.addObserver(this);
@@ -366,6 +471,9 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
     await _devices.load(targets);
     notifyListeners();
+    if (_openMenu != null && targets.contains(_openMenu)) {
+      await refreshInputMenu();
+    }
   }
 
   /// Chooses the device an input will open. Null means the system default.
@@ -420,6 +528,196 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> stopMetering(MediaDeviceKind kind) async {
     await _meter.stop(kind);
     _notifyIfAlive();
+  }
+
+  // ── the input menu on the strip (§33.4) ─────────────────────────────────
+
+  /// The kind whose menu is open, or null. One at a time, by construction.
+  MediaDeviceKind? get openMenuKind => _openMenu;
+
+  MediaDeviceKind? _openMenu;
+
+  /// Opens the device list for [kind] beside the chevron that asked for it.
+  ///
+  /// The placement is the host's: only it knows where the strip ended up and
+  /// where the chevron is inside it. What travels from here is the content.
+  Future<void> openInputMenu(MediaDeviceKind kind) async {
+    if (_openMenu == kind) {
+      // A second press on the same chevron closes it, which is what a menu
+      // does everywhere else.
+      await closeInputMenu();
+      return;
+    }
+    _openMenu = kind;
+    notifyListeners();
+    await _overlays.showInputMenu(kind, menuStateFor(kind));
+    // Enumerating can take a moment, and the menu is already on screen saying
+    // so; the refresh below replaces the loading row in place.
+    await loadInputDevices(kinds: <MediaDeviceKind>{kind});
+    if (_openMenu != kind) {
+      return;
+    }
+    await startMetering(kind);
+    await refreshInputMenu();
+  }
+
+  /// Re-renders an open menu. A device that appears or disappears must not
+  /// close it under the user's cursor (§33.7).
+  Future<void> refreshInputMenu() async {
+    final MediaDeviceKind? kind = _openMenu;
+    if (kind == null) {
+      return;
+    }
+    await _overlays.updateInputMenu(menuStateFor(kind));
+  }
+
+  /// Drops the application's belief in a menu the host has already closed.
+  ///
+  /// Everything [closeInputMenu] does except asking the host to close a window
+  /// that is not there.
+  Future<void> _forgetInputMenu(MediaDeviceKind kind) async {
+    if (_openMenu != kind) {
+      return;
+    }
+    _openMenu = null;
+    notifyListeners();
+    await stopMetering(kind);
+  }
+
+  Future<void> closeInputMenu() async {
+    final MediaDeviceKind? kind = _openMenu;
+    if (kind == null) {
+      return;
+    }
+    _openMenu = null;
+    notifyListeners();
+    // The meter the menu opened closes with it, unless a launch-screen section
+    // is still showing one — `stop` is reference-free here, so this is the one
+    // place the two could fight. They cannot: the strip's menu only exists
+    // while the main window is hidden.
+    await stopMetering(kind);
+    await _overlays.hideInputMenu();
+  }
+
+  /// What the menu window draws for [kind] (§33.4).
+  ///
+  /// Built here rather than in the menu's own engine for the reason every
+  /// overlay is: the window owns no state, so it cannot drift out of step with
+  /// the session that feeds it.
+  InputMenuOverlayState menuStateFor(MediaDeviceKind kind) {
+    final List<MediaDevice> devices = _devices.devicesFor(kind);
+    final MediaDevice? selection = _devices.selectionFor(kind);
+    final MediaDevice? fallback = _devices.effectiveDeviceFor(kind);
+    final bool choosable = canChooseDevice(kind);
+    final String? unresolved = _devices.unresolved[kind];
+
+    return InputMenuOverlayState(
+      kind: kind,
+      title: _menuTitle(kind),
+      loading: _devices.isLoading && devices.isEmpty,
+      emptyMessage: devices.isEmpty && !_devices.isLoading
+          ? _nothingFound(kind)
+          : null,
+      notice: unresolved == null
+          ? null
+          : '“$unresolved” was not found · using the default',
+      level: canMeter(kind) && isMeterRunningFor(kind) ? levelFor(kind) : null,
+      // The camera sheet's own control, where the microphone has its meter
+      // (§33.4). Without it a preset could only be chosen before recording
+      // started, which is the half of §33.5 that matters least: the shape is
+      // worth changing precisely when you can see it over what you are
+      // recording.
+      presets: kind == MediaDeviceKind.camera
+          ? CameraPipPreset.values
+          : const <CameraPipPreset>[],
+      selectedPreset: kind == MediaDeviceKind.camera ? cameraPreset : null,
+      // Offered only once there is something to undo. The tile starts in its
+      // corner, so before a drag this row would put it where it already is.
+      canResetPosition:
+          kind == MediaDeviceKind.camera && settings.cameraPipPosition != null,
+      // Window mode only: with a display source the tile is dragged, and the
+      // preview *is* the tile, so a corner list would be a second, worse answer
+      // to a question already answered better (design `1e` vs `1p`, §33.5).
+      corners: kind == MediaDeviceKind.camera && !_tileIsDraggable
+          ? CameraOverlayCorner.values
+          : const <CameraOverlayCorner>[],
+      selectedCorner: kind == MediaDeviceKind.camera
+          ? settings.cameraPipCorner
+          : null,
+      items: <InputMenuItem>[
+        if (choosable && devices.isNotEmpty)
+          InputMenuItem(
+            label: 'System default',
+            meta: fallback?.label,
+            selected: selection == null,
+          ),
+        for (final MediaDevice device in devices)
+          InputMenuItem(
+            id: device.id,
+            label: device.label,
+            meta: device.isAvailable ? null : 'in use',
+            selected: selection?.id == device.id,
+            enabled: device.isAvailable && choosable,
+          ),
+        InputMenuItem(
+          label: '${_menuTitle(kind)} off',
+          selected: false,
+          // The `Off` row is the strip's own toggle, reached from the menu so
+          // the two are never two different answers.
+          id: null,
+        ),
+      ],
+    );
+  }
+
+  /// Whether the tile can be dragged, which is the same question as whether the
+  /// preview stands for it (design `1p`).
+  ///
+  /// A window source composites the tile over a captured window while the
+  /// preview sits somewhere else on screen entirely, so nothing on screen is
+  /// the tile and there is nothing to drag.
+  bool get _tileIsDraggable => selectedSource?.type != CaptureSourceType.window;
+
+  static String _menuTitle(MediaDeviceKind kind) => switch (kind) {
+    MediaDeviceKind.camera => 'Camera',
+    MediaDeviceKind.microphone => 'Microphone',
+    MediaDeviceKind.systemAudio => 'System audio',
+  };
+
+  static String _nothingFound(MediaDeviceKind kind) => switch (kind) {
+    MediaDeviceKind.camera => 'No camera found',
+    MediaDeviceKind.microphone => 'No microphone found',
+    MediaDeviceKind.systemAudio => 'System mix',
+  };
+
+  /// Puts the strip back at its default dock (§33.3).
+  Future<void> resetStripPosition() async {
+    await _settings.update(settings.copyWith(stripPosition: null));
+    notifyListeners();
+    if (_state is SessionActive) {
+      await _overlays.showControlStrip();
+    }
+  }
+
+  /// One arrow-key step, in logical points (§33.3).
+  ///
+  /// Large enough that a press visibly moves the strip, small enough that
+  /// landing it on a particular spot does not take a minute of holding a key.
+  static const double stripNudgeStep = 8;
+
+  /// The same, held with Shift — a coarse step for crossing a display.
+  static const double stripCoarseNudgeStep = 32;
+
+  /// Moves the strip by one step, the keyboard's half of §33.3.
+  ///
+  /// The host clamps and snaps exactly as it does at the end of a drag, so the
+  /// two paths cannot put the strip in different places, and the arrow keys can
+  /// never walk it off a display.
+  Future<void> nudgeStrip(double dx, double dy) async {
+    if (_state is! SessionActive) {
+      return;
+    }
+    await _overlays.nudgeControlStrip(dx, dy);
   }
 
   /// Closes every meter. Called when the screen holding them goes away, so no
@@ -736,6 +1034,10 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
               systemAudioDeviceId: _devices.deviceIdFor(
                 MediaDeviceKind.systemAudio,
               ),
+              // The tile the user chose, so the compositor and the preview
+              // start from the same geometry rather than from the default
+              // (§33.5).
+              cameraOverlay: cameraOverlay,
             ),
           )
           .timeout(platformCallTimeout);
@@ -830,7 +1132,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     await _overlays.showCameraPreview(
       sourceType: source.type,
       display: display,
-      configuration: const CameraOverlayConfiguration(),
+      configuration: cameraOverlay,
     );
   }
 
@@ -1027,6 +1329,8 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     // to report. Failing to read one keeps whatever was stored: not being able
     // to ask is not the user having dragged it back (§33.3).
     await _rememberStripPosition();
+    await _rememberCameraPipPosition();
+    await closeInputMenu();
     for (final Future<void> Function() step in <Future<void> Function()>[
       _overlays.hideCameraPreview,
       _overlays.hideControlStrip,
@@ -1379,6 +1683,153 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         unawaited(pauseOrResume());
       case OverlayCommand.stop:
         unawaited(stop());
+      case OverlayCommand.openMicrophoneMenu:
+        unawaited(openInputMenu(MediaDeviceKind.microphone));
+      case OverlayCommand.openCameraMenu:
+        unawaited(openInputMenu(MediaDeviceKind.camera));
+      case OverlayCommand.openSystemAudioMenu:
+        unawaited(openInputMenu(MediaDeviceKind.systemAudio));
+      case OverlayCommand.resetStripPosition:
+        unawaited(resetStripPosition());
+      case OverlayCommand.nudgeStripLeft:
+        unawaited(nudgeStrip(-stripNudgeStep, 0));
+      case OverlayCommand.nudgeStripRight:
+        unawaited(nudgeStrip(stripNudgeStep, 0));
+      case OverlayCommand.nudgeStripUp:
+        unawaited(nudgeStrip(0, -stripNudgeStep));
+      case OverlayCommand.nudgeStripDown:
+        unawaited(nudgeStrip(0, stripNudgeStep));
+      case OverlayCommand.nudgeStripLeftFar:
+        unawaited(nudgeStrip(-stripCoarseNudgeStep, 0));
+      case OverlayCommand.nudgeStripRightFar:
+        unawaited(nudgeStrip(stripCoarseNudgeStep, 0));
+      case OverlayCommand.nudgeStripUpFar:
+        unawaited(nudgeStrip(0, -stripCoarseNudgeStep));
+      case OverlayCommand.nudgeStripDownFar:
+        unawaited(nudgeStrip(0, stripCoarseNudgeStep));
+    }
+  }
+
+  /// A row of the input menu was chosen (§33.4).
+  void _onMenuSelection(InputMenuSelection selection) {
+    unawaited(_applyMenuSelection(selection));
+  }
+
+  Future<void> _applyMenuSelection(InputMenuSelection selection) async {
+    final CameraPipPreset? preset = selection.preset;
+    if (preset != null) {
+      // Deliberately without closing the sheet: the tile changes shape on
+      // screen under it, and comparing the three should not cost a reopen each
+      // time (§33.5). The sheet is re-rendered so the new one reads selected.
+      await setCameraPreset(preset);
+      await refreshInputMenu();
+      return;
+    }
+    final CameraOverlayCorner? corner = selection.corner;
+    if (corner != null) {
+      await setCameraCorner(corner);
+      await refreshInputMenu();
+      return;
+    }
+    if (selection.resetPosition) {
+      await resetCameraPipPosition();
+      await refreshInputMenu();
+      return;
+    }
+    if (selection.dismissed) {
+      // The window is already gone — the host closed it. Nothing is applied;
+      // this only stops the application believing it is still there, which is
+      // what made the chevron need two presses to reopen it.
+      await _forgetInputMenu(selection.kind);
+      return;
+    }
+    // The menu closes on a choice, whatever the choice turns out to cost.
+    await closeInputMenu();
+    if (selection.off) {
+      await _setInputEnabled(selection.kind, false);
+      return;
+    }
+    final MediaDevice? device = selection.deviceId == null
+        ? null
+        : _devices
+              .devicesFor(selection.kind)
+              .where((MediaDevice d) => d.id == selection.deviceId)
+              .firstOrNull;
+    if (selection.deviceId != null && device == null) {
+      // Chosen and gone between the menu opening and the click landing. The
+      // list the user was reading is the stale thing, so re-read it rather than
+      // acting on a row that no longer names anything.
+      await loadInputDevices(kinds: <MediaDeviceKind>{selection.kind});
+      return;
+    }
+    await selectInputDevice(selection.kind, device);
+    // The choice is only half applied until the *running* capture is using it.
+    await _swapLiveDevice(selection.kind);
+  }
+
+  /// Points a live capture at the device the user just chose (§33.2).
+  ///
+  /// Guarded per control like every other strip command: a swap issued while
+  /// another is in flight is dropped rather than queued, because two of them
+  /// would both read the session state before either wrote it.
+  Future<void> _swapLiveDevice(MediaDeviceKind kind) async {
+    if (_state is! SessionActive) {
+      return;
+    }
+    final StripControl? control = _controlFor(kind);
+    if (control == null || !_inFlight.add(control)) {
+      return;
+    }
+    try {
+      await _recorder
+          .selectInputDevice(kind, deviceId: _devices.deviceIdFor(kind))
+          .timeout(platformCallTimeout);
+    } on Object catch (e) {
+      // Degrades, never stops: the previous device keeps running and the user
+      // is told through the ordinary non-fatal path (§33.2).
+      _logger.warn(
+        'live_device_swap_failed',
+        fields: <String, Object?>{
+          'kind': kind.name,
+          'error': e.runtimeType.toString(),
+        },
+      );
+    } finally {
+      _inFlight.remove(control);
+    }
+  }
+
+  static StripControl? _controlFor(MediaDeviceKind kind) => switch (kind) {
+    MediaDeviceKind.camera => StripControl.camera,
+    MediaDeviceKind.microphone => StripControl.microphone,
+    MediaDeviceKind.systemAudio => StripControl.systemAudio,
+  };
+
+  /// The menu's `Off` row is the strip's own toggle, reached from another
+  /// place. It goes through the same guarded command so the two can never be
+  /// two different answers — and it does nothing when the input is already in
+  /// the state asked for, because a toggle that fired anyway would turn it back
+  /// on.
+  Future<void> _setInputEnabled(MediaDeviceKind kind, bool enabled) async {
+    final SessionState current = _state;
+    if (current is! SessionActive) {
+      return;
+    }
+    final bool isOn = switch (kind) {
+      MediaDeviceKind.microphone => current.microphoneEnabled,
+      MediaDeviceKind.camera => current.cameraEnabled,
+      MediaDeviceKind.systemAudio => current.systemAudioEnabled,
+    };
+    if (isOn == enabled) {
+      return;
+    }
+    switch (kind) {
+      case MediaDeviceKind.microphone:
+        await toggleMicrophone();
+      case MediaDeviceKind.camera:
+        await toggleCamera();
+      case MediaDeviceKind.systemAudio:
+        await toggleSystemAudio();
     }
   }
 
@@ -1421,6 +1872,9 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         cameraAvailable: current.cameraAvailable,
         systemAudioAvailable: current.systemAudioAvailable,
         isStopping: current.isStopping,
+        microphoneHasMenu: canChooseDevice(MediaDeviceKind.microphone),
+        cameraHasMenu: canChooseDevice(MediaDeviceKind.camera),
+        systemAudioHasMenu: canChooseDevice(MediaDeviceKind.systemAudio),
       ),
     );
   }
@@ -1471,6 +1925,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_recorderEvents?.cancel());
     unawaited(_overlayCommands?.cancel());
+    unawaited(_menuSelections?.cancel());
     unawaited(_uploadEvents?.cancel());
     // A metering tap outlives this object too, and it holds a real device.
     unawaited(_meter.stopAll());

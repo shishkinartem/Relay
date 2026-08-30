@@ -95,6 +95,41 @@ const flutter::EncodableMap* MapAt(const flutter::EncodableMap& map, const char*
   return value == nullptr ? nullptr : std::get_if<flutter::EncodableMap>(value);
 }
 
+// The cameraOverlay map (spec 33.5), read the same way wherever it arrives: on
+// `prepare` for the session that is about to start, and on `setCameraOverlay`
+// for the one that is already running.
+//
+// `positionX` and `positionY` are always present and either both null — the
+// tile is on its corner — or both numbers. Half a position is no position: a
+// tile placed on one axis and cornered on the other is a shape nobody asked
+// for, and Dart drops the same shape on the way in.
+CameraOverlayConfig CameraOverlayFromMap(const flutter::EncodableMap& map) {
+  CameraOverlayConfig camera;
+  camera.preset = CameraPipPresetFromName(StringAt(map, "preset"));
+  camera.width_ratio = DoubleAt(map, "widthRatio", kCameraPresetWidthCap);
+  camera.aspect_ratio = DoubleAt(map, "aspectRatio", 16.0 / 9.0);
+  camera.follows_source_aspect_ratio =
+      BoolAt(map, "followsSourceAspectRatio", true);
+  camera.corner_radius_ratio = DoubleAt(map, "cornerRadiusRatio", 0.0);
+  camera.margin_ratio = DoubleAt(map, "marginRatio", 0.01);
+  camera.corner = PipCornerFromName(StringAt(map, "corner"));
+  camera.fit = CameraPipFitFromName(StringAt(map, "fit"));
+  const flutter::EncodableValue* x = Find(map, "positionX");
+  const flutter::EncodableValue* y = Find(map, "positionY");
+  // A null crosses the channel as std::monostate, which is how a key that is
+  // always present says it holds nothing.
+  const bool has_x = x != nullptr && std::get_if<std::monostate>(x) == nullptr;
+  const bool has_y = y != nullptr && std::get_if<std::monostate>(y) == nullptr;
+  camera.has_position = has_x && has_y;
+  if (camera.has_position) {
+    camera.position_x = DoubleAt(map, "positionX", 0);
+    camera.position_y = DoubleAt(map, "positionY", 0);
+  }
+  camera.mirror_preview = BoolAt(map, "mirrorPreview", true);
+  camera.mirror_output = BoolAt(map, "mirrorOutput", false);
+  return camera;
+}
+
 // Device presence, not consent: the capabilities map says what this machine
 // can do and the permission report says whether the user allowed it. Both
 // probes only enumerate — they never open a device — so neither raises a
@@ -287,15 +322,7 @@ RecordingConfig ConfigFromMap(const flutter::EncodableMap& map) {
   config.system_audio_device_id = StringAt(map, "systemAudioDeviceId");
 
   if (const flutter::EncodableMap* camera = MapAt(map, "cameraOverlay")) {
-    config.camera.width_ratio = DoubleAt(*camera, "widthRatio", 0.16);
-    config.camera.aspect_ratio = DoubleAt(*camera, "aspectRatio", 16.0 / 9.0);
-    config.camera.follows_source_aspect_ratio =
-        BoolAt(*camera, "followsSourceAspectRatio", true);
-    config.camera.corner_radius = DoubleAt(*camera, "cornerRadius", 0.0);
-    config.camera.margin_ratio = DoubleAt(*camera, "marginRatio", 0.01);
-    config.camera.corner = PipCornerFromName(StringAt(*camera, "corner"));
-    config.camera.mirror_preview = BoolAt(*camera, "mirrorPreview", true);
-    config.camera.mirror_output = BoolAt(*camera, "mirrorOutput", false);
+    config.camera = CameraOverlayFromMap(*camera);
   }
   if (const flutter::EncodableMap* composition = MapAt(map, "composition")) {
     config.composition.aspect_policy =
@@ -437,8 +464,44 @@ RecorderWindowsPlugin::RecorderWindowsPlugin(flutter::PluginRegistrarWindows* re
           }));
 
   overlays_.SetMainWindow(MainWindow());
+  // The anchor an overlay command carries is the overlay layer's own business —
+  // it decides where the menu opens — so nothing but the bare name crosses the
+  // event channel (spec 33.4).
   overlays_.SetCommandHandler(
-      [this](const std::string& command) { EmitOverlayCommand(command); });
+      [this](const std::string& command, std::optional<double>) {
+        EmitOverlayCommand(command);
+      });
+  overlays_.SetMenuSelectionHandler(
+      [this](const flutter::EncodableMap& choice) { EmitMenuChoice(choice); });
+  overlays_.SetMenuDismissHandler([this](bool host_initiated) {
+    // A menu the host closed behind the application's back has to be reported:
+    // the application is what draws the chevron, and a window it still believes
+    // is open makes the next press on that chevron the toggle that closes it
+    // (spec 33.4). A close the application asked for, or one that follows a
+    // choice already on its way to it, tells it nothing it does not know.
+    //
+    // Taken rather than read, so a display change every overlay window sees is
+    // still one dismissal.
+    const std::optional<MediaDeviceKind> kind =
+        std::exchange(open_menu_kind_, std::nullopt);
+    if (host_initiated && kind.has_value()) {
+      EmitMenuDismissal(*kind);
+    }
+    // Deferred to a later turn of the platform thread's loop, always: the
+    // request comes from inside the menu engine's own channel callback, or from
+    // a window procedure, and closing the window there would free the stack
+    // that is running (overlay_windows.h).
+    RunOnPlatformThread([this]() { overlays_.HideInputMenu(); });
+  });
+  overlays_.SetCameraMovedHandler([this](double x, double y) {
+    CameraOverlayConfig moved = last_config_.camera;
+    moved.has_position = true;
+    moved.position_x = x;
+    moved.position_y = y;
+    // The window is already where the drag left it, and it was put there by the
+    // same arithmetic; re-placing it would be a second move for nothing.
+    ApplyCameraOverlay(moved, /*from_preview=*/true);
+  });
 
   // Configured once, before anything can start metering. The meter is not
   // running yet: nothing streams until Dart asks for a level (spec 33.2).
@@ -466,27 +529,133 @@ RecorderWindowsPlugin::~RecorderWindowsPlugin() {
   dispatcher_.Shutdown();
 }
 
+HMONITOR RecorderWindowsPlugin::RecordedDisplay() const {
+  if (last_config_.source_type != CaptureSourceType::kDisplay) {
+    return nullptr;
+  }
+  // The same reader getAvailableSources' ids go through, which answers null for
+  // a handle that no longer names a live monitor.
+  return ParseMonitorSourceId(last_config_.source_id);
+}
+
 void RecorderWindowsPlugin::AlignPreviewToCamera(OverlayPlacement* placement) const {
   if (placement == nullptr || !placement->absolute) {
     return;
   }
   // Only the display-mode preview is the picture-in-picture; the window-mode
-  // preview is a separate captioned object and keeps its own box.
-  if (last_config_.source_type != CaptureSourceType::kDisplay ||
-      !last_config_.camera.follows_source_aspect_ratio || !session_) {
+  // preview is a separate captioned object and keeps its own box (design 1e).
+  if (last_config_.source_type != CaptureSourceType::kDisplay || !session_) {
     return;
   }
-  const double aspect = session_->camera_aspect_ratio();
-  if (aspect <= 0 || placement->width <= 0 || placement->height <= 0) {
+  const uint32_t canvas_width = session_->canvas_width();
+  const uint32_t canvas_height = session_->canvas_height();
+  const PipDraw tile = session_->camera_pip_draw();
+  if (canvas_width == 0 || canvas_height == 0 || tile.dest.width <= 0 ||
+      tile.dest.height <= 0) {
     return;
   }
-  const double corrected = placement->width / aspect;
-  const bool pins_top = last_config_.camera.corner == PipCorner::kTopLeft ||
-                        last_config_.camera.corner == PipCorner::kTopRight;
-  if (!pins_top) {
-    placement->y += placement->height - corrected;
+  // The display being *recorded*, which is the one the canvas covers — not
+  // whichever display the main window happens to sit on. On a desktop whose
+  // monitors have different resolutions the two disagree, and measuring the
+  // tile against the wrong one placed and sized the preview at the wrong
+  // scale. UpdatePreviewGeometry resolves the same display, from the same call,
+  // and bails out the same way when it cannot be named: without a rectangle to
+  // measure against the preview is not the tile, so it stays where it is.
+  const HMONITOR monitor = RecordedDisplay();
+  if (monitor == nullptr) {
+    return;
   }
-  placement->height = corrected;
+  const DisplayInfo display = CaptureSourceEnumerator::DescribeMonitor(monitor);
+  if (display.logical_width <= 0 || display.logical_height <= 0) {
+    return;
+  }
+  // The tile, in canvas pixels, expressed in the logical points an absolute
+  // placement is resolved in. Not the aspect ratio alone: the width is capped
+  // by the camera's own pixels and the height by the crop, and taking the
+  // rectangle whole is what makes the window and the file the same object
+  // (design 1p, spec 33.5).
+  const double to_points_x = display.logical_width / static_cast<double>(canvas_width);
+  const double to_points_y =
+      display.logical_height / static_cast<double>(canvas_height);
+  placement->x = tile.dest.x * to_points_x;
+  placement->y = tile.dest.y * to_points_y;
+  placement->width = tile.dest.width * to_points_x;
+  placement->height = tile.dest.height * to_points_y;
+}
+
+void RecorderWindowsPlugin::UpdatePreviewGeometry() {
+  CameraPreviewGeometry geometry;
+  geometry.camera = last_config_.camera;
+  geometry.is_tile = last_config_.source_type == CaptureSourceType::kDisplay;
+  if (session_) {
+    geometry.canvas_width = session_->canvas_width();
+    geometry.canvas_height = session_->canvas_height();
+    geometry.frame_width = session_->camera_frame_width();
+    geometry.frame_height = session_->camera_frame_height();
+  }
+  // Where that canvas lands on screen: the display being recorded, not whichever
+  // display the window has been dragged towards. A drag measured against any
+  // other rectangle would let the tile leave the recording.
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  const HMONITOR monitor = RecordedDisplay();
+  if (monitor != nullptr && ::GetMonitorInfoW(monitor, &info) != FALSE) {
+    geometry.canvas_bounds = info.rcMonitor;
+  } else {
+    // The recorded display cannot be named any more. Without a rectangle to
+    // measure against, the preview is not the tile: it stays where it is and
+    // reports no position, which is the null cameraPreviewPosition answers with.
+    geometry.is_tile = false;
+  }
+  if (geometry.canvas_width <= 0 || geometry.canvas_height <= 0) {
+    geometry.is_tile = false;
+  }
+  // Kept as well as pushed: the state the preview is told to draw has to be
+  // resolved from the same `is_tile` its frames are cropped by, or the shape
+  // reported and the picture pushed disagree.
+  preview_geometry_ = geometry;
+  overlays_.SetCameraPreviewGeometry(geometry);
+}
+
+CameraPreviewDraw RecorderWindowsPlugin::PreviewDraw() const {
+  return ResolveCameraPreviewDraw(
+      preview_geometry_.camera, preview_geometry_.is_tile,
+      session_ ? session_->camera_pip_draw() : PipDraw(),
+      preview_geometry_.frame_width, preview_geometry_.frame_height);
+}
+
+void RecorderWindowsPlugin::RefreshCameraPreview(bool reposition) {
+  UpdatePreviewGeometry();
+  if (reposition) {
+    // A preset, a swapped camera or a camera that has just reported its real
+    // frame size all change the tile's size, so the window that stands for it
+    // has to follow — re-clamped around where it already was (spec 33.7,
+    // "Preset changed mid-drag"). Only a preview that is already on screen:
+    // MoveCameraPreview answers false when there is none, and nothing here may
+    // open one.
+    OverlayPlacement placement;
+    placement.absolute = true;
+    AlignPreviewToCamera(&placement);
+    if (placement.width > 0 && placement.height > 0) {
+      overlays_.MoveCameraPreview(placement);
+    }
+  }
+  overlays_.UpdateCameraPreview(
+      last_config_.camera.mirror_preview,
+      last_config_.source_type == CaptureSourceType::kDisplay, PreviewDraw());
+}
+
+void RecorderWindowsPlugin::ApplyCameraOverlay(const CameraOverlayConfig& camera,
+                                               bool from_preview) {
+  last_config_.camera = camera;
+  if (session_) {
+    // Between frames, for the next frame. The canvas is untouched, so the file
+    // keeps one continuous video track (spec 11, 33.5).
+    session_->SetCameraOverlay(camera);
+  }
+  // The window is already where a drag left it, and it was put there by the
+  // same arithmetic; re-placing it would be a second move for nothing.
+  RefreshCameraPreview(/*reposition=*/!from_preview);
 }
 
 HWND RecorderWindowsPlugin::MainWindow() const {
@@ -529,6 +698,46 @@ void RecorderWindowsPlugin::EmitOverlayCommand(const std::string& command) {
     std::lock_guard<std::mutex> lock(sink_mutex_);
     if (overlay_sink_) {
       overlay_sink_->Success(flutter::EncodableValue(command));
+    }
+  });
+}
+
+void RecorderWindowsPlugin::EmitMenuChoice(flutter::EncodableMap choice) {
+  // Forwarded as the menu engine sent it. A device row carries `deviceId` and
+  // `off`, a shape preset carries `preset`, a placement row carries `corner`
+  // and `Reset position` carries `resetPosition` — and which of them this is
+  // belongs to the application (spec 33.5). Unpacking them here would mean
+  // teaching the host a field every time the camera sheet grows one; Dart
+  // defaults every key it does not find.
+  //
+  // The one field the host owns is `dismissed`: a choice is never one, and
+  // stating it keeps the two shapes this channel emits identical in outline.
+  choice[flutter::EncodableValue("dismissed")] = flutter::EncodableValue(false);
+  EmitOverlayChoiceMap(std::move(choice));
+}
+
+void RecorderWindowsPlugin::EmitMenuDismissal(MediaDeviceKind kind) {
+  flutter::EncodableMap dismissal;
+  dismissal[flutter::EncodableValue("kind")] =
+      flutter::EncodableValue(std::string(MediaDeviceKindName(kind)));
+  // No device, because nothing was chosen: this applies nothing and exists only
+  // so the application stops believing the window is still open (spec 33.4).
+  // Present and null rather than missing, on the same terms as a choice's:
+  // Dart reads one shape.
+  dismissal[flutter::EncodableValue("deviceId")] = flutter::EncodableValue();
+  dismissal[flutter::EncodableValue("off")] = flutter::EncodableValue(false);
+  dismissal[flutter::EncodableValue("dismissed")] = flutter::EncodableValue(true);
+  EmitOverlayChoiceMap(std::move(dismissal));
+}
+
+void RecorderWindowsPlugin::EmitOverlayChoiceMap(flutter::EncodableMap map) {
+  RunOnPlatformThread([this, map = std::move(map)]() {
+    std::lock_guard<std::mutex> lock(sink_mutex_);
+    if (overlay_sink_) {
+      // A map beside the bare command names this channel already emits. Dart
+      // decodes by shape, so a command must never become a map and a choice
+      // must never become a string.
+      overlay_sink_->Success(flutter::EncodableValue(map));
     }
   });
 }
@@ -625,7 +834,26 @@ void RecorderWindowsPlugin::WireSessionEvents() {
     // Raw frames never cross a channel: the preview reaches Dart as a texture
     // registered on the preview engine (media-pipeline "Principle").
     overlays_.PushCameraPreviewFrame(pixels, width, height, stride);
+    // The tile takes the camera's own shape, and that shape is not known when
+    // the preview is placed: the device may not have opened yet, so the window
+    // was sized from the configured fallback — 16:9 for a camera that turns out
+    // to be 4:3 or square. In display mode the preview *is* the
+    // picture-in-picture (design 1p), so a window that keeps the fallback shape
+    // is a window that disagrees with the file.
+    //
+    // Once per resolution, never per frame: a camera that opened, a camera
+    // swapped for another, or a reader that renegotiated its format mid-stream
+    // are the three ways this value changes, and everything below draws or
+    // moves a window and belongs on the platform thread.
+    const uint64_t size = (static_cast<uint64_t>(width) << 32) | height;
+    if (preview_frame_size_.exchange(size) == size) {
+      return;
+    }
+    RunOnPlatformThread([this]() { RefreshCameraPreview(/*reposition=*/true); });
   };
+  // A new session is a new camera and a new canvas, so the size the last one
+  // settled on says nothing about this one.
+  preview_frame_size_.store(0);
   session_ = std::make_shared<RecordingSession>(std::move(events));
 }
 
@@ -832,6 +1060,93 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
     return;
   }
 
+  if (method == "selectInputDevice") {
+    MediaDeviceKind kind = MediaDeviceKind::kMicrophone;
+    if (arguments == nullptr ||
+        !MediaDeviceKindFromName(StringAt(*arguments, "kind"), &kind)) {
+      reject(RecorderErrorCode::kUnknown, "An input device kind is required.");
+      return;
+    }
+    if (!session_) {
+      // Outside a session this is a no-op, not an error: what the next
+      // recording opens is the configuration's business (spec 33.2).
+      shared->Success();
+      return;
+    }
+    // Absent or null is the platform default, the same meaning a null id has on
+    // the recording configuration.
+    const std::string device_id = StringAt(*arguments, "deviceId");
+    // Dropped, not queued (spec 6, 33.7): the worker is serial, so a second
+    // swap posted while the first is still opening a device would run after it
+    // rather than be discarded. The gate is here, where the request arrives.
+    if (swapping_device_.exchange(true)) {
+      busy();
+      return;
+    }
+    const std::shared_ptr<RecordingSession> session = session_;
+    if (!worker_.Post([this, shared, session, kind, device_id]() {
+          RecorderError error;
+          const bool ok = session->SelectInputDevice(kind, device_id, &error);
+          swapping_device_.store(false);
+          if (ok) {
+            if (kind == MediaDeviceKind::kCamera) {
+              // A camera of another shape gives the tile another shape, and in
+              // display mode the preview *is* the tile (design 1p). Only on
+              // success — a device that would not open leaves the previous one
+              // running, and the tile with it — and only for the camera, which
+              // is the one device that has a shape at all.
+              //
+              // The new camera's frame size is not known yet: Start() returns
+              // as soon as the capture thread exists. This re-places the window
+              // from what is known now, and the first frame at a new resolution
+              // re-places it again (on_camera_preview) — the two compose rather
+              // than each half-fixing it.
+              RunOnPlatformThread(
+                  [this]() { RefreshCameraPreview(/*reposition=*/true); });
+            }
+            ReplySuccess(shared, flutter::EncodableValue());
+            return;
+          }
+          // A device that will not open leaves the previous one running, so the
+          // recording is untouched and the report is non-fatal by construction.
+          ReplyError(shared, error);
+        })) {
+      swapping_device_.store(false);
+      busy();
+    }
+    return;
+  }
+
+  if (method == "setCameraOverlay") {
+    if (arguments == nullptr) {
+      reject(RecorderErrorCode::kUnknown, "A camera overlay configuration is required.");
+      return;
+    }
+    // A no-op outside a session for the compositor, but the configuration is
+    // still recorded: the preview may be on screen before the first frame is,
+    // and it is placed from exactly this.
+    ApplyCameraOverlay(CameraOverlayFromMap(*arguments), /*from_preview=*/false);
+    shared->Success();
+    return;
+  }
+
+  if (method == "cameraPreviewPosition") {
+    double x = 0;
+    double y = 0;
+    if (!overlays_.CameraPreviewPosition(&x, &y)) {
+      // Null: there is no preview, or it is not the tile. In window mode the
+      // preview is a separate captioned object, so dragging it moves the
+      // preview and nothing else (design 1e, spec 33.5).
+      shared->Success();
+      return;
+    }
+    flutter::EncodableMap position;
+    position[flutter::EncodableValue("x")] = flutter::EncodableValue(x);
+    position[flutter::EncodableValue("y")] = flutter::EncodableValue(y);
+    shared->Success(flutter::EncodableValue(std::move(position)));
+    return;
+  }
+
   if (method == "checkPermissions") {
     if (!worker_.Post([this, shared]() {
           flutter::EncodableMap report;
@@ -1029,10 +1344,11 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
     } else {
       ok = session_->SetCameraEnabled(enabled, &error);
       if (ok) {
-        overlays_.UpdateCameraPreview(last_config_.camera.mirror_preview,
-                                      last_config_.source_type ==
-                                          CaptureSourceType::kDisplay,
-                                      session_->camera_aspect_ratio());
+        // A different camera is a differently shaped tile, and the preview is
+        // that tile: its geometry, its crop and its mask all move with it
+        // (design 1p). The camera it turns on has not reported a frame size
+        // yet; the first frame at a new resolution re-places the window again.
+        RefreshCameraPreview(/*reposition=*/true);
       }
     }
     if (!ok) {
@@ -1080,6 +1396,9 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
     // posting `devicesChanged` at a Dart side that is going away.
     meter_.StopAll();
     device_watcher_.Stop();
+    // Nothing is left to hear a dismissal, and DisposeAll below takes the menu
+    // down with everything else.
+    open_menu_kind_.reset();
     const std::shared_ptr<RecordingSession> session = std::move(session_);
     // The overlays are platform-thread objects (HWNDs), so they come down here
     // rather than on the worker — and immediately, so the control strip does
@@ -1131,6 +1450,16 @@ void RecorderWindowsPlugin::HandleOverlayMethod(
     }
     OverlayPlacement placement = OverlayPlacement::FromMap(*arguments);
     if (method == "showCameraPreview") {
+      // The configuration Dart resolved its guess from, adopted before the
+      // frame is resolved: the preview is the tile, and the tile is described by
+      // exactly this (spec 33.5).
+      if (const flutter::EncodableMap* camera = MapAt(*arguments, "cameraOverlay")) {
+        last_config_.camera = CameraOverlayFromMap(*camera);
+        if (session_) {
+          session_->SetCameraOverlay(last_config_.camera);
+        }
+      }
+      UpdatePreviewGeometry();
       AlignPreviewToCamera(&placement);
     }
     std::string error;
@@ -1151,9 +1480,64 @@ void RecorderWindowsPlugin::HandleOverlayMethod(
       // placement: both modes send an absolute frame (spec 6).
       overlays_.UpdateCameraPreview(
           last_config_.camera.mirror_preview,
-          BoolAt(*arguments, "matchesCompositedPip", false),
-          session_ ? session_->camera_aspect_ratio() : 16.0 / 9.0);
+          BoolAt(*arguments, "matchesCompositedPip", false), PreviewDraw());
     }
+    result->Success();
+    return;
+  }
+  if (method == "showInputMenu" || method == "updateInputMenu") {
+    if (arguments == nullptr) {
+      fail("An input menu state is required.");
+      return;
+    }
+    if (method == "updateInputMenu") {
+      // The whole argument map is the state here; on `showInputMenu` it sits
+      // under `state`, beside the placement.
+      overlays_.UpdateInputMenu(*arguments);
+      result->Success();
+      return;
+    }
+    const flutter::EncodableMap* state = MapAt(*arguments, "state");
+    std::string error;
+    if (!overlays_.ShowInputMenu(OverlayPlacement::FromMap(*arguments),
+                                 state == nullptr ? flutter::EncodableMap() : *state,
+                                 &error)) {
+      fail(error);
+      return;
+    }
+    // The third overlay reaches the exclusion set the moment it exists, even
+    // mid-session. A menu in the recording is the one unacceptable outcome
+    // (spec 6, 33.4).
+    if (session_) {
+      session_->SetExcludedWindows(overlays_.ExcludedWindows());
+    }
+    // Which input this sheet belongs to, so a dismissal the host raises can
+    // name it. A kind this build cannot read leaves it unset rather than
+    // guessing: Dart drops a selection whose kind does not decode, so a
+    // dismissal filed under the wrong input would be worse than none.
+    MediaDeviceKind kind = MediaDeviceKind::kMicrophone;
+    open_menu_kind_.reset();
+    if (state != nullptr && MediaDeviceKindFromName(StringAt(*state, "kind"), &kind)) {
+      open_menu_kind_ = kind;
+    }
+    result->Success();
+    return;
+  }
+  if (method == "hideInputMenu") {
+    // The application asked for this one, so there is nothing to report back to
+    // it (spec 33.4).
+    open_menu_kind_.reset();
+    overlays_.HideInputMenu();
+    result->Success();
+    return;
+  }
+  if (method == "nudgeControlStrip") {
+    if (arguments == nullptr) {
+      fail("A displacement is required.");
+      return;
+    }
+    overlays_.NudgeControlStrip(DoubleAt(*arguments, "dx", 0),
+                                DoubleAt(*arguments, "dy", 0));
     result->Success();
     return;
   }
@@ -1176,6 +1560,9 @@ void RecorderWindowsPlugin::HandleOverlayMethod(
     return;
   }
   if (method == "hideControlStrip") {
+    // The menu hangs off the strip and comes down with it, and the application
+    // asked for that too, so no dismissal is reported (spec 33.4).
+    open_menu_kind_.reset();
     overlays_.HideControlStrip();
     result->Success();
     return;

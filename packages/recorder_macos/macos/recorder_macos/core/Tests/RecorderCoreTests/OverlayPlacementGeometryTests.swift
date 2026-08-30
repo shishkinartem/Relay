@@ -408,4 +408,135 @@ final class OverlayPlacementGeometryTests: XCTestCase {
     XCTAssertEqual(ratio?.x ?? -1, (dropped.minX - second.minX) / second.width,
       accuracy: 0.0001)
   }
+
+  // MARK: - the keyboard nudge (§33.3)
+
+  func testANudgeMovesTheStripByTheGivenPoints() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 400, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.nudged(
+      strip, dx: 8, dy: 8, inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.minX, 508, accuracy: 0.001)
+    // The contract's deltas are top-left and AppKit is bottom-left, so a
+    // positive `dy` moves the strip *down* the screen.
+    XCTAssertEqual(frame.minY, 392, accuracy: 0.001)
+  }
+
+  func testANudgeLandsWhereADragWould() {
+    // The keyboard path must reach the spots a drag reaches and no others, so
+    // it settles through the same snap and the same clamp.
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 10, y: 400, width: 372, height: 50)
+
+    let nudged = OverlayPlacementGeometry.nudged(
+      strip, dx: -4, dy: 0, inVisibleFrame: visible)
+
+    XCTAssertEqual(nudged.minX, visible.minX, accuracy: 0.001, "snapped to the edge")
+  }
+
+  func testANudgePastTheUsableAreaIsClamped() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 1000, y: 400, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.nudged(
+      strip, dx: 400, dy: 0, inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.maxX, visible.maxX, accuracy: 0.001)
+  }
+
+  func testANonFiniteNudgeMovesNothing() {
+    // A NaN origin makes AppKit place a panel nowhere, and the strip is the
+    // only way to stop the recording.
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 400, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.nudged(
+      strip, dx: .nan, dy: 0, inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.minX, 500, accuracy: 0.001)
+  }
+
+  // MARK: - the input menu (§33.4)
+
+  private let menu = CGSize(width: 268, height: 200)
+
+  func testTheMenuOpensBelowTheStripWhenThereIsRoom() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      size: menu, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    // Below on screen is a smaller y: AppKit's origin is bottom-left.
+    XCTAssertEqual(frame.maxY, strip.minY - 7, accuracy: 0.001)
+  }
+
+  func testTheMenuFlipsAboveTheStripWhenItWouldNotFitBelow() {
+    // §33.7: the sheet would extend past the usable area, so it goes to the
+    // other side of the strip.
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 100, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      size: menu, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.minY, strip.maxY + 7, accuracy: 0.001)
+  }
+
+  func testTheMenuIsCentredOnTheControlThatAskedForIt() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      size: menu, anchorX: 760, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.midX, 760, accuracy: 0.001)
+  }
+
+  func testTheMenuCentresOnTheStripWhenNoControlIsNamed() {
+    // A command that names no control — the strip's own menu, or a build whose
+    // strip does not send an anchor — still has to place the window somewhere
+    // deliberate.
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      size: menu, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.midX, strip.midX, accuracy: 0.001)
+  }
+
+  func testTheMenuIsClampedToTheUsableArea() {
+    // A chevron near the trailing edge of a strip that is itself near the edge
+    // of the display: the menu is wider than the room left beside it.
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 1040, y: 800, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      size: menu, anchorX: 1400, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    XCTAssertLessThanOrEqual(frame.maxX, visible.maxX + 0.001)
+    XCTAssertGreaterThanOrEqual(frame.minX, visible.minX - 0.001)
+  }
+
+  func testAMenuTallerThanEitherSideStillLandsOnTheDisplay() {
+    // Neither side fits. It flips, and the clamp then pins it: a sheet half off
+    // the display is a list the user cannot reach the bottom of.
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 300)
+    let strip = CGRect(x: 500, y: 140, width: 372, height: 50)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      size: menu, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    XCTAssertGreaterThanOrEqual(frame.minY, visible.minY - 0.001)
+    XCTAssertLessThanOrEqual(frame.maxY, visible.maxY + 0.001)
+  }
 }

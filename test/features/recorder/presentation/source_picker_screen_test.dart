@@ -141,4 +141,118 @@ void main() {
     );
     expect(button.onPressed, isNull, reason: 'nothing to continue with');
   });
+
+  group('the grid answers to its width (§33.6)', () {
+    /// Eight windows, so a row is full at every breakpoint and the column
+    /// count is readable from where the cards land rather than inferred.
+    FakeRecorder crowded() => FakeRecorder(
+      sources: <CaptureSource>[
+        const CaptureSource(
+          id: 'display:1',
+          type: CaptureSourceType.display,
+          title: 'Built-in Display',
+          subtitle: '2560 × 1600',
+          pixelWidth: 2560,
+          pixelHeight: 1600,
+          isCurrentDisplay: true,
+        ),
+        for (int i = 0; i < 8; i++)
+          CaptureSource(
+            id: 'window:$i',
+            type: CaptureSourceType.window,
+            title: 'Window $i',
+            subtitle: 'app $i',
+            pixelWidth: 1280,
+            pixelHeight: 800,
+          ),
+      ],
+    );
+
+    /// The panel's own padding, which is why a window flips a column later
+    /// than §33.6's number: the grid is given the width inside it.
+    const double chrome = AppSpacing.panelPadding * 2;
+
+    /// How many cards share the topmost row of the window grid.
+    int columnsAt(WidgetTester tester) {
+      final List<double> tops = <double>[
+        for (int i = 0; i < 8; i++)
+          tester.getTopLeft(find.text('Window $i')).dy,
+      ];
+      final double first = tops.reduce((double a, double b) => a < b ? a : b);
+      return tops.where((double t) => (t - first).abs() < 1).length;
+    }
+
+    Future<void> mountAt(WidgetTester tester, double width) async {
+      await loadDesignFonts();
+      await tester.binding.setSurfaceSize(Size(width, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final TestHarness harness = await TestHarness.create(recorder: crowded());
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await tester.pumpWidget(harness.wrap(const SourcePickerScreen()));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('each breakpoint flips exactly where it says it does', (
+      WidgetTester tester,
+    ) async {
+      // One pixel either side of each threshold, which is the only place a
+      // breakpoint can be wrong without being obviously wrong.
+      for (final (double content, int columns) in <(double, int)>[
+        (AppSpacing.wide - 1, 2),
+        (AppSpacing.wide, 3),
+        (AppSpacing.wider - 1, 3),
+        (AppSpacing.wider, 4),
+        (AppSpacing.panelMaxWidth - chrome, 4),
+      ]) {
+        await mountAt(tester, content + chrome);
+        expect(
+          columnsAt(tester),
+          columns,
+          reason: '$content pt of content should be $columns columns',
+        );
+      }
+    });
+
+    testWidgets('the panel at its minimum is the reference layout', (
+      WidgetTester tester,
+    ) async {
+      // Below the first breakpoint the screen is the design exactly as drawn,
+      // and this is the width the panel opens at.
+      await mountAt(tester, AppSpacing.panelWidth);
+
+      expect(columnsAt(tester), 2);
+    });
+
+    testWidgets('no width scrolls the panel sideways', (
+      WidgetTester tester,
+    ) async {
+      // §33.6 forbids it outright. An overflow throws in a test, so the
+      // assertion is that nothing was thrown at any of the four widths.
+      for (final double width in <double>[
+        AppSpacing.panelWidth,
+        AppSpacing.wide + chrome,
+        AppSpacing.wider + chrome,
+        AppSpacing.panelMaxWidth,
+      ]) {
+        await mountAt(tester, width);
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'an overflow at $width would have thrown',
+        );
+      }
+    });
+
+    test('the breakpoints themselves', () {
+      // The one place the widths turn into a number, so a second grid cannot
+      // disagree with the first.
+      expect(AppSpacing.gridColumns(AppSpacing.wide - 1), 2);
+      expect(AppSpacing.gridColumns(AppSpacing.wide), 3);
+      expect(AppSpacing.gridColumns(AppSpacing.wider - 1), 3);
+      expect(AppSpacing.gridColumns(AppSpacing.wider), 4);
+      expect(AppSpacing.gridColumns(4000), 4);
+      expect(AppSpacing.gridColumns(0), 2);
+    });
+  });
 }

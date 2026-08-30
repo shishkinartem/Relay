@@ -51,6 +51,25 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   private let inputs = InputFlags(
     microphone: true, camera: false, systemAudio: true)
 
+  /// The device each input is using *now*, and the swaps in flight.
+  ///
+  /// `deviceLock` guards all three. The ids start as the configuration's choice
+  /// and change when the user picks another device mid-session (§33.2): they
+  /// are written from the `Task` a swap runs on and read by every path that
+  /// opens a device — `prepare`, the microphone toggle, the camera toggle — so
+  /// a toggle after a swap re-opens the device the user chose rather than the
+  /// one they started with.
+  ///
+  /// The in-flight set is what makes a swap issued while another swap of that
+  /// kind is running *dropped* rather than queued: §6's one-command-at-a-time
+  /// rule, applied to an operation that takes seconds on a Bluetooth or
+  /// Continuity input. Per kind rather than one flag for all of them, because a
+  /// camera opening is not a reason to lose a microphone the user just chose.
+  private let deviceLock = NSLock()
+  private var cameraDeviceId: String?
+  private var microphoneDeviceId: String?
+  private var swapsInFlight: Set<MediaDeviceKind> = []
+
   /// Touched only on `processingQueue`.
   private var lastVideoPTS: CMTime = .invalid
   private var capturedFrames = 0
@@ -65,6 +84,15 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
   /// Live camera frames for the preview texture.
   var cameraFrameProvider: CameraCapture { camera }
+
+  /// The encoded canvas, in pixels.
+  ///
+  /// Written once by `prepare` and read afterwards by the plugin, which
+  /// resolves the picture-in-picture against it: the `camera` preset's width
+  /// cap compares the sensor's pixels with the canvas' pixels, and the preview
+  /// window's display is measured in points and would answer a different
+  /// question (§33.5).
+  var outputCanvasSize: CGSize { canvasSize }
 
   /// The microphone this session holds, for `InputMeter` to read levels off
   /// while it is running. A recording already has the device open, and metering
@@ -139,6 +167,11 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     inputs.microphoneEnabled = configuration.microphoneEnabled
     inputs.cameraEnabled = configuration.cameraEnabled
     inputs.systemAudioEnabled = configuration.systemAudioEnabled
+    deviceLock.lock()
+    cameraDeviceId = configuration.cameraDeviceId
+    microphoneDeviceId = configuration.microphoneDeviceId
+    swapsInFlight.removeAll()
+    deviceLock.unlock()
     canvasSize = configuration.canvasSize()
     compositor = VideoCompositor(
       canvasSize: canvasSize, overlay: configuration.cameraOverlay)
@@ -173,6 +206,26 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     transition(.prepared)
+  }
+
+  /// Re-points the capture at a filter that excludes the overlay windows which
+  /// are on screen now (§6).
+  ///
+  /// The filter `prepare` was given cannot name them. A filter is built from an
+  /// `SCShareableContent` snapshot, which lists on-screen windows only, and
+  /// every overlay this application owns — the control strip, the camera
+  /// preview and the input menu — is put on screen *after* `prepare` returns.
+  /// The plugin decides when this is worth doing (`CaptureExclusionPolicy`) and
+  /// builds the filter; the stream is private to this session, so re-pointing
+  /// it is the session's own call to make.
+  ///
+  /// Failure is swallowed on purpose. This is the *second* of §6's two
+  /// mechanisms — each panel's `sharingType = .none` is untouched by anything
+  /// here — so a rebuild that will not apply must never be the thing that ends
+  /// a recording that is otherwise running.
+  func updateContentFilter(_ filter: SCContentFilter) async {
+    guard let stream, isActive else { return }
+    try? await stream.updateContentFilter(filter)
   }
 
   func start() async throws {
@@ -481,6 +534,168 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     emitInputs()
   }
 
+  /// Re-points the camera picture-in-picture (§33.5).
+  ///
+  /// Applied on `processingQueue`, which is where frames are encoded, so it
+  /// lands *between* two of them and never inside one. The encoder's canvas is
+  /// untouched — only where the tile is drawn on it changes — so the file keeps
+  /// one continuous video track (§11).
+  ///
+  /// A no-op with no compositor, which is every state but a live session: what
+  /// the next recording opens is the configuration's business.
+  func setCameraOverlay(_ overlay: CameraOverlayConfiguration) {
+    processingQueue.async { [weak self] in
+      self?.compositor?.setOverlay(overlay)
+    }
+  }
+
+  /// Swaps the device an input is using, without restarting the session
+  /// (§33.2).
+  ///
+  /// Valid in `recording` and `paused`, a no-op anywhere else. The live capture
+  /// is re-pointed: no second track, no new output file, and — because the
+  /// timeline is monotonic (§8) — the gap is silence at a known position rather
+  /// than a drift.
+  ///
+  /// Slow enough to matter: `stopRunning()` and `startRunning()` are seconds of
+  /// each on a Bluetooth or Continuity input, so this is called from a `Task`
+  /// and never on the platform thread.
+  func selectInputDevice(kind: MediaDeviceKind, deviceId: String?) {
+    guard state == .recording || state == .paused else { return }
+    guard claimSwap(kind) else { return }
+    defer { endSwap(kind) }
+
+    switch kind {
+    case .camera:
+      swapCamera(to: deviceId)
+    case .microphone:
+      swapMicrophone(to: deviceId)
+    case .systemAudio:
+      // There is no endpoint to choose on macOS: system audio is the mix
+      // ScreenCaptureKit delivers (§33.8). Answering nothing is the point — the
+      // call must reach an arm that returns, never `FlutterMethodNotImplemented`,
+      // which Dart reports as a failure rather than as "there is nothing here to
+      // choose".
+      break
+    }
+  }
+
+  /// Re-points the camera at another device, mid-recording.
+  ///
+  /// The tile's geometry is untouched. The compositor resolves it against
+  /// whatever shape the frames now have, so a camera of a different shape
+  /// changes the tile's height and nothing else — the accepted behaviour
+  /// (§33.7). For the few frames the swap takes there is no camera frame to
+  /// draw, and the picture-in-picture is simply absent from them.
+  private func swapCamera(to deviceId: String?) {
+    let resolution = InputDeviceEnumerator.resolve(
+      kind: .camera, requestedId: deviceId)
+    // Remembered even when nothing is open right now: this is the device the
+    // toggle re-opens when the camera comes back on.
+    rememberDeviceId(deviceId, for: .camera)
+    guard camera.isRunning else { return }
+    let previous = camera.currentDevice
+    guard let device = resolution.device else {
+      emitError(
+        RecorderError(
+          .cameraUnavailable, "The selected camera is not available.",
+          details: deviceId), fatal: false)
+      return
+    }
+    // Swapping to the device already open would take the camera down and put it
+    // straight back up for nothing (§33.7).
+    guard device.uniqueID != previous?.uniqueID else { return }
+
+    camera.stop()
+    do {
+      try camera.start(device: device)
+    } catch {
+      emitError(error, fatal: false)
+      restoreCamera(previous)
+    }
+  }
+
+  /// Re-points the microphone at another device, mid-recording.
+  ///
+  /// The mixer takes whatever the new input produces and resamples it into the
+  /// session's fixed mix format, keyed on the same source, so the swap costs
+  /// the silence between the two devices and nothing else (§8).
+  private func swapMicrophone(to deviceId: String?) {
+    let resolution = InputDeviceEnumerator.resolve(
+      kind: .microphone, requestedId: deviceId)
+    rememberDeviceId(deviceId, for: .microphone)
+    guard microphone.isRunning else { return }
+    let previous = microphone.currentDevice
+    guard let device = resolution.device else {
+      emitError(
+        RecorderError(
+          .microphoneUnavailable, "The selected microphone is not available.",
+          details: deviceId), fatal: false)
+      return
+    }
+    guard device.uniqueID != previous?.uniqueID else { return }
+
+    microphone.stop()
+    do {
+      try openMicrophone(device: device)
+    } catch {
+      emitError(error, fatal: false)
+      restoreMicrophone(previous)
+    }
+  }
+
+  /// Puts the previous camera back after a swap that would not open.
+  ///
+  /// A failed swap leaves a running recording running (§33.7). Only when the
+  /// device that *was* working also refuses does the input go off — the same
+  /// degradation an input that fails at `prepare` takes, and the strip is told
+  /// so it never shows a camera whose frames are not arriving.
+  private func restoreCamera(_ previous: AVCaptureDevice?) {
+    if let previous, (try? camera.start(device: previous)) != nil { return }
+    inputs.cameraEnabled = false
+    emitInputs()
+  }
+
+  /// The microphone's half of the same rule. See `restoreCamera(_:)`.
+  private func restoreMicrophone(_ previous: AVCaptureDevice?) {
+    if let previous, (try? openMicrophone(device: previous)) != nil { return }
+    inputs.microphoneEnabled = false
+    emitInputs()
+  }
+
+  /// Claims the one swap slot for `kind`, or reports that another holds it.
+  private func claimSwap(_ kind: MediaDeviceKind) -> Bool {
+    deviceLock.lock()
+    defer { deviceLock.unlock() }
+    return swapsInFlight.insert(kind).inserted
+  }
+
+  private func endSwap(_ kind: MediaDeviceKind) {
+    deviceLock.lock()
+    swapsInFlight.remove(kind)
+    deviceLock.unlock()
+  }
+
+  private func rememberDeviceId(_ deviceId: String?, for kind: MediaDeviceKind) {
+    deviceLock.lock()
+    switch kind {
+    case .camera: cameraDeviceId = deviceId
+    case .microphone: microphoneDeviceId = deviceId
+    case .systemAudio: break
+    }
+    deviceLock.unlock()
+  }
+
+  private func selectedDeviceId(_ kind: MediaDeviceKind) -> String? {
+    deviceLock.lock()
+    defer { deviceLock.unlock() }
+    switch kind {
+    case .camera: return cameraDeviceId
+    case .microphone: return microphoneDeviceId
+    case .systemAudio: return nil
+    }
+  }
+
   // MARK: - SCStreamOutput
 
   func stream(
@@ -771,10 +986,17 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   }
 
   private func startMicrophone() throws {
+    try openMicrophone(device: resolvedDevice(.microphone))
+  }
+
+  /// Opens one named device, delegate attached. Split out of `startMicrophone`
+  /// so a mid-session swap re-opens a device it has already resolved, rather
+  /// than resolving the selection a second time and possibly a different way.
+  private func openMicrophone(device: AVCaptureDevice?) throws {
     microphone.onSampleBuffer = { [weak self] buffer in
       self?.handleMicrophone(buffer)
     }
-    try microphone.start(device: resolvedDevice(.microphone))
+    try microphone.start(device: device)
   }
 
   /// The device an input opens, degrading to this platform's own default
@@ -795,12 +1017,12 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     let message: String
     switch kind {
     case .camera:
-      requestedId = configuration?.cameraDeviceId
+      requestedId = selectedDeviceId(.camera)
       code = .cameraUnavailable
       message =
         "The selected camera is no longer available; the default was used instead."
     case .microphone:
-      requestedId = configuration?.microphoneDeviceId
+      requestedId = selectedDeviceId(.microphone)
       code = .microphoneUnavailable
       message =
         "The selected microphone is no longer available; the default was used instead."

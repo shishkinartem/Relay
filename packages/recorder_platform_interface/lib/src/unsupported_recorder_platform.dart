@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show Offset;
 
 import 'models/camera_overlay_configuration.dart';
 import 'models/capture_source.dart';
@@ -74,6 +75,20 @@ class _UnsupportedRecorder implements Recorder {
 
   @override
   Future<void> stopInputMetering(MediaDeviceKind kind) async {}
+
+  @override
+  Future<void> selectInputDevice(
+    MediaDeviceKind kind, {
+    String? deviceId,
+  }) async {}
+
+  @override
+  Future<void> setCameraOverlay(
+    CameraOverlayConfiguration configuration,
+  ) async {}
+
+  @override
+  Future<Offset?> cameraPreviewPosition() async => null;
 
   @override
   Future<RecorderCapabilities> getCapabilities() async =>
@@ -154,6 +169,25 @@ class _UnsupportedOverlays implements OverlayWindowController {
 
   @override
   Future<OverlayStripPosition?> controlStripPosition() async => null;
+
+  @override
+  Future<void> showInputMenu(
+    OverlayPlacement placement,
+    InputMenuOverlayState state,
+  ) async {}
+
+  @override
+  Future<void> updateInputMenu(InputMenuOverlayState state) async {}
+
+  @override
+  Future<void> hideInputMenu() async {}
+
+  @override
+  Future<void> nudgeControlStrip(double dx, double dy) async {}
+
+  @override
+  Stream<InputMenuSelection> get menuSelections =>
+      const Stream<InputMenuSelection>.empty();
 
   @override
   Future<void> showCameraPreview(

@@ -815,6 +815,189 @@ void main() {
     });
   });
 
+  group('one overlay event channel, two shapes (§33.4)', () {
+    const EventChannel channel = EventChannel('relay/overlay/events');
+
+    setUp(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockStreamHandler(
+            channel,
+            MockStreamHandler.inline(
+              onListen: (Object? _, MockStreamHandlerEventSink sink) {
+                sink.success('stop');
+                sink.success(<Object?, Object?>{
+                  'kind': 'microphone',
+                  'deviceId': 'mic:mv7',
+                  'off': false,
+                  'dismissed': false,
+                });
+                sink.success(<Object?, Object?>{
+                  'kind': 'camera',
+                  'dismissed': true,
+                });
+              },
+            ),
+          );
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockStreamHandler(channel, null);
+    });
+
+    test('both streams receive, however many are listened to', () async {
+      // A second `receiveBroadcastStream()` replaces the first on both sides of
+      // the bridge, so whichever was subscribed last would be the only one that
+      // ever received anything — and the strip's buttons would silently stop
+      // working the moment a menu was listened for.
+      final MethodChannelOverlayWindowController overlays =
+          MethodChannelOverlayWindowController();
+
+      final Future<OverlayCommand> command = overlays.commands.first;
+      final Future<InputMenuSelection> selection =
+          overlays.menuSelections.first;
+
+      expect(
+        await selection,
+        const InputMenuSelection(
+          kind: MediaDeviceKind.microphone,
+          deviceId: 'mic:mv7',
+        ),
+      );
+      expect(await command, OverlayCommand.stop);
+    });
+
+    test('each stream ignores the shape that is not its own', () async {
+      final MethodChannelOverlayWindowController overlays =
+          MethodChannelOverlayWindowController();
+
+      expect(await overlays.commands.take(1).toList(), <OverlayCommand>[
+        OverlayCommand.stop,
+      ]);
+      expect(
+        await overlays.menuSelections.take(1).toList(),
+        <InputMenuSelection>[
+          const InputMenuSelection(
+            kind: MediaDeviceKind.microphone,
+            deviceId: 'mic:mv7',
+          ),
+        ],
+      );
+    });
+
+    test('a dismissal arrives as a selection carrying no device', () async {
+      // The host closes the menu on a click outside, and the application is
+      // what draws the chevron: without this the application keeps believing
+      // the window is open and the next press reads as the one that closes it.
+      final MethodChannelOverlayWindowController overlays =
+          MethodChannelOverlayWindowController();
+
+      final List<InputMenuSelection> selections = await overlays.menuSelections
+          .take(2)
+          .toList();
+
+      expect(
+        selections.last,
+        const InputMenuSelection.dismissed(MediaDeviceKind.camera),
+      );
+      expect(selections.last.deviceId, isNull);
+      expect(selections.last.off, isFalse);
+    });
+
+    test('a selection round-trips through the map it travels as', () {
+      for (final InputMenuSelection original in <InputMenuSelection>[
+        const InputMenuSelection(
+          kind: MediaDeviceKind.microphone,
+          deviceId: 'mic:mv7',
+        ),
+        const InputMenuSelection(kind: MediaDeviceKind.camera, off: true),
+        const InputMenuSelection.dismissed(MediaDeviceKind.systemAudio),
+        const InputMenuSelection.preset(
+          MediaDeviceKind.camera,
+          CameraPipPreset.circle,
+        ),
+        const InputMenuSelection.corner(
+          MediaDeviceKind.camera,
+          CameraOverlayCorner.topLeft,
+        ),
+        const InputMenuSelection.resetTilePosition(MediaDeviceKind.camera),
+      ]) {
+        expect(InputMenuSelection.tryFromMap(original.toMap()), original);
+      }
+    });
+
+    test('a device choice is not read as a request to move the tile', () {
+      // `preset` and `corner` both default when decoded leniently, and a
+      // default there would turn every microphone choice into a reshape of the
+      // camera. Both are null-on-unknown for exactly this.
+      final InputMenuSelection? decoded = InputMenuSelection.tryFromMap(
+        <String, Object?>{'kind': 'microphone', 'deviceId': 'mic:mv7'},
+      );
+
+      expect(decoded?.preset, isNull);
+      expect(decoded?.corner, isNull);
+      expect(decoded?.resetPosition, isFalse);
+    });
+
+    test('the menu state round-trips its shapes and corners', () {
+      const InputMenuOverlayState original = InputMenuOverlayState(
+        kind: MediaDeviceKind.camera,
+        title: 'Camera',
+        presets: CameraPipPreset.values,
+        selectedPreset: CameraPipPreset.square,
+        corners: CameraOverlayCorner.values,
+        selectedCorner: CameraOverlayCorner.topRight,
+        canResetPosition: true,
+      );
+
+      final InputMenuOverlayState decoded = InputMenuOverlayState.fromMap(
+        original.toMap(),
+      );
+
+      expect(decoded.presets, original.presets);
+      expect(decoded.selectedPreset, CameraPipPreset.square);
+      expect(decoded.corners, original.corners);
+      expect(decoded.selectedCorner, CameraOverlayCorner.topRight);
+      expect(decoded.canResetPosition, isTrue);
+    });
+
+    test('a shape or corner this build cannot read is dropped', () {
+      final InputMenuOverlayState decoded = InputMenuOverlayState.fromMap(
+        <String, Object?>{
+          'kind': 'camera',
+          'presets': <Object?>['square', 'hexagon'],
+          'selectedPreset': 'hexagon',
+          'corners': <Object?>['topLeft', 'middle'],
+          'selectedCorner': 'middle',
+        },
+      );
+
+      expect(decoded.presets, <CameraPipPreset>[CameraPipPreset.square]);
+      expect(
+        decoded.selectedPreset,
+        isNull,
+        reason: 'defaulting would mark the wrong tile as the selected one',
+      );
+      expect(decoded.corners, <CameraOverlayCorner>[
+        CameraOverlayCorner.topLeft,
+      ]);
+      expect(decoded.selectedCorner, isNull);
+    });
+
+    test('a map naming no kind names no selection', () {
+      // Both hosts hand-write these spellings; a kind this build cannot read is
+      // dropped rather than turned into a swap of some other input.
+      expect(
+        InputMenuSelection.tryFromMap(<String, Object?>{'deviceId': 'mic:mv7'}),
+        isNull,
+      );
+      expect(
+        InputMenuSelection.tryFromMap(<String, Object?>{'kind': 'headphones'}),
+        isNull,
+      );
+    });
+  });
+
   group('the unsupported platform', () {
     test('fails loudly rather than pretending to record', () async {
       final RecorderPlatform platform = UnsupportedRecorderPlatform();

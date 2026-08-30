@@ -173,7 +173,6 @@ Linux is not part of MVP, but the application architecture must allow a Linux ca
 - multiple simultaneous upload destinations
 - live streaming
 - background removal for camera
-- movable/resizable camera PiP
 - watermarking
 
 ---
@@ -525,11 +524,16 @@ whose size and shape rows are superseded by
 Ratios rather than pixels, so 720p and 1080p and both display and window canvases
 share one configuration.
 
-The camera frame is **never cropped and never distorted**, in the file or in the
-preview — the same constraint §10 places on the capture source. A tile shaped
-differently from the camera can only be filled by doing one or the other, so the
-tile takes the camera's shape by default (`followsSourceAspectRatio`). With that
-switched off the frame is letterboxed inside the configured shape.
+The camera frame is **never distorted**, and is **cropped only by an explicit
+shape preset** — identically in the preview and in the file
+(`docs/adr/2026-08-30-user-adjustable-camera-pip.md`, §33.5).
+
+The default preset, `camera`, still never crops: the tile takes the camera's own
+shape (`followsSourceAspectRatio`), so there is nothing to crop and nothing to
+stretch — the same constraint §10 places on the capture source. `Square · small`
+and `Circle · small` take the centre of the frame, because a 16:9 sensor cannot
+fill a square any other way and letterboxing inside one leaves a tile that is
+part desktop. Nothing crops that the user did not ask for by name.
 
 The camera's shape comes from the capture device's active format, not from a
 captured frame: the preview is placed as soon as the camera starts, before the
@@ -1745,18 +1749,20 @@ Amends §6's placement rule. The default placement is unchanged.
 | Remembered | read when the session tears down and persisted then. A position the host cannot report leaves the stored one alone: failing to ask is not the user having dragged it back |
 | Reset | automatic when the stored spot cannot be resolved |
 
-**Deferred to §33.4, with reasons.** Two rows of the original table are not
-shipped and are not forgotten:
+**Keyboard and reset**, which stage D deferred, arrive with the menu:
+`nudgeControlStrip` moves the strip by 8 px per arrow and 32 with Shift, then
+clamps and snaps exactly as a drag end does, and `resetStripPosition` is a bare
+command that drops the remembered spot and re-shows the strip at its default
+dock. Both are answered by the host, so the strip's window never has to *keep*
+key focus for them to take effect.
 
-- *keyboard movement* — arrows by 8 px, Shift by 32. It needs the strip's window
-  to receive key events, and that window is deliberately non-activating so it
-  cannot take focus from the application being recorded (§33.4). Resolving that
-  properly belongs with the action sheet, which has the same constraint.
-- *an explicit `Reset position`* — it is a menu item, and the strip has no menu
-  until the action sheet arrives.
-
-Until then the accessible path is the automatic reset above, and the snap, which
-puts the strip back on the centre line without precision.
+The arrow keys still have to be *received*, and only a focused window receives a
+key. The strip's panel is non-activating, so it is focused after the user has
+clicked it, not while the application being recorded is in front: the arrows are
+a path for someone the drag does not serve, not a global hotkey. Claiming one
+would be worse — a recorder that swallows the arrow keys of every application it
+records is a bug, not an accessibility feature. `resetStripPosition` is raised
+by a click and needs no focus at all.
 
 ### 33.4 Device menus on the strip
 
@@ -1772,9 +1778,19 @@ a labelled device list, the pattern a Zoom user already knows.
 | Contents | `System default`, then devices, current one checked, then `Off` — which is the existing toggle |
 | Microphone sheet | carries the level meter for the selected device, under the list |
 | System-audio sheet | list only, no meter |
-| Camera sheet | carries the three shape presets (§33.5) instead of a meter — the preview window already is one |
+| Camera sheet | carries the three shape presets (§33.5) instead of a meter — the preview window already is one — plus `Reset position` once the tile has been dragged, and in **window mode** the four named corners |
 | One at a time | a second chevron replaces the first sheet |
 | Not selectable on this platform | no chevron; the control stays a plain toggle |
+| Closed by the host | reported back to the application, as a selection carrying no device |
+
+**A dismissal is reported, and this is not a detail.** The application draws the
+chevron and is the only thing that knows which sheet is open; the host is the
+only thing that sees the click outside that closes it. Left unreported, the two
+disagree: the sheet is gone, the application still believes it is there, and the
+next press on that chevron is read as the second press that closes it — the user
+presses twice to reopen a sheet that is not on screen. The host therefore sends
+`{kind, dismissed: true}` whenever *it* closed the sheet, and stays silent when
+the sheet closed because the application asked it to.
 
 ### 33.5 The camera picture-in-picture
 
@@ -1790,7 +1806,9 @@ and shape are presets. There are **no resize handles**.
 | Rule | |
 |---|---|
 | Position | free, as a fraction of the canvas; clamped to the `0.01 × canvas width` margin; snaps to a corner within 2% of the canvas width |
-| Dragged from | the live preview in display mode, where the preview **is** the tile (design `1p`); in window mode it is not (design `1e`), so position there is one of the four corners, chosen in the camera menu |
+| Dragged from | the live preview in display mode, where the preview **is** the tile (design `1p`); in window mode it is not (design `1e`), so position there is one of the four corners, chosen in the camera sheet the strip's chevron opens |
+| Choosing a corner | clears any stored free position — the two are alternative answers to one question, and a stored fraction would silently win over the corner just chosen |
+| A preset or a corner | leaves the sheet open. The tile changes under it, and comparing three shapes or four corners must not cost a reopen each time |
 | Applied | between frames, for the next frame; the encoder canvas never changes, so the file keeps one continuous video track |
 | Persisted | when the session ends normally, so a mid-session experiment does not survive a crash |
 
@@ -1809,11 +1827,18 @@ by name. The preview shows the same crop as the output, so `1p`'s promise holds.
 
 Amends the design's fixed-panel note, for the panel only.
 
-| Width | Layout |
-|---|---|
-| `< 560` | the reference layout, exactly as drawn — this stays the minimum |
-| `560 – 767` | source grid at three columns |
-| `≥ 768` | source grid at four columns; control rows may pair where the design has room |
+| Content width | Layout | Panel width |
+|---|---|---|
+| `< 560` | the reference layout, exactly as drawn — this stays the minimum | `< 588` |
+| `560 – 767` | source grid at three columns | `588 – 795` |
+| `≥ 768` | source grid at four columns; control rows may pair where the design has room | `≥ 796` |
+
+**The width is the one the layout is given, not the window's.** A component that
+read the window would stop being the same object wherever it is placed, and
+would need to know what padding happened to sit around it. The panel's own
+padding is `AppSpacing.panelPadding` on each side — 28 in total — which is the
+whole of the difference between the two columns above, and is why the panel
+flips a column 28 points later than the breakpoint's number.
 
 Maximum 960. No horizontal scrolling at any width. Tokens do not scale — the
 grid changes, the objects on it do not. Both platforms open at the same
@@ -1855,12 +1880,21 @@ unimplemented requirement.
 | No device of that kind at all | `No microphone found` — never an empty panel |
 | Permission for that kind not granted | the list shows what the platform reports; choosing prompts; a refusal degrades the session, it does not block it |
 | Sheet would extend past the usable area | flips to the other side of the strip, then clamps |
-| Click outside the sheet | closes the sheet; the click is not forwarded to what is underneath |
+| Click outside the sheet | closes the sheet, and the click **is** forwarded — see below |
 | Two chevrons in quick succession | one sheet; the second replaces the first |
 | Swap requested while a swap is in flight | dropped, not queued — §6's one-command-at-a-time rule |
 | Swap to a device that will not open | the previous device keeps running; a non-fatal error is shown |
 | Swap to the device already selected | no-op; no gap in the audio |
 | Repeated microphone swaps in a long session | audio stays in sync with video — §24 soak case |
+
+**The click outside is deliberately not swallowed**, reversing this row's
+earlier requirement. Consuming it needs an invisible window spanning the whole
+display for as long as a sheet is open — a click-eating surface laid over the
+very application being recorded, where a swallowed click is indistinguishable
+from the recorder having frozen. A menu closing *and* the click landing is the
+lesser surprise, and it is what both hosts implement: macOS observes with a
+non-consuming `NSEvent` monitor, Windows with the equivalent. If this is ever
+revisited, it needs a new decision, not a quiet change.
 
 #### The level meter
 
@@ -1882,6 +1916,8 @@ unimplemented requirement.
 |---|---|
 | Drag past a canvas edge | clamped to the margin |
 | Preset changed mid-drag | the drag ends at the tile's current position; the new preset's size is applied around it, then re-clamped |
+| Corner chosen while a free position is stored | the corner wins and the position is cleared, so the tile does not stay where it was dragged |
+| Corner offered with a display source | never — the tile is dragged there, and a corner list would be a second, worse answer to a question already answered better |
 | Camera swapped for one with a different shape, on the `Camera` preset | the tile keeps its top-left and width; the height changes; the position is re-clamped if that pushes it out |
 | Camera swapped, on `Square` or `Circle` | nothing moves — the tile is 1:1 whatever the sensor is; only what the centre crop contains changes |
 | A camera narrower than the crop needs | the crop takes the full width and the full height it can; it is never upscaled past the sensor's own pixels |
@@ -1934,12 +1970,15 @@ Each stage is shippable on its own and none of them requires the next.
 | B | Responsive panel; Windows opens at the right size | **shipped** — §33.6 |
 | C | Device enumeration and selection *before* recording, behind a disclosure, with the microphone's level meter | **shipped** — §33.2, §33.4 (launch screen only) |
 | D | The strip moves, and remembers where it was left | **shipped** — §33.3 |
-| E | Device menus **on the strip**; live swapping mid-recording; the strip's keyboard movement and `Reset position` | not started |
-| F | The camera picture-in-picture is dragged, and sized by preset | not started |
+| E | Device menus on the strip, live swapping mid-recording, keyboard movement and `Reset position` | **shipped** — §33.4 |
+| F | The camera picture-in-picture is dragged, and sized by preset | **shipped** — §33.5 |
 
-What stage C did **not** ship, and §33.2 still requires: `selectInputDevice` —
-changing a device while a recording is running. Choosing before a recording
-works on both platforms; changing during one is stage E.
+Every stage is now written on both platforms. **None of the Windows half has
+been compiled**, on this host or anywhere: see
+`docs/development/compatibility-matrix.md`, which also records that CI's Windows
+unit-test job has been failing since before this scope began. §33 stays here,
+whole, until that is green — the numbered sections it amends are updated as each
+stage lands, and §33.11 says which.
 
 ### 33.11 Folding this section away
 

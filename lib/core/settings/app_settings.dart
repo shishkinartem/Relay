@@ -1,3 +1,5 @@
+import 'dart:ui' show Offset;
+
 import 'package:flutter/foundation.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 
@@ -20,6 +22,9 @@ class AppSettings {
     this.inputDevices = const <MediaDeviceKind, InputDeviceChoice>{},
     this.expandedInputs = const <MediaDeviceKind>{},
     this.stripPosition,
+    this.cameraPipPreset = CameraPipPreset.camera,
+    this.cameraPipPosition,
+    this.cameraPipCorner = CameraOverlayCorner.bottomRight,
   });
 
   factory AppSettings.fromJson(Map<String, Object?> json) => AppSettings(
@@ -36,6 +41,13 @@ class AppSettings {
     inputDevices: _inputDevices(json[keyInputDevices]),
     expandedInputs: _expandedInputs(json[keyExpandedInputs]),
     stripPosition: _stripPosition(json[keyStripPosition]),
+    cameraPipPreset: CameraPipPreset.fromName(
+      json[keyCameraPipPreset] as String?,
+    ),
+    cameraPipPosition: _offset(json[keyCameraPipPosition]),
+    cameraPipCorner: CameraOverlayCorner.fromName(
+      json[keyCameraPipCorner] as String?,
+    ),
   );
 
   /// Schema version of the document [toJson] writes.
@@ -60,6 +72,9 @@ class AppSettings {
   static const String keyInputDevices = 'inputDevices';
   static const String keyExpandedInputs = 'expandedInputs';
   static const String keyStripPosition = 'stripPosition';
+  static const String keyCameraPipPreset = 'cameraPipPreset';
+  static const String keyCameraPipPosition = 'cameraPipPosition';
+  static const String keyCameraPipCorner = 'cameraPipCorner';
 
   /// Identifier of the single active upload destination (§15).
   final String uploadDestinationId;
@@ -99,6 +114,24 @@ class AppSettings {
   /// point at.
   final OverlayStripPosition? stripPosition;
 
+  /// Which shape and size the camera tile takes (§33.5). `camera` is the
+  /// default and the only one that never crops.
+  final CameraPipPreset cameraPipPreset;
+
+  /// The tile's top-left as a fraction of the canvas, or null for the corner.
+  ///
+  /// Null is a live reference to the corner rather than an absence: a canvas
+  /// that changes shape keeps the tile in the corner instead of at whatever
+  /// fraction that corner used to be.
+  final Offset? cameraPipPosition;
+
+  /// Which corner the tile sits in when [cameraPipPosition] is null (§33.5).
+  ///
+  /// Chosen in the camera sheet, and only reachable in window mode: with a
+  /// display source the tile is dragged instead, because there the preview *is*
+  /// the tile and a corner is a poorer answer than putting it where you want it.
+  final CameraOverlayCorner cameraPipCorner;
+
   AppSettings copyWith({
     String? uploadDestinationId,
     Object? localRecordingsDirectory = _unset,
@@ -112,6 +145,9 @@ class AppSettings {
     Map<MediaDeviceKind, InputDeviceChoice>? inputDevices,
     Set<MediaDeviceKind>? expandedInputs,
     Object? stripPosition = _unset,
+    CameraPipPreset? cameraPipPreset,
+    Object? cameraPipPosition = _unset,
+    CameraOverlayCorner? cameraPipCorner,
   }) => AppSettings(
     uploadDestinationId: uploadDestinationId ?? this.uploadDestinationId,
     localRecordingsDirectory: identical(localRecordingsDirectory, _unset)
@@ -129,6 +165,11 @@ class AppSettings {
     stripPosition: identical(stripPosition, _unset)
         ? this.stripPosition
         : stripPosition as OverlayStripPosition?,
+    cameraPipPreset: cameraPipPreset ?? this.cameraPipPreset,
+    cameraPipPosition: identical(cameraPipPosition, _unset)
+        ? this.cameraPipPosition
+        : cameraPipPosition as Offset?,
+    cameraPipCorner: cameraPipCorner ?? this.cameraPipCorner,
   );
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -148,6 +189,14 @@ class AppSettings {
         entry.key.name: entry.value.toJson(),
     },
     keyStripPosition: stripPosition?.toMap(),
+    keyCameraPipPreset: cameraPipPreset.name,
+    keyCameraPipCorner: cameraPipCorner.name,
+    keyCameraPipPosition: cameraPipPosition == null
+        ? null
+        : <String, Object?>{
+            'x': cameraPipPosition!.dx,
+            'y': cameraPipPosition!.dy,
+          },
     keyExpandedInputs: <String>[
       // Written in enum order rather than set order, so two settings documents
       // that mean the same thing are the same bytes.
@@ -180,6 +229,21 @@ class AppSettings {
       }
     }
     return devices;
+  }
+
+  /// Half a position is no position, the same rule the configuration decodes
+  /// by: a tile placed on one axis and cornered on the other is a shape nobody
+  /// asked for.
+  static Offset? _offset(Object? value) {
+    if (value is! Map<Object?, Object?>) {
+      return null;
+    }
+    final Object? x = value['x'];
+    final Object? y = value['y'];
+    if (x is! num || y is! num || !x.isFinite || !y.isFinite) {
+      return null;
+    }
+    return Offset(x.toDouble(), y.toDouble());
   }
 
   static OverlayStripPosition? _stripPosition(Object? value) =>
@@ -234,7 +298,10 @@ class AppSettings {
       other.preferredSourceType == preferredSourceType &&
       mapEquals(other.inputDevices, inputDevices) &&
       setEquals(other.expandedInputs, expandedInputs) &&
-      other.stripPosition == stripPosition;
+      other.stripPosition == stripPosition &&
+      other.cameraPipPreset == cameraPipPreset &&
+      other.cameraPipPosition == cameraPipPosition &&
+      other.cameraPipCorner == cameraPipCorner;
 
   @override
   int get hashCode => Object.hash(
@@ -255,6 +322,9 @@ class AppSettings {
       for (final MediaDeviceKind kind in MediaDeviceKind.values)
         expandedInputs.contains(kind),
       stripPosition,
+      cameraPipPreset,
+      cameraPipPosition,
+      cameraPipCorner,
     ]),
   );
 

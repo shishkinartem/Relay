@@ -16,6 +16,11 @@ constexpr size_t kAudioBlockFrames = kMixSampleRate / 50;
 constexpr int64_t kAudioCaptureLagFrames = static_cast<int64_t>(kMixSampleRate) / 5;
 constexpr int64_t kTickIntervalMs = 250;
 constexpr int64_t kStatsEveryTicks = 4;
+// How long a swap waits for the replacement device to open before giving up and
+// leaving the incumbent running (spec 33.2). Long enough for a camera that has
+// to spin up its sensor, short enough that a user who clicked a dead device is
+// told so rather than left watching a menu.
+constexpr std::chrono::milliseconds kDeviceOpenTimeout{3000};
 
 int64_t WallClockMs() {
   FILETIME file_time{};
@@ -67,11 +72,76 @@ bool RecordingSession::has_camera_frames() const {
 }
 
 double RecordingSession::camera_aspect_ratio() const {
-  return camera_.aspect_ratio();
+  const uint32_t width = camera_frame_width();
+  const uint32_t height = camera_frame_height();
+  // 16:9 rather than square when nothing has been captured yet: the preview is
+  // placed before the first frame arrives, and a square placeholder would put
+  // it where the composited picture-in-picture is not.
+  return height == 0 ? 16.0 / 9.0
+                     : static_cast<double>(width) / static_cast<double>(height);
+}
+
+uint32_t RecordingSession::camera_frame_width() const {
+  std::lock_guard<std::mutex> lock(camera_mutex_);
+  return camera_ ? camera_->width() : 0;
+}
+
+uint32_t RecordingSession::camera_frame_height() const {
+  std::lock_guard<std::mutex> lock(camera_mutex_);
+  return camera_ ? camera_->height() : 0;
+}
+
+uint32_t RecordingSession::canvas_width() const {
+  return compositor_.canvas_width();
+}
+
+uint32_t RecordingSession::canvas_height() const {
+  return compositor_.canvas_height();
 }
 
 RectD RecordingSession::pip_rect() const {
-  return compositor_.pip_rect();
+  return camera_pip_draw().dest;
+}
+
+PipDraw RecordingSession::camera_pip_draw() const {
+  // The camera's own frame size rather than the compositor's last frame: the
+  // reader reports it as soon as the stream opens, and the preview is placed
+  // before a single frame has been composed.
+  return compositor_.CameraPipDraw(camera_frame_width(), camera_frame_height());
+}
+
+std::string RecordingSession::LiveDeviceId(MediaDeviceKind kind) const {
+  std::lock_guard<std::mutex> lock(devices_mutex_);
+  switch (kind) {
+    case MediaDeviceKind::kCamera:
+      return live_camera_device_id_;
+    case MediaDeviceKind::kSystemAudio:
+      return live_system_audio_device_id_;
+    case MediaDeviceKind::kMicrophone:
+      break;
+  }
+  return live_microphone_device_id_;
+}
+
+void RecordingSession::SetLiveDeviceId(MediaDeviceKind kind,
+                                       const std::string& device_id) {
+  std::lock_guard<std::mutex> lock(devices_mutex_);
+  switch (kind) {
+    case MediaDeviceKind::kCamera:
+      live_camera_device_id_ = device_id;
+      return;
+    case MediaDeviceKind::kSystemAudio:
+      live_system_audio_device_id_ = device_id;
+      return;
+    case MediaDeviceKind::kMicrophone:
+      break;
+  }
+  live_microphone_device_id_ = device_id;
+}
+
+void RecordingSession::SetCameraOverlay(const CameraOverlayConfig& camera) {
+  config_.camera = camera;
+  compositor_.SetCameraOverlay(camera);
 }
 
 void RecordingSession::SetState(SessionState state) {
@@ -171,6 +241,12 @@ bool RecordingSession::Prepare(const RecordingConfig& config, RecorderError* err
     return false;
   }
 
+  // What this session is about to open, which is what a later swap compares
+  // against and re-points from.
+  SetLiveDeviceId(MediaDeviceKind::kCamera, config.camera_device_id);
+  SetLiveDeviceId(MediaDeviceKind::kMicrophone, config.microphone_device_id);
+  SetLiveDeviceId(MediaDeviceKind::kSystemAudio, config.system_audio_device_id);
+
   mixer_.SetMicrophoneEnabled(config.microphone_enabled);
   mixer_.SetSystemAudioEnabled(config.system_audio_enabled);
   microphone_ring_.Reset();
@@ -253,10 +329,10 @@ bool RecordingSession::Start(RecorderError* error) {
   };
   microphone_ = std::make_unique<AudioCapture>(AudioCapture::Kind::kMicrophone,
                                               &microphone_ring_, microphone_meter_);
-  microphone_->SetDeviceId(config_.microphone_device_id);
+  microphone_->SetDeviceId(LiveDeviceId(MediaDeviceKind::kMicrophone));
   system_audio_ =
       std::make_unique<AudioCapture>(AudioCapture::Kind::kSystemAudio, &system_audio_ring_);
-  system_audio_->SetDeviceId(config_.system_audio_device_id);
+  system_audio_->SetDeviceId(LiveDeviceId(MediaDeviceKind::kSystemAudio));
   std::string audio_error;
   if (!microphone_->Start(&clock_, input_error, &audio_error)) {
     RecorderError failure;
@@ -275,22 +351,17 @@ bool RecordingSession::Start(RecorderError* error) {
 
   if (config_.camera_enabled) {
     std::string camera_error;
-    camera_.SetDeviceId(config_.camera_device_id);
-    if (!camera_.Start(
-            capture_.device(), &compositor_,
-            [this](const uint8_t* pixels, uint32_t width, uint32_t height,
-                   uint32_t stride) {
-              camera_frames_seen_.store(true);
-              if (events_.on_camera_preview) {
-                events_.on_camera_preview(pixels, width, height, stride);
-              }
-            },
-            input_error, &camera_error)) {
+    std::unique_ptr<CameraCapture> camera =
+        StartCamera(LiveDeviceId(MediaDeviceKind::kCamera), &camera_error);
+    if (!camera) {
       RecorderError failure;
       failure.code = RecorderErrorCode::kCameraUnavailable;
       failure.message = camera_error;
       failure.fatal = false;
       OnPipelineError(failure);
+    } else {
+      std::lock_guard<std::mutex> lock(camera_mutex_);
+      camera_ = std::move(camera);
     }
   }
 
@@ -351,22 +422,38 @@ bool RecordingSession::SetSystemAudioEnabled(bool enabled, RecorderError* /*erro
   return true;
 }
 
+std::unique_ptr<CameraCapture> RecordingSession::StartCamera(
+    const std::string& device_id, std::string* error) {
+  auto camera = std::make_unique<CameraCapture>();
+  camera->SetDeviceId(device_id);
+  if (!camera->Start(
+          capture_.device(), &compositor_,
+          [this](const uint8_t* pixels, uint32_t width, uint32_t height,
+                 uint32_t stride) {
+            camera_frames_seen_.store(true);
+            if (events_.on_camera_preview) {
+              events_.on_camera_preview(pixels, width, height, stride);
+            }
+          },
+          [this](const RecorderError& failure) { OnPipelineError(failure); },
+          error)) {
+    return nullptr;
+  }
+  return camera;
+}
+
 bool RecordingSession::SetCameraEnabled(bool enabled, RecorderError* error) {
   compositor_.SetCameraEnabled(enabled);
-  if (enabled && !camera_.running() && capture_.device() != nullptr) {
+  bool running = false;
+  {
+    std::lock_guard<std::mutex> lock(camera_mutex_);
+    running = camera_ && camera_->running();
+  }
+  if (enabled && !running && capture_.device() != nullptr) {
     std::string camera_error;
-    camera_.SetDeviceId(config_.camera_device_id);
-    if (!camera_.Start(
-            capture_.device(), &compositor_,
-            [this](const uint8_t* pixels, uint32_t width, uint32_t height,
-                   uint32_t stride) {
-              camera_frames_seen_.store(true);
-              if (events_.on_camera_preview) {
-                events_.on_camera_preview(pixels, width, height, stride);
-              }
-            },
-            [this](const RecorderError& failure) { OnPipelineError(failure); },
-            &camera_error)) {
+    std::unique_ptr<CameraCapture> camera =
+        StartCamera(LiveDeviceId(MediaDeviceKind::kCamera), &camera_error);
+    if (!camera) {
       compositor_.SetCameraEnabled(false);
       error->code = RecorderErrorCode::kCameraUnavailable;
       error->message = camera_error;
@@ -374,11 +461,171 @@ bool RecordingSession::SetCameraEnabled(bool enabled, RecorderError* error) {
       EmitInputs();
       return false;
     }
-  } else if (!enabled && camera_.running()) {
-    camera_.Stop();
+    std::unique_ptr<CameraCapture> previous;
+    {
+      std::lock_guard<std::mutex> lock(camera_mutex_);
+      previous = std::move(camera_);
+      camera_ = std::move(camera);
+    }
+    // A camera that had failed and self-exited is still an object holding a
+    // device handle; stopped outside the lock, because stopping joins its
+    // thread.
+    if (previous) {
+      previous->Stop();
+    }
+  } else if (!enabled && running) {
+    std::unique_ptr<CameraCapture> previous;
+    {
+      std::lock_guard<std::mutex> lock(camera_mutex_);
+      previous = std::move(camera_);
+    }
+    if (previous) {
+      previous->Stop();
+    }
     camera_frames_seen_.store(false);
   }
   EmitInputs();
+  return true;
+}
+
+bool RecordingSession::SelectInputDevice(MediaDeviceKind kind,
+                                         const std::string& device_id,
+                                         RecorderError* error) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Recording and paused, and nothing else: what the next recording opens is
+    // the configuration's business, and a session being torn down has no live
+    // capture to re-point.
+    if (state_ != SessionState::kRecording && state_ != SessionState::kPaused) {
+      return true;  // a no-op outside a session, never an error (spec 33.2)
+    }
+  }
+  // The same lock a stop and an abort take, for the same reason they take it
+  // past their joins: a swap holds two devices open at once, and a teardown
+  // that ran through the middle of one would close the incumbent while the
+  // replacement was still being waited on. The cost is a stop that waits out an
+  // in-flight swap, bounded by kDeviceOpenTimeout.
+  std::lock_guard<std::mutex> teardown(teardown_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Read again under the teardown lock: the state can have moved on while
+    // this call was waiting for it.
+    if (state_ != SessionState::kRecording && state_ != SessionState::kPaused) {
+      return true;
+    }
+  }
+  switch (kind) {
+    case MediaDeviceKind::kCamera:
+      return SwapCamera(device_id, error);
+    case MediaDeviceKind::kMicrophone:
+    case MediaDeviceKind::kSystemAudio:
+      return SwapAudio(kind, device_id, error);
+  }
+  return true;
+}
+
+bool RecordingSession::SwapCamera(const std::string& device_id,
+                                  RecorderError* error) {
+  if (LiveDeviceId(MediaDeviceKind::kCamera) == device_id) {
+    return true;  // the device already selected: no-op, and no gap (spec 33.7)
+  }
+  bool running = false;
+  {
+    std::lock_guard<std::mutex> lock(camera_mutex_);
+    running = camera_ && camera_->running();
+  }
+  if (!running || capture_.device() == nullptr) {
+    // Nothing to re-point: the camera is off, and the id is what the next
+    // SetCameraEnabled(true) will open.
+    SetLiveDeviceId(MediaDeviceKind::kCamera, device_id);
+    return true;
+  }
+
+  std::string detail;
+  std::unique_ptr<CameraCapture> next = StartCamera(device_id, &detail);
+  // The old camera is still delivering while this waits. Both write the
+  // compositor's latest-wins slot for as long as the overlap lasts, which is a
+  // frame or two of whichever arrives last — never a gap in the video.
+  if (!next || !next->WaitUntilOpen(kDeviceOpenTimeout)) {
+    if (next) {
+      next->Stop();
+    }
+    error->code = RecorderErrorCode::kCameraUnavailable;
+    error->message =
+        "That camera could not be opened. The previous one is still recording.";
+    error->details = detail;
+    // Non-fatal, always: a device that will not open must never stop a
+    // recording (spec 33.2).
+    error->fatal = false;
+    return false;
+  }
+
+  std::unique_ptr<CameraCapture> previous;
+  {
+    std::lock_guard<std::mutex> lock(camera_mutex_);
+    previous = std::move(camera_);
+    camera_ = std::move(next);
+  }
+  SetLiveDeviceId(MediaDeviceKind::kCamera, device_id);
+  if (previous) {
+    previous->Stop();
+  }
+  return true;
+}
+
+bool RecordingSession::SwapAudio(MediaDeviceKind kind,
+                                 const std::string& device_id,
+                                 RecorderError* error) {
+  const bool microphone = kind == MediaDeviceKind::kMicrophone;
+  if (LiveDeviceId(kind) == device_id) {
+    return true;  // no-op, and no gap in the audio (spec 33.7)
+  }
+  std::unique_ptr<AudioCapture>& current = microphone ? microphone_ : system_audio_;
+  if (!current) {
+    // The input never started. The id is what the next session opens.
+    SetLiveDeviceId(kind, device_id);
+    return true;
+  }
+
+  auto next = std::make_unique<AudioCapture>(
+      microphone ? AudioCapture::Kind::kMicrophone : AudioCapture::Kind::kSystemAudio,
+      microphone ? &microphone_ring_ : &system_audio_ring_,
+      microphone ? microphone_meter_ : nullptr);
+  next->SetDeviceId(device_id);
+  std::string detail;
+  // Both endpoints run for the length of the handshake. They write the same
+  // ring, which takes the first sample offered for any position on the
+  // timeline and skips the rest, so the overlap is neither doubled nor lost —
+  // and the timeline is monotonic, so what a gap would leave is silence at a
+  // known position rather than drift (spec 8).
+  if (!next->Start(&clock_, [this](const RecorderError& failure) {
+        OnPipelineError(failure);
+      }, &detail) ||
+      !next->WaitUntilOpen(kDeviceOpenTimeout)) {
+    next->Stop();
+    error->code = microphone ? RecorderErrorCode::kMicrophoneUnavailable
+                             : RecorderErrorCode::kSystemAudioUnavailable;
+    error->message = microphone
+                         ? "That microphone could not be opened. The previous one "
+                           "is still recording."
+                         : "That audio output could not be opened. The previous "
+                           "one is still recording.";
+    error->details = detail;
+    error->fatal = false;
+    return false;
+  }
+
+  std::unique_ptr<AudioCapture> previous = std::move(current);
+  current = std::move(next);
+  SetLiveDeviceId(kind, device_id);
+  previous->Stop();
+  if (microphone && microphone_meter_ != nullptr) {
+    // The endpoint that just closed cleared the live flag on its way out, after
+    // the replacement had already set it. Re-asserted here, where both are
+    // settled, so the meter goes on reading the capture this session holds
+    // rather than opening a second handle on it (spec 33.2).
+    microphone_meter_->SetLive(current->running());
+  }
   return true;
 }
 
@@ -608,7 +855,16 @@ void RecordingSession::SystemAwakeLoop() {
 
 void RecordingSession::StopInputs() {
   capture_.Stop();
-  camera_.Stop();
+  std::unique_ptr<CameraCapture> camera;
+  {
+    std::lock_guard<std::mutex> lock(camera_mutex_);
+    camera = std::move(camera_);
+  }
+  if (camera) {
+    // Outside the lock: stopping joins the camera thread, which can be inside a
+    // preview or error callback of its own.
+    camera->Stop();
+  }
   if (microphone_) {
     microphone_->Stop();
     microphone_.reset();

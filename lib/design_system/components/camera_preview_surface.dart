@@ -1,4 +1,5 @@
 import 'package:flutter/widgets.dart';
+import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 
 import '../tokens/app_colors.dart';
 import '../tokens/app_shadows.dart';
@@ -29,6 +30,8 @@ class CameraPreviewSurface extends StatelessWidget {
     this.mirrored = true,
     this.matchesCompositedPip = false,
     this.aspectRatio = 16 / 9,
+    this.fit = CameraPipFit.contain,
+    this.cornerRadiusRatio = 0,
   });
 
   /// The camera frames. Null renders the wireframe placeholder.
@@ -42,25 +45,54 @@ class CameraPreviewSurface extends StatelessWidget {
   /// The camera's own width / height.
   final double aspectRatio;
 
+  /// Whether the frame is fitted whole or centre-cropped to fill the tile
+  /// (§33.5).
+  ///
+  /// This has to agree with the compositor to the pixel: design `1p` promises
+  /// the preview *is* the picture-in-picture, and a circle on screen with a
+  /// square in the file is the defect that promise exists to prevent.
+  final CameraPipFit fit;
+
+  /// Corner radius as a fraction of the tile's width. `0.5` is a circle.
+  final double cornerRadiusRatio;
+
   @override
   Widget build(BuildContext context) {
+    final Widget frame = feed ?? const HatchedSurface(stripe: 5);
     final Widget image = ClipRect(
       child: Transform(
         alignment: Alignment.center,
         transform: mirrored
             ? (Matrix4.identity()..scaleByDouble(-1, 1, 1, 1))
             : Matrix4.identity(),
-        child: _Letterboxed(
-          aspectRatio: aspectRatio,
-          child: feed ?? const HatchedSurface(stripe: 5),
-        ),
+        // `contain` letterboxes the whole frame; `cover` takes the centre and
+        // drops the rest, which is what a square or a circle asks for and the
+        // only cropping this product does (§33.5).
+        child: fit == CameraPipFit.cover
+            ? FittedBox(
+                fit: BoxFit.cover,
+                child: _Sized(aspectRatio: aspectRatio, child: frame),
+              )
+            : _Letterboxed(aspectRatio: aspectRatio, child: frame),
       ),
     );
 
     if (matchesCompositedPip) {
-      return BlueprintFrame(
-        background: AppColors.neutral400,
-        child: DuotoneFilter(enabled: feed == null, child: image),
+      final Widget tile = DuotoneFilter(enabled: feed == null, child: image);
+      if (cornerRadiusRatio <= 0) {
+        return BlueprintFrame(background: AppColors.neutral400, child: tile);
+      }
+      // A rounded tile is not a blueprint object: the frame's registration
+      // marks are drawn on a square, and the mask is the shape the compositor
+      // draws. Clipping here rather than decorating keeps the two the same.
+      return LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) =>
+            ClipRRect(
+              borderRadius: BorderRadius.circular(
+                cornerRadiusRatio * constraints.maxWidth,
+              ),
+              child: ColoredBox(color: AppColors.neutral400, child: tile),
+            ),
       );
     }
 
@@ -111,5 +143,24 @@ class _Letterboxed extends StatelessWidget {
       aspectRatio: aspectRatio > 0 ? aspectRatio : 1,
       child: child,
     ),
+  );
+}
+
+/// The frame at its own shape, for a `cover` fit to crop.
+///
+/// `FittedBox` needs an intrinsic size to scale, and a platform texture has
+/// none — it takes whatever it is given, which is how the camera came to be
+/// stretched before `1p` was written down.
+class _Sized extends StatelessWidget {
+  const _Sized({required this.aspectRatio, required this.child});
+
+  final double aspectRatio;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: aspectRatio <= 0 ? 1 : aspectRatio,
+    height: 1,
+    child: child,
   );
 }

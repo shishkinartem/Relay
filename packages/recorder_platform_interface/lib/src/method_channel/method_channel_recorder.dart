@@ -106,6 +106,46 @@ class MethodChannelRecorder implements Recorder {
   );
 
   @override
+  Future<void> selectInputDevice(MediaDeviceKind kind, {String? deviceId}) =>
+      _guard(
+        () => _channel.invokeMethod<void>(
+          'selectInputDevice',
+          <String, Object?>{'kind': kind.name, 'deviceId': deviceId},
+        ),
+      );
+
+  @override
+  Future<void> setCameraOverlay(CameraOverlayConfiguration configuration) =>
+      _guard(
+        () => _channel.invokeMethod<void>(
+          'setCameraOverlay',
+          configuration.toMap(),
+        ),
+      );
+
+  @override
+  Future<Offset?> cameraPreviewPosition() => _guard(() async {
+    final Map<Object?, Object?>? raw = await _channel
+        .invokeMethod<Map<Object?, Object?>>('cameraPreviewPosition');
+    if (raw == null) {
+      return null;
+    }
+    final Map<String, Object?> map = raw.cast<String, Object?>();
+    final num? x = map['x'] as num?;
+    final num? y = map['y'] as num?;
+    // Half a position is no position, the same rule the configuration decodes
+    // by: a tile placed on one axis and cornered on the other is a shape
+    // nobody asked for.
+    if (x == null ||
+        y == null ||
+        !x.toDouble().isFinite ||
+        !y.toDouble().isFinite) {
+      return null;
+    }
+    return Offset(x.toDouble(), y.toDouble());
+  });
+
+  @override
   Future<RecorderCapabilities> getCapabilities() => _guard(() async {
     final Map<Object?, Object?>? raw = await _channel
         .invokeMethod<Map<Object?, Object?>>('getCapabilities');
@@ -289,7 +329,7 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
 
   final MethodChannel _channel;
   final EventChannel _eventChannel;
-  Stream<OverlayCommand>? _commands;
+  Stream<Object?>? _overlayEvents;
 
   @override
   Future<void> showControlStrip(OverlayPlacement placement) => _guard(
@@ -299,6 +339,44 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
   @override
   Future<void> hideControlStrip() =>
       _guard(() => _channel.invokeMethod<void>('hideControlStrip'));
+
+  @override
+  Future<void> showInputMenu(
+    OverlayPlacement placement,
+    InputMenuOverlayState state,
+  ) => _guard(
+    () => _channel.invokeMethod<void>('showInputMenu', <String, Object?>{
+      ...placement.toMap(),
+      'state': state.toMap(),
+    }),
+  );
+
+  @override
+  Future<void> updateInputMenu(InputMenuOverlayState state) => _guard(
+    () => _channel.invokeMethod<void>('updateInputMenu', state.toMap()),
+  );
+
+  @override
+  Future<void> hideInputMenu() =>
+      _guard(() => _channel.invokeMethod<void>('hideInputMenu'));
+
+  @override
+  Future<void> nudgeControlStrip(double dx, double dy) => _guard(
+    () => _channel.invokeMethod<void>('nudgeControlStrip', <String, Object?>{
+      'dx': dx,
+      'dy': dy,
+    }),
+  );
+
+  @override
+  Stream<InputMenuSelection> get menuSelections => _events
+      .map(
+        (Object? event) => event is Map<Object?, Object?>
+            ? InputMenuSelection.tryFromMap(event.cast<String, Object?>())
+            : null,
+      )
+      .where((InputMenuSelection? s) => s != null)
+      .cast<InputMenuSelection>();
 
   @override
   Future<OverlayStripPosition?> controlStripPosition() => _guard(() async {
@@ -353,11 +431,28 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
   });
 
   @override
-  Stream<OverlayCommand> get commands => _commands ??= _eventChannel
-      .receiveBroadcastStream()
-      .map((Object? event) => OverlayCommand.fromName(event as String?))
+  Stream<OverlayCommand> get commands => _events
+      .map(
+        (Object? event) =>
+            event is String ? OverlayCommand.fromName(event) : null,
+      )
       .where((OverlayCommand? command) => command != null)
-      .cast<OverlayCommand>()
+      .cast<OverlayCommand>();
+
+  /// The one subscription to `relay/overlay/events`, shared by both streams.
+  ///
+  /// Not one `receiveBroadcastStream()` each: a second listen replaces the
+  /// first on *both* sides of the bridge — Dart's binary messenger overwrites
+  /// the handler, and the native `EventChannel` wrapper cancels the old sink
+  /// before it opens the new one — so whichever stream was subscribed last
+  /// would be the only one that ever received anything, and the control strip's
+  /// buttons would silently stop working the moment a menu was listened for.
+  ///
+  /// One channel carrying two shapes is deliberate (§33.4): a command is a bare
+  /// name and always will be, a choice is a map, and each stream keeps what it
+  /// recognises.
+  Stream<Object?> get _events => _overlayEvents ??= _eventChannel
+      .receiveBroadcastStream()
       .asBroadcastStream();
 }
 
