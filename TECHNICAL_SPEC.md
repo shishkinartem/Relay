@@ -1942,6 +1942,7 @@ unimplemented requirement.
 | Permission for that kind not granted | the list shows what the platform reports; choosing prompts; a refusal degrades the session, it does not block it |
 | Sheet would extend past the usable area | flips to the other side of the strip, then clamps |
 | Click outside the sheet | closes the sheet, and the click **is** forwarded — see below |
+| Click on the control strip itself, with a sheet open | **not** "outside". The strip is the sheet's own window furniture: the chevron toggles its own sheet, another chevron replaces it, and any other control closes it. A press on a readout, or on the move handle below the drag threshold, leaves the sheet open |
 | Two chevrons in quick succession | one sheet; the second replaces the first |
 | Swap requested while a swap is in flight | dropped, not queued — §6's one-command-at-a-time rule |
 | Swap to a device that will not open | the previous device keeps running; a non-fatal error is shown |

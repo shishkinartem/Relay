@@ -110,8 +110,15 @@ class _DraggableState extends State<_Draggable> {
       _requested = true;
       widget.onMove();
     },
-    onPointerUp: (_) => _origin = null,
-    onPointerCancel: (_) => _origin = null,
+    // See the strip's handle: the latch clears with the gesture.
+    onPointerUp: (_) {
+      _origin = null;
+      _requested = false;
+    },
+    onPointerCancel: (_) {
+      _origin = null;
+      _requested = false;
+    },
     child: MouseRegion(cursor: SystemMouseCursors.grab, child: widget.child),
   );
 }

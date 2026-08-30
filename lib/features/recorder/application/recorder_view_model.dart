@@ -1753,6 +1753,22 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _onOverlayCommand(OverlayCommand command) {
+    // Anything on the strip that is not a chevron closes an open sheet. The
+    // host no longer treats the strip as "outside" — it could not, or the
+    // chevron would never be able to close its own sheet — so this is what
+    // keeps the rest of the strip behaving as a click outside does. It also
+    // closes the same gap on Windows, where a click on Pause has always left
+    // the sheet open (§33.7).
+    switch (command) {
+      case OverlayCommand.openMicrophoneMenu:
+      case OverlayCommand.openCameraMenu:
+      case OverlayCommand.openSystemAudioMenu:
+        break;
+      default:
+        if (_openMenu != null) {
+          unawaited(closeInputMenu());
+        }
+    }
     switch (command) {
       case OverlayCommand.toggleMicrophone:
         unawaited(toggleMicrophone());

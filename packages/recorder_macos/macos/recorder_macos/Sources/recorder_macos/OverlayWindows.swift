@@ -97,6 +97,20 @@ final class OverlayWindowController {
   /// The one-shot mouse-up watch each dragged panel has outstanding.
   private var dragEndMonitors: [ObjectIdentifier: Any] = [:]
 
+  /// The most recent left-button event, and the monitor that keeps it.
+  ///
+  /// `NSApp.currentEvent` cannot answer "what started this gesture". The drag
+  /// request arrives on a channel, drained from a run-loop source about a frame
+  /// after the pointer move Dart reacted to, so `currentEvent` is merely
+  /// whatever AppKit last dequeued — very often an `appKitDefined` window-moved
+  /// event, which every `setFrameOrigin` emits, including the previous drag's
+  /// own settle. The guard then rejected the gesture, and the Dart side latches
+  /// its request for the whole gesture, so the user had to release and press
+  /// again. From the outside: a drag that works every other time and a cursor
+  /// that does not catch.
+  private var lastLeftMouseEvent: NSEvent?
+  private var leftMouseMonitor: Any?
+
   /// The tile, and what the camera behind it produces.
   ///
   /// Held because in display mode the preview window *is* the
@@ -219,6 +233,7 @@ final class OverlayWindowController {
       NSEvent.removeMonitor(monitor)
     }
     dragEndMonitors.removeAll()
+    endLeftMouseWatch()
   }
 
   /// Raised by the control strip and forwarded to the application engine.
@@ -318,6 +333,9 @@ final class OverlayWindowController {
     place(panel, at: placed.frame)
     rememberStripPosition(of: placed.frame, on: placed.screen)
     announceOverlayWindow(panel, wasOnScreen: wasOnScreen)
+    // From here until the strip goes away, something on screen is draggable —
+    // so the last left-button event has to be current when a drag is asked for.
+    beginLeftMouseWatch()
   }
 
   /// Where the strip is now, as the fraction the contract stores (§33.3).
@@ -341,6 +359,8 @@ final class OverlayWindowController {
     // The sheet closes with the session, and with the window it is anchored to
     // (§33.7).
     dismissInputMenu()
+    // Nothing is draggable once the strip is gone: the preview goes with it.
+    endLeftMouseWatch()
     // A drag that was still outstanding has nothing left to settle: the window
     // it belonged to is going away, and the position it would persist is the
     // one the session already read.
@@ -560,11 +580,16 @@ final class OverlayWindowController {
   /// arithmetic Dart and Windows share — and not the strip's usable-area rules.
   private func beginPreviewMove() {
     guard let panel = previewPanel, panel.isVisible else { return }
-    // A method call can be drained a turn late, by which time the button that
-    // started the gesture may already be up; see `beginStripMove`.
-    guard let event = NSApp.currentEvent,
-      event.type == .leftMouseDown || event.type == .leftMouseDragged
-    else { return }
+    // The same event source and the same rejection rule as `beginStripMove`,
+    // which this used to differ from in both. It also used to dismiss the sheet
+    // *before* the guard, so a dropped preview drag closed the sheet while a
+    // dropped strip drag did not.
+    guard let event = liveDragEvent() else {
+      let rejected = lastLeftMouseEvent.map { String(describing: $0.type) } ?? "none"
+      overlayLog.error(
+        "beginPreviewMove dropped: last left-button event is \(rejected, privacy: .public)")
+      return
+    }
     // The click that started this is outside the sheet, whatever else it is.
     dismissInputMenu()
     panel.performDrag(with: event)
@@ -676,15 +701,7 @@ final class OverlayWindowController {
     // So the first sheet of a given shape is still corrected once; every later
     // one of that shape opens at the size that correction produced, and the
     // correction becomes a no-op.
-    menuContentKey = OverlayPlacementGeometry.menuContentKey(
-      kind: state["kind"] as? String,
-      rowCount: (state["items"] as? [Any])?.count ?? 0,
-      loading: state["loading"] as? Bool ?? false,
-      hasLevel: state["level"] != nil && !(state["level"] is NSNull),
-      hasNotice: state["notice"] != nil && !(state["notice"] is NSNull),
-      presetCount: (state["presets"] as? [Any])?.count ?? 0,
-      cornerCount: (state["corners"] as? [Any])?.count ?? 0,
-      canResetPosition: state["canResetPosition"] as? Bool ?? false)
+    menuContentKey = Self.contentKey(of: state)
     let size = OverlayPlacementGeometry.effectiveSize(
       requested: NSSize(
         width: placement["width"] as? Double ?? 268,
@@ -717,7 +734,28 @@ final class OverlayWindowController {
   /// for.
   func updateInputMenu(_ state: [String: Any]) {
     guard let panel = menuPanel, panel.isVisible else { return }
+    // The key follows the state, not the show. A sheet changes shape in place
+    // on the way up — shown loading, then with its devices, then with a level —
+    // so a key fixed at `showInputMenu` filed the loaded sheet's height under
+    // the loading sheet's name, and the next loading sheet then opened at the
+    // loaded height. The ledger is no longer what stands between this window
+    // and a crash (`apply` is), but a ledger that lies is worse than none: it
+    // is what decides the first, visible size of every sheet.
+    menuContentKey = Self.contentKey(of: state)
     menuChannel?.invokeMethod("inputMenuState", arguments: state)
+  }
+
+  /// The shape of a sheet, for the size ledger.
+  private static func contentKey(of state: [String: Any]) -> String {
+    OverlayPlacementGeometry.menuContentKey(
+      kind: state["kind"] as? String,
+      rowCount: (state["items"] as? [Any])?.count ?? 0,
+      loading: state["loading"] as? Bool ?? false,
+      hasLevel: state["level"] != nil && !(state["level"] is NSNull),
+      hasNotice: state["notice"] != nil && !(state["notice"] is NSNull),
+      presetCount: (state["presets"] as? [Any])?.count ?? 0,
+      cornerCount: (state["corners"] as? [Any])?.count ?? 0,
+      canResetPosition: state["canResetPosition"] as? Bool ?? false)
   }
 
   /// Closes the menu because the application asked it to. Idempotent.
@@ -812,8 +850,9 @@ final class OverlayWindowController {
         let strip = self.stripPanel
       else { return }
       let frame = self.menuFrame(size: target, strip: strip)
-      guard frame != panel.frame else { return }
-      panel.setFrame(frame, display: true)
+      let applied = self.apply(panel, frame: frame)
+      guard applied != panel.frame else { return }
+      panel.setFrame(applied, display: true)
     }
   }
 
@@ -851,7 +890,15 @@ final class OverlayWindowController {
           if event.keyCode == 53 { self.dismissInputMenu() }
           return event
         }
-        if event.window !== panel { self.dismissInputMenu() }
+        // The strip is not "outside": it is the sheet's own window furniture,
+        // and the chevron on it has to be able to close what it opened.
+        if OverlayPlacementGeometry.menuDismissal(
+          forEventWindow: event.window.map(ObjectIdentifier.init),
+          menu: ObjectIdentifier(panel),
+          strip: self.stripPanel.map(ObjectIdentifier.init))
+        {
+          self.dismissInputMenu()
+        }
         return event
       })
     {
@@ -1074,19 +1121,73 @@ final class OverlayWindowController {
   ///
   /// A resize blocks the platform thread until the panel's engine commits a
   /// frame at the new size, and a window that is not on screen has no drawable
-  /// to commit into. A re-show at an unchanged size — the normal case, because
-  /// the size is resolved from the same measurement every time — is a move at
-  /// most. When the size genuinely did change, the panel is ordered front
-  /// *first* so the commit has somewhere to land.
+  /// to commit into. When the size genuinely did change, the panel is ordered
+  /// front *first* so the commit has somewhere to land.
   private func place(_ panel: NSPanel, at frame: NSRect) {
-    if OverlayPlacementGeometry.needsResize(from: panel.frame, to: frame) {
+    let target = apply(panel, frame: frame)
+    if OverlayPlacementGeometry.needsResize(from: panel.frame, to: target) {
       panel.orderFrontRegardless()
-    }
-    if panel.frame != frame {
-      panel.setFrame(frame, display: true)
+      panel.setFrame(target, display: true)
+    } else if panel.frame.origin != target.origin {
+      panel.setFrameOrigin(target.origin)
     }
     panel.orderFrontRegardless()
   }
+
+  /// The one place a panel's size is decided (§33.3, flutter/flutter#185394).
+  ///
+  /// Every caller that used to reach `setFrame` goes through here, because the
+  /// rule it enforces is about a panel's *history* and no single call site can
+  /// see that. `OverlayPlacementGeometry.panelSizeAction` holds the reasoning
+  /// and the proof; this is the bookkeeping.
+  ///
+  /// Returns the frame that may actually be applied: the requested origin
+  /// always, and a size that never shrinks and never returns to one the panel
+  /// has already rendered.
+  private func apply(_ panel: NSPanel, frame: NSRect) -> NSRect {
+    let key = ObjectIdentifier(panel)
+    let scale = panel.backingScaleFactor
+    let action = OverlayPlacementGeometry.panelSizeAction(
+      requested: frame.size,
+      highWater: panelHighWaterSizes[key],
+      scale: scale,
+      renderedScale: panelRenderedScales[key])
+
+    switch action {
+    case .move:
+      return NSRect(origin: frame.origin, size: panelHighWaterSizes[key] ?? frame.size)
+    case .grow(let size):
+      panelHighWaterSizes[key] = size
+      panelRenderedScales[key] = scale
+      return NSRect(origin: frame.origin, size: size)
+    case .hold(let size):
+      // The panel is left larger than its content asked for. That is the whole
+      // trade: a sheet with a little unused room below it, against a raster
+      // thread reading a null texture. The Dart side draws its content at its
+      // own size inside the window and dismisses on a press in the surplus.
+      return NSRect(origin: frame.origin, size: size)
+    case .rebuild(let size):
+      // The backing scale changed, so the pixel history says nothing about this
+      // panel any more. There is no way to rebuild a hosted `FlutterView`
+      // without tearing down its engine, which costs more than it saves — so
+      // this is recorded rather than acted on, and the size is taken as a fresh
+      // start. §0.5 of the crash analysis: closed for sizes we choose,
+      // mitigated for sizes the system imposes.
+      overlayLog.error(
+        "panel crossed a backing-scale boundary: \(size.width, privacy: .public)x\(size.height, privacy: .public) at \(scale, privacy: .public)x"
+      )
+      panelHighWaterSizes[key] = size
+      panelRenderedScales[key] = scale
+      return NSRect(origin: frame.origin, size: size)
+    }
+  }
+
+  /// The largest size each panel has rendered, and the scale it rendered it at.
+  ///
+  /// Keyed by panel identity and never cleared: the engine's surface cache is
+  /// not cleared either, and it is that cache the rule exists to protect.
+  private var panelHighWaterSizes: [ObjectIdentifier: NSSize] = [:]
+  private var panelRenderedScales: [ObjectIdentifier: CGFloat] = [:]
 
   /// The control strip's frame and the display it belongs on.
   ///
@@ -1146,6 +1247,38 @@ final class OverlayWindowController {
   /// So the settle waits for the mouse-up that ends the drag. §33.3's snap and
   /// clamp are about where the strip is **let go**, and until this there was no
   /// moment in the code that corresponded to that.
+  /// Keeps [lastLeftMouseEvent] current for as long as an overlay is on screen.
+  private func beginLeftMouseWatch() {
+    guard leftMouseMonitor == nil else { return }
+    leftMouseMonitor = NSEvent.addLocalMonitorForEvents(
+      matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+    ) { [weak self] event in
+      self?.lastLeftMouseEvent = event
+      return event
+    }
+  }
+
+  private func endLeftMouseWatch() {
+    if let leftMouseMonitor {
+      NSEvent.removeMonitor(leftMouseMonitor)
+    }
+    leftMouseMonitor = nil
+    lastLeftMouseEvent = nil
+  }
+
+  /// The event a drag should be handed, or nil when the button is not down.
+  ///
+  /// Rejecting only a `leftMouseUp` is what the guard was always supposed to
+  /// mean: a drag begun with nothing held has nothing to end it. Anything else
+  /// — a down, a drag — is a live gesture, whatever AppKit happened to dequeue
+  /// since.
+  private func liveDragEvent() -> NSEvent? {
+    guard let event = lastLeftMouseEvent, event.type != .leftMouseUp else {
+      return nil
+    }
+    return event
+  }
+
   private func beginStripMove() {
     guard let panel = stripPanel, panel.isVisible else { return }
     // The strip moving closes the sheet (§33.7). Before the drag, not after
@@ -1157,16 +1290,14 @@ final class OverlayWindowController {
     // started the gesture may already be up. A drag loop begun with nothing
     // held has nothing to end it, so a late call is dropped rather than turned
     // into a strip that follows the pointer with no button down.
-    guard let event = NSApp.currentEvent,
-      event.type == .leftMouseDown || event.type == .leftMouseDragged
-    else {
-      // Not a failure worth an error, but not nothing either: the Dart side
-      // latches "a drag was requested" for the whole gesture, so a dropped
-      // request reads to the user as a strip that will not move until they
-      // release and press again. Logged so the next report about it arrives
-      // with the event type that caused it.
-      let rejected = NSApp.currentEvent.map { String(describing: $0.type) } ?? "none"
-      overlayLog.info("beginMove dropped: currentEvent is \(rejected, privacy: .public)")
+    guard let event = liveDragEvent() else {
+      // The Dart side latches "a drag was requested" for the whole gesture, so
+      // a dropped request reads to the user as a strip that will not move until
+      // they release and press again. At `.error` because info-level logging
+      // from a third-party subsystem is memory-only and never reaches
+      // `log show` — the last report about this arrived with nothing in it.
+      let rejected = lastLeftMouseEvent.map { String(describing: $0.type) } ?? "none"
+      overlayLog.error("beginMove dropped: last left-button event is \(rejected, privacy: .public)")
       return
     }
     panel.performDrag(with: event)
@@ -1187,9 +1318,22 @@ final class OverlayWindowController {
   private func watchForDragEnd(of panel: NSPanel, settle: @escaping () -> Void) {
     endDragWatch(for: panel)
     let key = ObjectIdentifier(panel)
-    let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) {
-      [weak self] event in
+    // The same mask AppKit's own drag terminator uses — a window-server drag
+    // can end on an `appKitDefined` event rather than a plain mouse-up, and a
+    // watch that missed it would never settle *and* would stay installed to
+    // fire on the next unrelated click anywhere in the application.
+    let monitor = NSEvent.addLocalMonitorForEvents(
+      matching: [.leftMouseUp, .appKitDefined]
+    ) { [weak self] event in
       guard let self else { return event }
+      // AppKit's own window-drag terminator accepts a plain `leftMouseUp` or
+      // an `appKitDefined` of subtype 21 — an undocumented "the window-server
+      // drag ended" notification, read out of
+      // `-[NSWindow _dragWindowRelativeToMouseDown:options:completionHandler:]`.
+      // Any other `appKitDefined` is unrelated and must not end a drag.
+      if event.type == .appKitDefined && event.subtype.rawValue != 21 {
+        return event
+      }
       self.endDragWatch(for: panel)
       // After the monitor is removed, so a settle that somehow raises another
       // mouse-up cannot re-enter this.
@@ -1293,13 +1437,18 @@ final class OverlayWindowController {
     stripPosition = ratio
   }
 
-  /// A move, never a resize: the frame carries the panel's own size.
+  /// A move, never a resize — in *points*.
   ///
   /// Moving a window does not recreate its rendering surface, so this costs
   /// nothing of what a resize costs — the distinction this whole file turns on.
+  /// The exception is a move that crosses to a display of a different backing
+  /// scale: the point size is unchanged and the pixel size is not, which is a
+  /// resize as far as the engine's surface cache is concerned. That is why this
+  /// goes through `apply` too, rather than trusting its own name.
   private func move(_ panel: NSPanel, to frame: NSRect) {
-    guard panel.frame != frame else { return }
-    panel.setFrame(frame, display: true)
+    let target = apply(panel, frame: frame)
+    guard panel.frame != target else { return }
+    panel.setFrame(target, display: true)
   }
 
   /// Resolves the contract's anchored and absolute placements against the
@@ -1375,12 +1524,13 @@ final class OverlayWindowController {
     let screen = panel.screen ?? currentScreen()
     let target = OverlayPlacementGeometry.resizedKeepingTopCenter(
       panel.frame, to: size, inVisibleFrame: screen.visibleFrame)
-    guard OverlayPlacementGeometry.needsResize(from: panel.frame, to: target)
+    let applied = apply(panel, frame: target)
+    guard OverlayPlacementGeometry.needsResize(from: panel.frame, to: applied)
     else { return }
-    panel.setFrame(target, display: true)
+    panel.setFrame(applied, display: true)
     // Growing about the top centre moves the leading edge, so the remembered
     // fraction is no longer the one the strip is at.
-    rememberStripPosition(of: target, on: screen)
+    rememberStripPosition(of: applied, on: screen)
   }
 
   /// The display this session's overlays belong on.

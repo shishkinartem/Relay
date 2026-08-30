@@ -630,4 +630,182 @@ final class OverlayPlacementGeometryTests: XCTestCase {
         from: CGRect(origin: .zero, size: second),
         to: CGRect(origin: .zero, size: measured)))
   }
+
+  // MARK: - a panel's size never goes back (flutter/flutter#185394)
+
+  /// The rule, executed: replay a sequence of requested sizes through the
+  /// policy and assert the applied sequence never shrinks and never revisits.
+  ///
+  /// This is the only part of the fix a test on this machine can reach. The
+  /// panels themselves are AppKit and have no test target.
+  private func applied(_ requests: [CGSize], scale: CGFloat = 2) -> [CGSize] {
+    var highWater: CGSize?
+    var renderedScale: CGFloat?
+    var out: [CGSize] = []
+    for request in requests {
+      switch OverlayPlacementGeometry.panelSizeAction(
+        requested: request, highWater: highWater, scale: scale,
+        renderedScale: renderedScale)
+      {
+      case .move:
+        out.append(highWater ?? request)
+      case .grow(let size), .hold(let size), .rebuild(let size):
+        highWater = size
+        renderedScale = scale
+        out.append(size)
+      }
+    }
+    return out
+  }
+
+  func testTheAppliedSizeNeverShrinks() {
+    // The input menu's real sequence: a microphone sheet, then a camera sheet
+    // (taller — it carries the preset tiles), then the microphone again. That
+    // last step is the A -> B -> A that crashed the raster thread twice.
+    let sizes = applied([
+      CGSize(width: 268, height: 237),
+      CGSize(width: 268, height: 309),
+      CGSize(width: 268, height: 237),
+    ])
+
+    XCTAssertEqual(sizes[0], CGSize(width: 268, height: 237))
+    XCTAssertEqual(sizes[1], CGSize(width: 268, height: 309))
+    XCTAssertEqual(
+      sizes[2], CGSize(width: 268, height: 309),
+      "the panel is held at its high-water size rather than driven back")
+  }
+
+  func testNoSizeIsEverRevisited() {
+    // The property in general: whatever is asked for, the applied sequence is
+    // non-decreasing and every value is seen at most once in a row — so the
+    // engine's surface cache can never be asked for a size it has retired.
+    let requests: [CGSize] = [
+      CGSize(width: 268, height: 120),
+      CGSize(width: 268, height: 300),
+      CGSize(width: 268, height: 150),
+      CGSize(width: 268, height: 300),
+      CGSize(width: 268, height: 90),
+      CGSize(width: 300, height: 200),
+      CGSize(width: 268, height: 300),
+    ]
+
+    let sizes = applied(requests)
+
+    for (previous, next) in zip(sizes, sizes.dropFirst()) {
+      XCTAssertGreaterThanOrEqual(next.width, previous.width)
+      XCTAssertGreaterThanOrEqual(next.height, previous.height)
+    }
+    // A shrink is never applied, so a retired size is never requested again.
+    XCTAssertEqual(sizes.last, CGSize(width: 300, height: 300))
+  }
+
+  func testGrowingOnOneAxisKeepsTheOther() {
+    // Growing only the axis that asked would leave the panel at a size that is
+    // not larger than its predecessor on every axis — and the head of the cache
+    // could then still match a later request.
+    let sizes = applied([
+      CGSize(width: 268, height: 300),
+      CGSize(width: 400, height: 120),
+    ])
+
+    XCTAssertEqual(sizes[1], CGSize(width: 400, height: 300))
+  }
+
+  func testAnUnchangedSizeIsAMove() {
+    XCTAssertEqual(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: CGSize(width: 268, height: 237),
+        highWater: CGSize(width: 268, height: 237),
+        scale: 2, renderedScale: 2),
+      .move)
+  }
+
+  func testAFirstShowMaySizeFreely() {
+    XCTAssertEqual(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: CGSize(width: 268, height: 237),
+        highWater: nil, scale: 2, renderedScale: nil),
+      .grow(CGSize(width: 268, height: 237)))
+  }
+
+  func testASubPointDifferenceIsNotAResize() {
+    // A measurement that wobbles by a fraction of a point between frames must
+    // not drive the panel through a size at all.
+    XCTAssertEqual(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: CGSize(width: 268, height: 237.2),
+        highWater: CGSize(width: 268, height: 237),
+        scale: 2, renderedScale: 2),
+      .move)
+  }
+
+  func testCrossingABackingScaleBoundaryIsARebuild() {
+    // The point size is unchanged and the pixel size is not, so the history
+    // says nothing about the new scale. The honest limit of the rule: this is
+    // reported, not prevented.
+    XCTAssertEqual(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: CGSize(width: 360, height: 46),
+        highWater: CGSize(width: 360, height: 46),
+        scale: 1, renderedScale: 2),
+      .rebuild(CGSize(width: 360, height: 46)))
+  }
+
+  func testAnUndrawableRequestNeverReachesAPanel() {
+    XCTAssertEqual(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: CGSize(width: 0, height: 0),
+        highWater: CGSize(width: 268, height: 237),
+        scale: 2, renderedScale: 2),
+      .hold(CGSize(width: 268, height: 237)))
+  }
+
+  // MARK: - the chevron closes what it opened (§33.4)
+
+  /// The three windows, kept alive for the whole test.
+  ///
+  /// `ObjectIdentifier(NSObject())` on a temporary is not a distinct identity:
+  /// the object dies at the end of the expression and the next allocation can
+  /// reuse the address.
+  private func windows() -> (menu: NSObject, strip: NSObject, other: NSObject) {
+    (NSObject(), NSObject(), NSObject())
+  }
+
+  func testAClickOnTheStripIsNotOutsideTheMenu() {
+    // The strip is the sheet's own window furniture. Treating it as outside
+    // dismissed the sheet on mouse-down, so the chevron's tap on mouse-up found
+    // nothing open and opened it again — a button that only ever opens.
+    let w = windows()
+
+    XCTAssertFalse(
+      OverlayPlacementGeometry.menuDismissal(
+        forEventWindow: ObjectIdentifier(w.strip),
+        menu: ObjectIdentifier(w.menu),
+        strip: ObjectIdentifier(w.strip)))
+  }
+
+  func testAClickInTheMenuIsNotOutsideIt() {
+    let w = windows()
+    XCTAssertFalse(
+      OverlayPlacementGeometry.menuDismissal(
+        forEventWindow: ObjectIdentifier(w.menu),
+        menu: ObjectIdentifier(w.menu),
+        strip: nil))
+  }
+
+  func testEverythingElseCloses() {
+    let w = windows()
+
+    XCTAssertTrue(
+      OverlayPlacementGeometry.menuDismissal(
+        forEventWindow: ObjectIdentifier(w.other),
+        menu: ObjectIdentifier(w.menu),
+        strip: ObjectIdentifier(w.strip)))
+    XCTAssertTrue(
+      OverlayPlacementGeometry.menuDismissal(
+        forEventWindow: nil,
+        menu: ObjectIdentifier(w.menu),
+        strip: ObjectIdentifier(w.strip)),
+      "no window at all is a click somewhere else entirely")
+  }
 }

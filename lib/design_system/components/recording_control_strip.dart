@@ -274,8 +274,17 @@ class _MoveHandleState extends State<_MoveHandle> {
         _requested = true;
         widget.onMove!();
       },
-      onPointerUp: (_) => _origin = null,
-      onPointerCancel: (_) => _origin = null,
+      // The latch clears with the gesture. It is the host that decides whether
+      // a drag actually starts, and a request it declined must not outlive the
+      // press that made it.
+      onPointerUp: (_) {
+        _origin = null;
+        _requested = false;
+      },
+      onPointerCancel: (_) {
+        _origin = null;
+        _requested = false;
+      },
       child: MouseRegion(
         cursor: SystemMouseCursors.grab,
         child: const SizedBox.expand(),

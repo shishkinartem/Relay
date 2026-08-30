@@ -76,6 +76,124 @@ public enum OverlayPlacementGeometry {
     ].joined(separator: "/")
   }
 
+  /// What may be done to a panel that hosts a Flutter view, given where it has
+  /// already been.
+  ///
+  /// **A panel's rendered size, in physical pixels, is non-decreasing for the
+  /// lifetime of its view, and never returns to a value it has held before.**
+  ///
+  /// That is not tidiness; it is the only rule that makes flutter/flutter#185394
+  /// unreachable, and this project has crashed on it twice. The engine's
+  /// `FlutterBackBufferCache` decides whether to purge by comparing the request
+  /// against `_surfaces.firstObject` — the *oldest* entry — and then hands back
+  /// the *youngest* free surface with no size check at all. So a cache holding
+  /// two sizes whose oldest entry matches the request returns a surface of the
+  /// other size; the render target built from it has no colour attachment, and
+  /// the raster thread reads a null texture.
+  ///
+  /// Why non-decreasing is sufficient: a wrong-sized surface needs the head to
+  /// equal the request *and* a younger entry to differ. Entries are appended in
+  /// render order, so a younger entry rendered under a non-decreasing sequence
+  /// is at least as large as the head. If it differs it is larger — which means
+  /// a larger render already happened, so this request is a shrink. Under the
+  /// rule there are no shrinks, so the state cannot be reached.
+  ///
+  /// Pixels, not points: the cache is keyed by the surface's pixel size, so a
+  /// panel crossing to a display with a different backing scale changes size
+  /// without changing a single point. That case is the honest limit of this —
+  /// the system imposes it and we can only rebuild, which is why [rebuild] is
+  /// one of the answers.
+  public enum PanelSizeAction: Equatable {
+    /// The size is unchanged: move the window and touch nothing else.
+    case move
+    /// Larger than anything this panel has rendered. Safe, and the request is
+    /// applied as asked.
+    case grow(CGSize)
+    /// A shrink, or a size seen before. The frame is applied at the high-water
+    /// size so the surface cache is never asked for a size it has retired.
+    case hold(CGSize)
+    /// The size cannot be honoured without the view being rebuilt — the backing
+    /// scale changed under us, so the pixel history no longer applies.
+    case rebuild(CGSize)
+  }
+
+  /// Resolves a requested size against what this panel has already rendered.
+  ///
+  /// [highWater] and [requested] are **points**; [scale] and [renderedScale] are
+  /// backing scale factors. A `nil` [highWater] is a panel that has not rendered
+  /// yet, which may be sized freely.
+  public static func panelSizeAction(
+    requested: CGSize,
+    highWater: CGSize?,
+    scale: CGFloat,
+    renderedScale: CGFloat?
+  ) -> PanelSizeAction {
+    guard isDrawable(requested) else {
+      return highWater.map { .hold($0) } ?? .grow(CGSize(width: 1, height: 1))
+    }
+    guard let highWater, let renderedScale else {
+      return .grow(requested)
+    }
+    if scale != renderedScale {
+      // The pixel history was measured at another scale and says nothing about
+      // this one. Only a rebuilt view is a clean slate.
+      return .rebuild(requested)
+    }
+    let grows =
+      requested.width > highWater.width + sizeTolerance
+      || requested.height > highWater.height + sizeTolerance
+    if grows {
+      // Grow on both axes together: a panel that grew wider and then taller has
+      // rendered two sizes, and the second is not larger than the first on every
+      // axis, so the head can still match a later request.
+      return .grow(
+        CGSize(
+          width: max(requested.width, highWater.width),
+          height: max(requested.height, highWater.height)))
+    }
+    if needsResize(
+      from: CGRect(origin: .zero, size: highWater),
+      to: CGRect(origin: .zero, size: requested))
+    {
+      return .hold(highWater)
+    }
+    return .move
+  }
+
+  /// The slack `needsResize` already uses, restated so `panelSizeAction` reads
+  /// in one unit.
+  public static let sizeTolerance: CGFloat = 0.5
+
+  /// Whether a click in one of our own windows should close the input menu.
+  ///
+  /// A click in the menu itself obviously should not. Neither should a click on
+  /// the **control strip**, and that is the whole of this decision: the strip is
+  /// where the chevrons are, and treating it as "outside" made the chevron
+  /// unable to close the sheet it had opened. The host dismissed on mouse-down,
+  /// which reaches a local monitor before AppKit dispatches; the application
+  /// then received the chevron's tap on mouse-up, found nothing open, and opened
+  /// it again. From the outside: a button that only ever opens.
+  ///
+  /// Windows reached the same conclusion first — its low-level hook exempts its
+  /// own overlays by hit-testing them — so this is macOS catching up rather than
+  /// a new rule.
+  ///
+  /// Everything else closes it, including the camera preview: the preview raises
+  /// no command, so nothing on the application side would close the sheet for it.
+  public static func menuDismissal(
+    forEventWindow eventWindow: ObjectIdentifier?,
+    menu: ObjectIdentifier,
+    strip: ObjectIdentifier?
+  ) -> Bool {
+    guard let eventWindow else {
+      // No window at all is a click somewhere else entirely.
+      return true
+    }
+    if eventWindow == menu { return false }
+    if let strip, eventWindow == strip { return false }
+    return true
+  }
+
   /// Whether a size can be given to a window that hosts a rendering surface.
   ///
   /// Zero, negative and non-finite are all rejected together: each of them

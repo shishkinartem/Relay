@@ -101,6 +101,11 @@ class _InputMenuWindowState extends State<InputMenuWindow>
   Widget build(BuildContext context) {
     WidgetsBinding.instance.addPostFrameCallback(_reportSize);
     return RelayTheme(
+      // No ground. The window is never shrunk — a panel driven back to a size it
+      // has already rendered can be handed a surface of the wrong size and
+      // crash the raster thread — so a short sheet leaves surplus below it. The
+      // sheet paints its own box; everything around it is the user's screen.
+      ground: null,
       child: Shortcuts(
         shortcuts: const <ShortcutActivator, Intent>{
           SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
@@ -114,34 +119,47 @@ class _InputMenuWindowState extends State<InputMenuWindow>
               },
             ),
           },
-          child: Align(
-            alignment: Alignment.topLeft,
-            // Measured at its natural size, not at the window's: the window is
-            // sized from what this reports, and measuring inside it would let
-            // the two clamp each other at the host's first estimate.
-            child: OverflowBox(
+          // A press in that surplus dismisses. An invisible region that
+          // silently ate clicks would be worse than the resize it replaced:
+          // this window floats over whatever the user is recording.
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _client.dismissInputMenu(),
+            child: Align(
               alignment: Alignment.topLeft,
-              minWidth: 0,
-              maxWidth: double.infinity,
-              minHeight: 0,
-              maxHeight: double.infinity,
-              child: InputMenuSheet(
-                key: _menuKey,
-                state: _state,
-                onChoose: (InputMenuItem item) => _client.chooseInputDevice(
-                  _state.kind,
-                  deviceId: item.id,
-                  // The `Off` row is the one entry with neither an id nor a
-                  // device behind it; the application turns it into the same
-                  // toggle the strip's own button raises.
-                  off: item.id == null && item.label.endsWith('off'),
+              // Measured at its natural size, not at the window's: the window is
+              // sized from what this reports, and measuring inside it would let
+              // the two clamp each other at the host's first estimate.
+              child: OverflowBox(
+                alignment: Alignment.topLeft,
+                minWidth: 0,
+                maxWidth: double.infinity,
+                minHeight: 0,
+                maxHeight: double.infinity,
+                // Absorbs its own presses so the dismissal above never sees a
+                // click that landed on the sheet.
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (_) {},
+                  child: InputMenuSheet(
+                    key: _menuKey,
+                    state: _state,
+                    onChoose: (InputMenuItem item) => _client.chooseInputDevice(
+                      _state.kind,
+                      deviceId: item.id,
+                      // The `Off` row is the one entry with neither an id nor a
+                      // device behind it; the application turns it into the same
+                      // toggle the strip's own button raises.
+                      off: item.id == null && item.label.endsWith('off'),
+                    ),
+                    onChoosePreset: (CameraPipPreset preset) =>
+                        _client.chooseCameraPreset(_state.kind, preset),
+                    onChooseCorner: (CameraOverlayCorner corner) =>
+                        _client.chooseCameraCorner(_state.kind, corner),
+                    onResetPosition: () =>
+                        _client.resetCameraPipPosition(_state.kind),
+                  ),
                 ),
-                onChoosePreset: (CameraPipPreset preset) =>
-                    _client.chooseCameraPreset(_state.kind, preset),
-                onChooseCorner: (CameraOverlayCorner corner) =>
-                    _client.chooseCameraCorner(_state.kind, corner),
-                onResetPosition: () =>
-                    _client.resetCameraPipPosition(_state.kind),
               ),
             ),
           ),
