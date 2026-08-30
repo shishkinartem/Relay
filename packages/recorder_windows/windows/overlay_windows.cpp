@@ -806,12 +806,20 @@ void OverlayWindows::UpdateCameraPreview(bool mirrored, bool matches_composited_
       flutter::EncodableValue(matches_composited_pip);
   state[flutter::EncodableValue("aspectRatio")] =
       flutter::EncodableValue(draw.aspect_ratio);
+  // The shape of the box the picture goes in, which is the tile's in both
+  // modes. In display mode it equals aspectRatio because the window IS the
+  // tile; in window mode the texture is the whole camera frame and this is what
+  // lets a captioned panel show the tile's shape without becoming it.
+  state[flutter::EncodableValue("pipAspectRatio")] =
+      flutter::EncodableValue(draw.pip_aspect_ratio);
   // The crop and the mask travel with the shape, because the preview has to
   // draw what the compositor draws: design 1p promises they are the same
   // object, and a letterboxed rectangle on screen with a cropped circle in the
-  // file is the defect that promise exists to prevent (spec 33.5). Resolved by
-  // the host — ResolveCameraPreviewDraw — because Dart has neither the camera's
-  // shape nor the encoder canvas to work them out from.
+  // file is the defect that promise exists to prevent (spec 33.5). They travel
+  // in BOTH modes — the compositor crops whatever the source is, so a window
+  // recording showed one picture for all three presets while the file differed.
+  // Resolved by the host — ResolveCameraPreviewDraw — because Dart has neither
+  // the camera's shape nor the encoder canvas to work them out from.
   state[flutter::EncodableValue("fit")] =
       flutter::EncodableValue(std::string(CameraPipFitName(draw.fit)));
   state[flutter::EncodableValue("cornerRadiusRatio")] =

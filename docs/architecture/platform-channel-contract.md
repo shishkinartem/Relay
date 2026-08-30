@@ -510,7 +510,7 @@ Native → overlay:
 | Method | Arguments |
 |---|---|
 | `controlStripState` | overlay-state map |
-| `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio, fit, cornerRadiusRatio }` |
+| `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio, pipAspectRatio, fit, cornerRadiusRatio }` |
 
 Overlay → native:
 
@@ -521,6 +521,23 @@ Overlay → native:
 | `beginMove` | — hands the drag to the platform's own window-move loop; a **success with nothing started** on a window that cannot move |
 | `chooseInputDevice` | `{ kind, deviceId, off }` — a row of the input menu was chosen; or `{ kind, preset }` / `{ kind, corner }` / `{ kind, resetPosition }` from the camera sheet, which the host forwards **without** closing the window |
 | `dismissInputMenu` | — Esc, while the menu window happens to hold focus |
+
+**The two aspect ratios are not the same question**, and the keys look
+redundant on macOS only because there the texture happens to be the whole camera
+frame in both modes:
+
+| Key | Means |
+|---|---|
+| `aspectRatio` | the shape of the **texture** being pushed. macOS sends the camera's own frame ratio in both modes, because it never crops the texture. Windows sends the *tile's* in display mode — `PushFrame` has already cropped — and the camera's in window mode |
+| `pipAspectRatio` | the shape of the **box the picture is drawn into**: the tile's, in both modes. Equal to `aspectRatio` in display mode, where the window *is* the tile |
+
+`fit` and `cornerRadiusRatio` carry the preset's crop and mask **in both modes**.
+The compositor has no source-type gate, so a window recording gets the chosen
+preset in the file exactly as a display recording does; a preview that ignored
+them in window mode drew one picture for all three presets while the file
+differed. What the mode decides is which box they are applied to — the whole
+window in display mode, and the picture inside a captioned panel in window mode,
+where the panel keeps its own rectangle and caption (design `1e`).
 
 `command` also carries an optional `anchorX`: the pressed control's centre **in
 the overlay window's own coordinates**. It exists for the chevrons — only

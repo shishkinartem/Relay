@@ -21,11 +21,11 @@ final class CameraPreviewPresentationTests: XCTestCase {
     ])
   }
 
-  // MARK: - display mode: the preview *is* the tile
+  // MARK: - the shape is the tile's, in both modes
 
   func testDisplayModeTakesTheTilesCropAndMask() {
     let presentation = CameraPreviewPresentation.resolve(
-      configuration: circlePreset(), matchesCompositedPip: true)
+      configuration: circlePreset())
 
     XCTAssertEqual(presentation.fit, .cover)
     XCTAssertEqual(presentation.cornerRadiusRatio, 0.5)
@@ -33,44 +33,47 @@ final class CameraPreviewPresentationTests: XCTestCase {
 
   func testTheDefaultPresetStillNeverCrops() {
     let presentation = CameraPreviewPresentation.resolve(
-      configuration: CameraOverlayConfiguration(), matchesCompositedPip: true)
+      configuration: CameraOverlayConfiguration())
 
     XCTAssertEqual(presentation.fit, .contain)
     XCTAssertEqual(presentation.cornerRadiusRatio, 0)
   }
 
-  // MARK: - window mode: the preview is not the tile
-
-  func testWindowModeLetterboxesWhateverThePresetSays() {
+  /// This asserted the opposite until 2026-08-30, on the reasoning that the
+  /// window-mode preview is a separate captioned object and not the tile.
+  ///
+  /// The premise is right and the conclusion was wrong: design `1e` constrains
+  /// the *panel*, and the compositor has no source-type gate — a window
+  /// recording gets the circle in the file exactly as a display recording does.
+  /// So all three presets looked identical on screen while the MP4 differed,
+  /// and a user who chose `Circle` by name could not see what they had chosen.
+  func testWindowModeCarriesThePresetsCropAndMaskToo() {
     let presentation = CameraPreviewPresentation.resolve(
-      configuration: circlePreset(), matchesCompositedPip: false)
+      configuration: circlePreset())
 
-    XCTAssertEqual(presentation.fit, .contain)
-    XCTAssertEqual(presentation.cornerRadiusRatio, 0)
+    XCTAssertEqual(presentation.fit, .cover)
+    XCTAssertEqual(presentation.cornerRadiusRatio, 0.5)
   }
 
-  func testWindowModeIsUnchangedByAnyConfiguredCornerRadius() {
+  /// The mask is applied to the picture, never to the window: what differs
+  /// between the modes is the box, which is why the mode is no longer a
+  /// parameter here at all.
+  func testTheModeIsNotPartOfThisDecision() {
     var overlay = CameraOverlayConfiguration()
     overlay.cornerRadiusRatio = 0.25
 
-    let presentation = CameraPreviewPresentation.resolve(
-      configuration: overlay, matchesCompositedPip: false)
-
-    XCTAssertEqual(presentation, CameraPreviewPresentation.letterboxed)
+    XCTAssertEqual(
+      CameraPreviewPresentation.resolve(configuration: overlay),
+      CameraPreviewPresentation(fit: .contain, cornerRadiusRatio: 0.25))
   }
 
   // MARK: - no tile at all
 
-  func testNoConfigurationLetterboxesInEitherMode() {
-    // `matchesCompositedPip` true with no configuration is the shape the
-    // contract forbids — the tile is what the mode is *for* — but a host with
-    // nothing to resolve must still draw the whole frame rather than guess a
-    // crop.
-    for mode in [true, false] {
-      XCTAssertEqual(
-        CameraPreviewPresentation.resolve(
-          configuration: nil, matchesCompositedPip: mode),
-        CameraPreviewPresentation.letterboxed)
-    }
+  func testNoConfigurationLetterboxes() {
+    // A host with nothing to resolve must draw the whole frame rather than
+    // guess a crop.
+    XCTAssertEqual(
+      CameraPreviewPresentation.resolve(configuration: nil),
+      CameraPreviewPresentation.letterboxed)
   }
 }

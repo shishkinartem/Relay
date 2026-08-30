@@ -2,7 +2,16 @@ import AppKit
 import CoreVideo
 import FlutterMacOS
 import Foundation
+import OSLog
 import RecorderCore
+
+/// The overlay windows' own log.
+///
+/// `os.Logger` rather than `print`: these windows misbehave while a recording
+/// is running, which is exactly when nobody is watching a console, and the
+/// unified log keeps what happened until someone asks. Nothing here logs a
+/// device name, a file path or anything else that is the user's (§secrets).
+let overlayLog = Logger(subsystem: "com.relay.relay", category: "overlay")
 
 /// The camera preview's frames, exposed to the preview engine as a texture.
 ///
@@ -75,6 +84,18 @@ final class OverlayWindowController {
   private var menuEngine: FlutterEngine?
   private var menuChannel: FlutterMethodChannel?
   private var menuPanel: NSPanel?
+
+  /// What each shape of sheet measured, and the shape currently on screen.
+  ///
+  /// Keyed by `OverlayPlacementGeometry.menuContentKey`, so a sheet is only ever
+  /// corrected the first time its shape is seen — see `showInputMenu`. Not
+  /// cleared between sessions: a measurement is a fact about the design and the
+  /// system's text metrics, and neither changes when a recording stops.
+  private var menuMeasuredSizes: [String: NSSize] = [:]
+  private var menuContentKey: String?
+
+  /// The one-shot mouse-up watch each dragged panel has outstanding.
+  private var dragEndMonitors: [ObjectIdentifier: Any] = [:]
 
   /// The tile, and what the camera behind it produces.
   ///
@@ -194,6 +215,10 @@ final class OverlayWindowController {
     // A monitor outlives the object that installed it; one left behind would
     // call into a freed controller on the next click anywhere on the machine.
     endMenuDismissWatch()
+    for monitor in dragEndMonitors.values {
+      NSEvent.removeMonitor(monitor)
+    }
+    dragEndMonitors.removeAll()
   }
 
   /// Raised by the control strip and forwarded to the application engine.
@@ -316,6 +341,10 @@ final class OverlayWindowController {
     // The sheet closes with the session, and with the window it is anchored to
     // (§33.7).
     dismissInputMenu()
+    // A drag that was still outstanding has nothing left to settle: the window
+    // it belonged to is going away, and the position it would persist is the
+    // one the session already read.
+    if let panel = stripPanel { endDragWatch(for: panel) }
     stripPanel?.orderOut(nil)
     // The strip's engine, its widget and its last rendered frame all outlive the
     // session, so forgetting the snapshot here is not enough: nothing would then
@@ -388,17 +417,25 @@ final class OverlayWindowController {
     // The crop and the mask travel with the shape, because the preview has to
     // draw what the compositor draws: design `1p` promises they are the same
     // object, and a circle on screen with a square in the file is the defect
-    // that promise exists to prevent (§33.5). In window mode there is no tile,
-    // so the captioned preview letterboxes the whole frame as it always has —
-    // which is `CameraPreviewPresentation`'s whole job, and why the
-    // configuration is read through it rather than straight into the map.
+    // that promise exists to prevent (§33.5). In window mode the tile is still
+    // composited into the file with the same preset, so the shape travels there
+    // too — applied to the picture inside the captioned panel rather than to
+    // the panel itself, which stays a rectangle with its caption (design `1e`).
+    //
+    // Two aspect ratios, deliberately: `aspectRatio` is the shape of the
+    // *texture* being pushed, and `pipAspectRatio` the shape of the *box* the
+    // picture is drawn into. They are equal in display mode, where the window
+    // is the tile; in window mode the texture is the whole camera frame and the
+    // box is the tile's — 1:1 for Square and Circle.
     let presentation = CameraPreviewPresentation.resolve(
-      configuration: configuration, matchesCompositedPip: matchesCompositedPip)
+      configuration: configuration)
     lastPreviewState = [
       "textureId": previewTextureId as Any,
       "mirrored": mirrored,
       "matchesCompositedPip": matchesCompositedPip,
       "aspectRatio": source.aspectRatio,
+      "pipAspectRatio": configuration?.effectiveAspectRatio(
+        sourceAspectRatio: source.aspectRatio) ?? source.aspectRatio,
       "fit": presentation.fit.rawValue,
       "cornerRadiusRatio": presentation.cornerRadiusRatio,
     ]
@@ -406,6 +443,7 @@ final class OverlayWindowController {
   }
 
   func hideCameraPreview() {
+    if let panel = previewPanel { endDragWatch(for: panel) }
     previewPanel?.orderOut(nil)
     previewOverlay = nil
     previewMatchesPip = false
@@ -440,9 +478,12 @@ final class OverlayWindowController {
     // the tile (design `1e`), so a preset chosen for the file must not crop or
     // mask the captioned window that stands for it (§33.5).
     let presentation = CameraPreviewPresentation.resolve(
-      configuration: previewOverlay, matchesCompositedPip: previewMatchesPip)
+      configuration: previewOverlay)
     lastPreviewState["mirrored"] = previewOverlay?.mirrorPreview ?? true
     lastPreviewState["aspectRatio"] = source.aspectRatio
+    lastPreviewState["pipAspectRatio"] =
+      previewOverlay?.effectiveAspectRatio(sourceAspectRatio: source.aspectRatio)
+      ?? source.aspectRatio
     lastPreviewState["fit"] = presentation.fit.rawValue
     lastPreviewState["cornerRadiusRatio"] = presentation.cornerRadiusRatio
     previewChannel?.invokeMethod("cameraPreviewState", arguments: lastPreviewState)
@@ -527,7 +568,15 @@ final class OverlayWindowController {
     // The click that started this is outside the sheet, whatever else it is.
     dismissInputMenu()
     panel.performDrag(with: event)
-    settlePreviewAfterMove(panel)
+    // At the end of the drag, not at the start of it — see `beginStripMove`.
+    // Here the cost of settling early was worse than a stale position: the
+    // preview *is* the picture-in-picture in display mode, and
+    // `settlePreviewAfterMove` reports where it landed to the compositor. Run
+    // at drag start it reported the tile's position *before* the drag, so the
+    // file did not follow the user's drop.
+    watchForDragEnd(of: panel) { [weak self] in
+      self?.settlePreviewAfterMove(panel)
+    }
   }
 
   /// Clamps and snaps wherever the drag left the preview, and says where.
@@ -609,16 +658,38 @@ final class OverlayWindowController {
     openMenuKind = MediaDeviceKind(name: state["kind"] as? String)
 
     menuGap = placement["margin"] as? Double ?? menuGap
-    // The requested size, not a remembered one. The strip's rule — a
-    // measurement always wins — is right for a window whose content never
-    // changes shape; a menu's does, on every show, so last time's height would
-    // be the wrong one for this list. The engine measures itself and corrects
-    // the window a turn later, as the strip's does.
+    // A remembered measurement, per *shape* of sheet.
+    //
+    // The strip's rule — a measurement always wins — was rejected here on the
+    // grounds that a menu's content changes on every show, so last time's
+    // height would be the wrong one for this list. That reasoning is right and
+    // the conclusion was wrong: the answer is to remember a height per content
+    // shape, not to give up remembering. Opening at an estimate and correcting
+    // to the measurement drives the panel through two sizes, and a panel driven
+    // back to a size it recently left can be handed a surface of the other size
+    // out of the engine's back-buffer cache — a render target with no colour
+    // attachment, and a null texture read on the raster thread
+    // (flutter/flutter#185394). That is a hard crash, and this project has
+    // taken it. `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md`
+    // records the same fault on the strip.
+    //
+    // So the first sheet of a given shape is still corrected once; every later
+    // one of that shape opens at the size that correction produced, and the
+    // correction becomes a no-op.
+    menuContentKey = OverlayPlacementGeometry.menuContentKey(
+      kind: state["kind"] as? String,
+      rowCount: (state["items"] as? [Any])?.count ?? 0,
+      loading: state["loading"] as? Bool ?? false,
+      hasLevel: state["level"] != nil && !(state["level"] is NSNull),
+      hasNotice: state["notice"] != nil && !(state["notice"] is NSNull),
+      presetCount: (state["presets"] as? [Any])?.count ?? 0,
+      cornerCount: (state["corners"] as? [Any])?.count ?? 0,
+      canResetPosition: state["canResetPosition"] as? Bool ?? false)
     let size = OverlayPlacementGeometry.effectiveSize(
       requested: NSSize(
         width: placement["width"] as? Double ?? 268,
         height: placement["height"] as? Double ?? 120),
-      measured: nil)
+      measured: menuContentKey.flatMap { menuMeasuredSizes[$0] })
     let wasOnScreen = menuPanel?.isVisible ?? false
     let frame = menuFrame(size: size, strip: strip)
     let panel =
@@ -722,6 +793,12 @@ final class OverlayWindowController {
   /// menu is re-placed as well as resized, because a taller list may no longer
   /// fit under the strip and has to flip above it (§33.7).
   private func scheduleMenuResize(to size: NSSize) {
+    // Recorded whether or not the panel is resized: this is the height a sheet
+    // of this shape measures, and the next one of that shape opens at it rather
+    // than being corrected into it.
+    if let key = menuContentKey {
+      menuMeasuredSizes[key] = size
+    }
     guard pendingMenuSize == nil else {
       pendingMenuSize = size
       return
@@ -1058,9 +1135,17 @@ final class OverlayWindowController {
   /// already tracks the pointer at the display's refresh rate and ends the drag
   /// on mouse-up, and `relay/overlay/view` is a command channel (§3).
   ///
-  /// `performDrag(with:)` **blocks until the drag ends** — it runs an event
-  /// tracking loop of its own — so the snap and the clamp below run once the
-  /// user has let go, which is exactly when §33.3 asks for them.
+  /// **`performDrag(with:)` does not block.** It was written here as though it
+  /// did, and on macOS 26 it does not: the call posts a single send-only mach
+  /// message to the window server and returns in microseconds — the drag is
+  /// tracked server-side and the application learns it ended through a local
+  /// event monitor. Settling immediately after it therefore snapped, clamped
+  /// and *persisted* the position the strip had before the user moved it, and
+  /// wrote a frame into a drag the server was already running.
+  ///
+  /// So the settle waits for the mouse-up that ends the drag. §33.3's snap and
+  /// clamp are about where the strip is **let go**, and until this there was no
+  /// moment in the code that corresponded to that.
   private func beginStripMove() {
     guard let panel = stripPanel, panel.isVisible else { return }
     // The strip moving closes the sheet (§33.7). Before the drag, not after
@@ -1074,9 +1159,59 @@ final class OverlayWindowController {
     // into a strip that follows the pointer with no button down.
     guard let event = NSApp.currentEvent,
       event.type == .leftMouseDown || event.type == .leftMouseDragged
-    else { return }
+    else {
+      // Not a failure worth an error, but not nothing either: the Dart side
+      // latches "a drag was requested" for the whole gesture, so a dropped
+      // request reads to the user as a strip that will not move until they
+      // release and press again. Logged so the next report about it arrives
+      // with the event type that caused it.
+      let rejected = NSApp.currentEvent.map { String(describing: $0.type) } ?? "none"
+      overlayLog.info("beginMove dropped: currentEvent is \(rejected, privacy: .public)")
+      return
+    }
     panel.performDrag(with: event)
-    settleStripAfterMove(panel)
+    watchForDragEnd(of: panel) { [weak self] in
+      self?.settleStripAfterMove(panel)
+    }
+  }
+
+  /// Runs `settle` once, when the drag the window server is running ends.
+  ///
+  /// A local monitor rather than a notification: `NSWindow.didMoveNotification`
+  /// fires on every frame of the drag, and the settle has to happen exactly
+  /// once, at the end. AppKit itself ends its own drag on the same event.
+  ///
+  /// Exactly one watch is outstanding per panel — a second `beginMove` replaces
+  /// it rather than stacking, so a gesture that somehow starts twice cannot
+  /// settle twice.
+  private func watchForDragEnd(of panel: NSPanel, settle: @escaping () -> Void) {
+    endDragWatch(for: panel)
+    let key = ObjectIdentifier(panel)
+    let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) {
+      [weak self] event in
+      guard let self else { return event }
+      self.endDragWatch(for: panel)
+      // After the monitor is removed, so a settle that somehow raises another
+      // mouse-up cannot re-enter this.
+      settle()
+      return event
+    }
+    if let monitor {
+      dragEndMonitors[key] = monitor
+    } else {
+      // No monitor, no end-of-drag: settling now is wrong, but never settling
+      // at all would leave the strip unclamped and its stored position stale.
+      // The immediate settle is what this code did before, so it is the safe
+      // fallback rather than a new risk.
+      settle()
+    }
+  }
+
+  private func endDragWatch(for panel: NSPanel) {
+    let key = ObjectIdentifier(panel)
+    if let monitor = dragEndMonitors.removeValue(forKey: key) {
+      NSEvent.removeMonitor(monitor)
+    }
   }
 
   /// Snaps and clamps wherever the drag left the strip.

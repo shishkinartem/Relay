@@ -500,6 +500,7 @@ class CameraPreviewOverlayState {
     this.aspectRatio = 16 / 9,
     this.fit = CameraPipFit.contain,
     this.cornerRadiusRatio = 0,
+    this.pipAspectRatio,
   });
 
   final int? textureId;
@@ -515,9 +516,20 @@ class CameraPreviewOverlayState {
   final double aspectRatio;
 
   /// The preset's crop and mask, so the preview draws what the compositor draws
-  /// (§33.5). `1p` promises they are the same object.
+  /// (§33.5). `1p` promises they are the same object, and in window mode the
+  /// file still gets the preset — so the shape travels in both modes.
   final CameraPipFit fit;
   final double cornerRadiusRatio;
+
+  /// The shape of the **box the picture is drawn into**, where [aspectRatio] is
+  /// the shape of the **texture being pushed**.
+  ///
+  /// Equal in display mode, where the window is the tile. In window mode the
+  /// texture is the whole camera frame while the box is the tile's — 1:1 for
+  /// Square and Circle — so a captioned panel can show the shape the file gets
+  /// without becoming that shape itself (design `1e`). Null falls back to
+  /// [aspectRatio], which is what a host that has not learned the key sends.
+  final double? pipAspectRatio;
 
   Map<String, Object?> toMap() => <String, Object?>{
     'textureId': textureId,
@@ -526,6 +538,7 @@ class CameraPreviewOverlayState {
     'aspectRatio': aspectRatio,
     'fit': fit.name,
     'cornerRadiusRatio': cornerRadiusRatio,
+    'pipAspectRatio': pipAspectRatio,
   };
 
   static CameraPreviewOverlayState fromMap(Map<String, Object?> map) =>
@@ -538,6 +551,10 @@ class CameraPreviewOverlayState {
         cornerRadiusRatio: (map['cornerRadiusRatio'] as num? ?? 0)
             .toDouble()
             .clamp(0.0, 0.5),
+        pipAspectRatio: switch (map['pipAspectRatio']) {
+          final num value when value > 0 && value.isFinite => value.toDouble(),
+          _ => null,
+        },
       );
 }
 

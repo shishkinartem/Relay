@@ -539,4 +539,95 @@ final class OverlayPlacementGeometryTests: XCTestCase {
     XCTAssertGreaterThanOrEqual(frame.minY, visible.minY - 0.001)
     XCTAssertLessThanOrEqual(frame.maxY, visible.maxY + 0.001)
   }
+
+  // MARK: - the menu's content key (flutter/flutter#185394)
+
+  /// The sheet is opened at an estimate and corrected to its measurement. Doing
+  /// that twice — to a size, then back to one the panel recently left — can hand
+  /// the engine a surface of the wrong size and crash the raster thread. The key
+  /// is what lets the host open the second sheet of a shape at the size the
+  /// first one measured, so there is nothing to correct.
+  func testTheKeyChangesWithEverySectionThatChangesTheHeight() {
+    let base = OverlayPlacementGeometry.menuContentKey(
+      kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
+      hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false)
+
+    let variants: [String] = [
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "camera", rowCount: 4, loading: false, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 5, loading: false, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: true, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: true,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
+        hasNotice: true, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
+        hasNotice: false, presetCount: 3, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 4, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: true),
+    ]
+
+    for variant in variants {
+      XCTAssertNotEqual(base, variant)
+    }
+    XCTAssertEqual(Set(variants).count, variants.count)
+  }
+
+  /// Two sheets that lay out to the same height share a key, or the remembering
+  /// buys nothing: a device renamed, or one microphone swapped for another, is
+  /// the same sheet as far as the window is concerned.
+  func testTheKeyIsStableAcrossContentThatDoesNotChangeTheHeight() {
+    XCTAssertEqual(
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: true,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 4, loading: false, hasLevel: true,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false))
+  }
+
+  /// A loading sheet is one row whatever the list will hold, so it must not
+  /// share a key with an empty one — they are different sheets that both
+  /// happen to draw a single row today.
+  func testALoadingSheetIsNotAnEmptyOne() {
+    XCTAssertNotEqual(
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 0, loading: true, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+      OverlayPlacementGeometry.menuContentKey(
+        kind: "microphone", rowCount: 0, loading: false, hasLevel: false,
+        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false))
+  }
+
+  /// The executable form of "a panel is never driven back to a size it left":
+  /// with a remembered measurement the sheet opens at it, and the correction
+  /// that follows has nothing to change.
+  func testASheetOfARememberedShapeOpensAtTheSizeItMeasured() {
+    let estimate = CGSize(width: 268, height: 210)
+    let measured = CGSize(width: 268, height: 219)
+
+    let first = OverlayPlacementGeometry.effectiveSize(
+      requested: estimate, measured: nil)
+    XCTAssertEqual(first, estimate)
+
+    let second = OverlayPlacementGeometry.effectiveSize(
+      requested: estimate, measured: measured)
+    XCTAssertEqual(second, measured)
+    XCTAssertFalse(
+      OverlayPlacementGeometry.needsResize(
+        from: CGRect(origin: .zero, size: second),
+        to: CGRect(origin: .zero, size: measured)))
+  }
 }

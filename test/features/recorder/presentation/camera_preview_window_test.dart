@@ -32,9 +32,13 @@ void main() {
     client.push(
       CameraPreviewOverlayState(
         matchesCompositedPip: matchesCompositedPip,
+        // The Circle preset, in both modes — the host sends the tile's shape
+        // whatever the source is, because the file gets it whatever the source
+        // is. What the mode decides is the box it is applied to.
         aspectRatio: 16 / 9,
-        fit: matchesCompositedPip ? CameraPipFit.cover : CameraPipFit.contain,
-        cornerRadiusRatio: matchesCompositedPip ? 0.5 : 0,
+        pipAspectRatio: 1,
+        fit: CameraPipFit.cover,
+        cornerRadiusRatio: 0.5,
       ),
     );
     // The snapshot crosses a broadcast stream, so it lands in a microtask: one
@@ -49,6 +53,37 @@ void main() {
     await mount(tester, matchesCompositedPip: true);
 
     expect(tester.widget<RelayTheme>(find.byType(RelayTheme)).ground, isNull);
+  });
+
+  testWidgets('window mode masks the picture and not the panel', (
+    WidgetTester tester,
+  ) async {
+    // §33.5. The tile is composited into the file with the chosen preset
+    // whatever the source is, so the preview has to show that shape — but the
+    // panel stays a captioned rectangle (design `1e`). A circular *window* is
+    // what this replaced, and drawing the whole frame instead made all three
+    // presets look identical while the MP4 differed.
+    await mount(tester, matchesCompositedPip: false);
+
+    expect(find.text('Camera preview'), findsOneWidget);
+    expect(find.byType(BlueprintFrame), findsOneWidget);
+    final Finder clip = find.descendant(
+      of: find.byType(BlueprintFrame),
+      matching: find.byType(ClipRRect),
+    );
+    expect(clip, findsOneWidget);
+    final RenderBox box = tester.renderObject(clip);
+    expect(
+      box.size.width,
+      closeTo(box.size.height, 0.01),
+      reason:
+          'the Circle preset is 1:1, and the picture is drawn at the '
+          'tile’s shape rather than the camera’s',
+    );
+    expect(
+      tester.widget<ClipRRect>(clip).borderRadius,
+      BorderRadius.circular(box.size.width * 0.5),
+    );
   });
 
   testWidgets('window mode keeps its ground', (WidgetTester tester) async {

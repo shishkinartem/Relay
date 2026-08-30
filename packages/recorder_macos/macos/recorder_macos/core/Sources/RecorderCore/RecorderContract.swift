@@ -372,17 +372,23 @@ public struct CameraOverlayConfiguration {
   }
 }
 
-/// What the camera preview window draws — which is the tile's shape only when
-/// the preview *is* the tile (§33.5).
+/// What the camera preview window draws: the tile's shape, in **both** modes
+/// (§33.5).
 ///
-/// In display mode the preview is the picture-in-picture (design `1p`), so the
-/// crop and the mask travel with it: a circle on screen with a square in the
-/// file is the disagreement that promise exists to prevent. In window mode the
-/// preview is a separate captioned object that is deliberately **not** the tile
-/// (design `1e`); it letterboxes the whole camera frame, and a preset chosen
-/// for the *file* must not reach in and mask the window that stands for it. A
-/// circle preset there produced a circular captioned preview of a tile that is
-/// not on screen at all.
+/// This once returned an unmasked, uncropped frame in window mode, reasoning
+/// that the window-mode preview is a separate captioned object and not the tile
+/// (design `1e`), so a preset chosen for the file must not reach in and mask
+/// the window that stands for it. The premise was right and the conclusion was
+/// wrong. `1e` constrains the **panel** — a captioned rectangle, never a
+/// circular window — and says nothing about the picture inside it. Meanwhile
+/// the compositor has no source-type gate at all: a window recording gets the
+/// circle in the file exactly as a display recording does. So all three presets
+/// looked identical on screen while the MP4 differed, and a user who chose
+/// `Circle` by name had no way to see what they had chosen.
+///
+/// The crop and the mask therefore travel in both modes. What differs is where
+/// they are applied: in display mode to the whole window, which *is* the tile;
+/// in window mode to the picture inside a captioned panel that keeps its frame.
 ///
 /// Resolved here rather than at each assignment so `showCameraPreview` and
 /// `updateCameraPreview` cannot answer it differently, and so `swift test`
@@ -398,15 +404,18 @@ public struct CameraPreviewPresentation: Equatable {
   /// Corner radius as a fraction of the preview's width; `0.5` is a circle.
   public let cornerRadiusRatio: Double
 
-  /// The whole frame, unmasked — window mode, and any mode with no tile
-  /// configured at all.
+  /// The whole frame, unmasked — the answer when there is no tile configured at
+  /// all, and so nothing whose shape could be shown.
   public static let letterboxed = CameraPreviewPresentation(
     fit: .contain, cornerRadiusRatio: 0)
 
+  /// [matchesCompositedPip] is deliberately not a parameter any more: the shape
+  /// is the tile's in both modes, and the only thing the mode decides is which
+  /// box it is applied to — the window, or the picture inside a captioned panel.
   public static func resolve(
-    configuration: CameraOverlayConfiguration?, matchesCompositedPip: Bool
+    configuration: CameraOverlayConfiguration?
   ) -> CameraPreviewPresentation {
-    guard matchesCompositedPip, let configuration else { return letterboxed }
+    guard let configuration else { return letterboxed }
     return CameraPreviewPresentation(
       fit: configuration.fit, cornerRadiusRatio: configuration.cornerRadiusRatio)
   }

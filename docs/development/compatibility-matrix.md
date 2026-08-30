@@ -275,6 +275,49 @@ surface), and the circular tile is masked with `SetWindowRgn` instead, so the
 corners are outside the window rather than transparent within it. That has never
 been run.
 
+## The overlay panels and the raster thread
+
+A crash on 2026-08-30 (`EXC_BAD_ACCESS` at `0x0` in
+`impeller::Canvas::SetupRenderPass`, on an overlay engine's raster thread,
+during a recording) traced to an engine defect — flutter/flutter#185394, open,
+no fix. `FlutterBackBufferCache` purges only on a head-size disagreement, so a
+panel driven **A → B → A** can be handed a surface of the other size;
+`TextureMTL::Wrapper` returns a non-null but invalid texture, `SetColorAttachment`
+silently drops it, and the canvas reads a null texture.
+
+The application's part is to never drive a panel back to a size it recently
+left. `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md` established
+that for the control strip; the input menu opted out of it, opening at an
+estimate and being corrected to its measurement on every show. It now remembers
+a measured size per content shape, so only the first sheet of a shape is ever
+corrected.
+
+| | Covered by |
+|---|---|
+| the shape key changes with every section that changes the height | `swift test` — `OverlayPlacementGeometryTests` |
+| a remembered shape needs no resize | `swift test`, same file |
+| the host's estimate matches what the sheet measures | `flutter test test/features/recorder/presentation/input_menu_size_test.dart` — it fails when a section is added to the sheet without a term in the estimate |
+| the panel is actually driven through one size | **nothing** |
+
+The last row cannot be closed here. `swift test` links `RecorderCore` against
+Foundation only; it cannot open an `NSPanel`, host a `FlutterViewController` or
+reach the engine's surface cache. `flutter build macos` compiles and does not
+run. The AppKit half of these windows — `place`, `move`, `performDrag`, the
+mouse-up watch, the back-buffer cache — has no automated coverage on this
+machine and should not be claimed to have any.
+
+Two related facts, both verified by disassembly on macOS 26.6.2 and worth
+keeping because they are not documented anywhere else:
+
+- **`NSWindow.performDrag(with:)` does not block.** It posts one send-only mach
+  message to the window server and returns; the drag runs server-side and the
+  application learns it ended through a local event monitor. Code that settled
+  "after" it was settling at the *start* of the drag.
+- **Flutter's platform-task run-loop source is registered in
+  `kCFRunLoopCommonModes`**, and `NSEventTrackingRunLoopMode` is a common mode —
+  so event tracking does *not* starve the engines. The one mode that does is
+  `_NSMoveTimerRunLoopMode`, which this application never enters.
+
 ## Known gaps
 
 - **Windows is written but not built.** No MSVC toolchain on the development

@@ -342,6 +342,11 @@ struct CameraPreviewDraw {
   // the camera's: in display mode the frame is cropped to the tile before it is
   // uploaded, so the preview draws it at the tile's shape.
   double aspect_ratio = 16.0 / 9.0;
+  // The shape of the BOX the picture is drawn into, where `aspect_ratio` is the
+  // shape of the texture. Equal in display mode, where the window is the tile;
+  // in window mode the texture is the whole camera frame while the box is the
+  // tile's — 1:1 for Square and Circle.
+  double pip_aspect_ratio = 16.0 / 9.0;
   CameraPipFit fit = CameraPipFit::kContain;
   double corner_radius_ratio = 0.0;
 };
@@ -350,10 +355,12 @@ struct CameraPreviewDraw {
 // mode *and* a recorded display that can still be named — not merely the source
 // type, because the two halves have to describe the same picture.
 //
-// In window mode the preview is a separate captioned object that is
-// deliberately not the tile (design 1e): it is handed the frame whole, so it is
-// drawn at the camera's own shape and neither the crop nor the mask applies to
-// it, whatever the configuration says.
+// The preset's crop and mask travel in BOTH modes: the compositor applies them
+// whatever the source is, so a preview that ignored them in window mode showed
+// the same picture for all three presets while the file differed. What the mode
+// decides is which box they are applied to — the whole window in display mode,
+// and the picture inside a captioned panel in window mode, where the panel keeps
+// its own rectangle and caption (design 1e).
 CameraPreviewDraw ResolveCameraPreviewDraw(const CameraOverlayConfig& config,
                                            bool is_tile, const PipDraw& draw,
                                            uint32_t frame_width,

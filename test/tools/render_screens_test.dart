@@ -435,14 +435,42 @@ void main() {
       '1e_camera_preview_window_mode',
       const RelayTheme(
         child: Center(
-          child: SizedBox(
-            width: 200,
-            height: 140,
-            child: CameraPreviewSurface(),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: <Widget>[
+              // §33.5. The panel stays a captioned rectangle — that is what
+              // design `1e` fixes — while the PICTURE inside it shows the
+              // preset the file will get. Drawn without the presets, all three
+              // looked identical here while the MP4 differed.
+              SizedBox(
+                width: 200,
+                height: 140,
+                child: CameraPreviewSurface(feed: _CameraStandIn()),
+              ),
+              SizedBox(
+                width: 200,
+                height: 140,
+                child: CameraPreviewSurface(
+                  fit: CameraPipFit.cover,
+                  pipAspectRatio: 1,
+                  feed: _CameraStandIn(),
+                ),
+              ),
+              SizedBox(
+                width: 200,
+                height: 140,
+                child: CameraPreviewSurface(
+                  fit: CameraPipFit.cover,
+                  cornerRadiusRatio: 0.5,
+                  pipAspectRatio: 1,
+                  feed: _CameraStandIn(),
+                ),
+              ),
+            ],
           ),
         ),
       ),
-      size: const Size(260, 200),
+      size: const Size(700, 200),
     );
     // §33.5. Three tiles over a stand-in desktop, because the thing worth
     // reviewing here is what the window does NOT paint: this preview *is* the

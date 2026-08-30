@@ -134,13 +134,34 @@ class OverlayPresenter implements SessionOverlays {
   );
 
   /// A first guess at the window's size, corrected by the engine's own
-  /// measurement. Too small clips a frame; too large shows dead space for one.
+  /// measurement.
+  ///
+  /// Too small clips a row; too large shows dead space for a frame. Worse than
+  /// either, on macOS: a panel driven to a size and then back to one it recently
+  /// left can be handed a surface of the wrong size out of the engine's
+  /// back-buffer cache, and the render target it builds from that has no colour
+  /// attachment at all — a null dereference on the raster thread
+  /// (flutter/flutter#185394). The host remembers the measured size per content
+  /// shape so a sheet is only ever corrected **once**; this estimate is what
+  /// that first show lands on, and every term it forgets is a correction.
+  ///
+  /// It has one term per section `InputMenuSheet` can lay out. Adding a section
+  /// there without adding a term here is how it came to be ninety points short
+  /// on the camera sheet, and two hundred in window mode.
   @visibleForTesting
   Size estimatedMenuSize(InputMenuOverlayState state) {
     const double header = 30;
     const double row = 30;
-    const double meter = 34;
-    const double notice = 30;
+    // Measured against the sheet itself, not guessed — see
+    // test/features/recorder/presentation/input_menu_size_test.dart, which
+    // fails when a section is added here without a term.
+    const double meter = 50;
+    const double notice = 37;
+    // `Shape and size`: a kicker, a gap and one row of preset tiles.
+    const double presets = 99;
+    // `Position`: a kicker, a gap and two rows of corner tiles.
+    const double corners = 107;
+    const double resetRow = 34;
     final int rows = state.loading || state.items.isEmpty
         ? 1
         : state.items.length;
@@ -149,6 +170,9 @@ class OverlayPresenter implements SessionOverlays {
       header +
           rows * row +
           (state.level == null ? 0 : meter) +
+          (state.presets.isEmpty ? 0 : presets) +
+          (state.corners.isEmpty ? 0 : corners) +
+          (state.canResetPosition ? resetRow : 0) +
           (state.notice == null ? 0 : notice),
     );
   }
@@ -225,7 +249,11 @@ class OverlayPresenter implements SessionOverlays {
     return _overlays.showCameraPreview(
       placement,
       matchesCompositedPip: matchesPip,
-      cameraOverlay: matchesPip ? configuration : null,
+      // Sent in both modes. The tile's shape is what the compositor writes into
+      // the file whatever the source is, so the preview needs it to show the
+      // preset the user chose; withholding it in window mode is what made all
+      // three presets look identical there (§33.5).
+      cameraOverlay: configuration,
     );
   }
 

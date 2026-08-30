@@ -483,10 +483,14 @@ TEST(ResolveCameraPreviewDraw, TheDisplayModePreviewCarriesThePresetsCropAndMask
   EXPECT_NEAR(preview.aspect_ratio, 1.0, 1e-9);
 }
 
-TEST(ResolveCameraPreviewDraw, TheWindowModePreviewDrawsTheFrameWholeAndUncropped) {
-  // Design 1e: a separate captioned object that is deliberately not the tile.
-  // It is handed the frame whole, so neither the crop nor the mask is its to
-  // apply — whatever the configuration says.
+TEST(ResolveCameraPreviewDraw, TheWindowModePreviewCarriesThePresetsShapeToo) {
+  // This asserted the opposite until 2026-08-30, on the reasoning that design
+  // 1e makes the window-mode preview a separate captioned object rather than
+  // the tile. That is true of the PANEL and says nothing about the picture
+  // inside it — and the compositor has no source-type gate, so a window
+  // recording gets the circle in the file exactly as a display recording does.
+  // All three presets therefore looked identical on screen while the MP4
+  // differed, which is the defect spec 33.5 forbids.
   CameraOverlayConfig config;
   config.preset = CameraPipPreset::kCircle;
   config.aspect_ratio = 1.0;
@@ -498,11 +502,32 @@ TEST(ResolveCameraPreviewDraw, TheWindowModePreviewDrawsTheFrameWholeAndUncroppe
   const CameraPreviewDraw preview =
       ResolveCameraPreviewDraw(config, /*is_tile=*/false, draw, 1280, 720);
 
-  EXPECT_EQ(preview.fit, CameraPipFit::kContain);
-  EXPECT_DOUBLE_EQ(preview.corner_radius_ratio, 0);
-  // The camera's own shape. Reporting the tile's — 1.0 here — would squash the
-  // whole frame into a square the preview never received a crop for.
+  EXPECT_EQ(preview.fit, CameraPipFit::kCover);
+  EXPECT_DOUBLE_EQ(preview.corner_radius_ratio, 0.5);
+  // The TEXTURE is the camera's own frame — PushFrame crops for the tile and
+  // nothing else — so reporting the tile's shape here would squash a picture
+  // that never received the crop.
   EXPECT_NEAR(preview.aspect_ratio, 1280.0 / 720.0, 1e-9);
+  // The BOX is the tile's, which is what lets the captioned panel show the
+  // shape the file gets without becoming that shape itself.
+  EXPECT_NEAR(preview.pip_aspect_ratio, 1.0, 1e-9);
+}
+
+TEST(ResolveCameraPreviewDraw, DisplayModeReportsOneShapeForBothBoxAndTexture) {
+  // There the host has already cropped the texture to the tile, so the two
+  // questions have the same answer and Dart has one code path.
+  CameraOverlayConfig config;
+  config.preset = CameraPipPreset::kSquare;
+  config.aspect_ratio = 1.0;
+  config.follows_source_aspect_ratio = false;
+  config.fit = CameraPipFit::kCover;
+
+  const PipDraw draw = ResolvePipDraw(config, kCanvasWidth, kCanvasHeight, 1280, 720);
+  const CameraPreviewDraw preview =
+      ResolveCameraPreviewDraw(config, /*is_tile=*/true, draw, 1280, 720);
+
+  EXPECT_NEAR(preview.aspect_ratio, preview.pip_aspect_ratio, 1e-9);
+  EXPECT_NEAR(preview.pip_aspect_ratio, 1.0, 1e-9);
 }
 
 TEST(ResolveCameraPreviewDraw, TheDefaultPresetCropsNothingAndMasksNothing) {

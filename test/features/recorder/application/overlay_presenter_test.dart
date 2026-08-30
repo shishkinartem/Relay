@@ -58,7 +58,13 @@ void main() {
     // of a frame, and both branches send one — so window mode was reported as
     // display mode and the captioned preview never rendered.
     expect(overlays.cameraPipModes, <bool>[false]);
-    expect(overlays.cameraOverlays.single, isNull);
+    // The tile's configuration is sent here too. The compositor has no
+    // source-type gate — a window recording gets the chosen preset in the file
+    // exactly as a display recording does — so a preview with nothing to
+    // resolve from is a preview that cannot show the shape the user picked
+    // (§33.5). Withholding it here made Camera, Square and Circle identical on
+    // screen while the MP4 differed.
+    expect(overlays.cameraOverlays.single, isNotNull);
     expect(
       overlays.cameraPlacements.single.frame,
       Rect.fromLTWH(

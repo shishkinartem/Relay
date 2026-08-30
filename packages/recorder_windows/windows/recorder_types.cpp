@@ -714,27 +714,43 @@ CameraPreviewDraw ResolveCameraPreviewDraw(const CameraOverlayConfig& config,
                                            uint32_t frame_width,
                                            uint32_t frame_height) {
   CameraPreviewDraw preview;
+  // The preset's crop and mask travel in BOTH modes, because the compositor
+  // applies them in both: a window recording gets the circle in the file
+  // exactly as a display recording does. This once returned an uncropped,
+  // unmasked frame in window mode on the grounds that the captioned preview is
+  // not the tile (design 1e) — which is true of the PANEL and says nothing
+  // about the picture inside it. The result was that Camera, Square and Circle
+  // looked identical on screen while the MP4 differed (spec 33.5).
+  preview.fit = config.fit;
+  preview.corner_radius_ratio =
+      ClampDouble(config.corner_radius_ratio, 0.0, kMaxCornerRadiusRatio);
+
+  // Two ratios, and they are not the same question. `aspect_ratio` is the shape
+  // of the TEXTURE being pushed; `pip_aspect_ratio` is the shape of the BOX the
+  // picture is drawn into.
   if (!is_tile) {
-    // The window-mode preview is handed the frame whole (overlay_windows.cpp's
-    // PushFrame crops for the tile and nothing else), so the shape it draws at
-    // is the camera's own. Reporting the tile's here would squash the picture
-    // by exactly the crop the preview never received — and the preset's crop
-    // and mask are not its to apply at all (design 1e).
+    // Window mode. overlay_windows.cpp's PushFrame crops for the tile and
+    // nothing else, so the texture is the camera's own frame, whole. Reporting
+    // the tile's shape as the texture's would squash the picture by exactly the
+    // crop the preview never received.
     preview.aspect_ratio =
         frame_width > 0 && frame_height > 0
             ? static_cast<double>(frame_width) / static_cast<double>(frame_height)
             // Nothing captured yet: the same configured fallback ResolvePipRect
             // uses, and 16:9 for a fallback that is not a shape.
             : (config.aspect_ratio > 0 ? config.aspect_ratio : 16.0 / 9.0);
+    // The box is the tile's, so a captioned panel can show the shape the file
+    // gets without becoming that shape itself.
+    preview.pip_aspect_ratio =
+        draw.dest.height > 0 ? draw.dest.width / draw.dest.height
+                             : preview.aspect_ratio;
     return preview;
   }
-  // Display mode: the preview *is* the tile, so it is drawn at the tile's shape
-  // and carries the preset's crop and mask (design 1p, spec 33.5).
+  // Display mode: the preview *is* the tile (design 1p), the host has already
+  // cropped the texture to it, so both ratios are the tile's.
   preview.aspect_ratio =
       draw.dest.height > 0 ? draw.dest.width / draw.dest.height : 16.0 / 9.0;
-  preview.fit = config.fit;
-  preview.corner_radius_ratio =
-      ClampDouble(config.corner_radius_ratio, 0.0, kMaxCornerRadiusRatio);
+  preview.pip_aspect_ratio = preview.aspect_ratio;
   return preview;
 }
 

@@ -48,6 +48,7 @@ class _CameraPreviewWindowState extends State<CameraPreviewWindow> {
       aspectRatio: _state.aspectRatio,
       fit: _state.fit,
       cornerRadiusRatio: _state.cornerRadiusRatio,
+      pipAspectRatio: _state.pipAspectRatio,
       feed: _state.textureId == null
           ? null
           : Texture(textureId: _state.textureId!),

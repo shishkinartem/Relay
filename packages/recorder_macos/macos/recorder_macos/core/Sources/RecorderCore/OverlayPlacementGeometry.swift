@@ -32,6 +32,50 @@ public enum OverlayPlacementGeometry {
     return measured
   }
 
+  /// A key for "the sheet's content has the same shape as last time".
+  ///
+  /// The host opens the input menu at an estimated size and the engine corrects
+  /// it a turn later, once it has measured its own text. Correcting *once* is
+  /// safe. Correcting back to a size the panel recently left is not: the engine
+  /// caches the surfaces it renders into by size, and a request that returns to
+  /// an earlier size can be handed a surface of the other one — the render
+  /// target built from it has no colour attachment, and the raster thread reads
+  /// a null texture (flutter/flutter#185394). This project has already crashed
+  /// that way, and `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md`
+  /// records the same fault on the control strip.
+  ///
+  /// So the host remembers what each *shape* of sheet measured, and opens the
+  /// next one of that shape at the remembered size. The key is deliberately not
+  /// a height: it is the set of things that change the height, so a sheet whose
+  /// content differs is never opened at another sheet's size.
+  ///
+  /// Kept here, in the pure package, because it is a decision rather than a
+  /// value — and because nothing else in this area can be executed by a test.
+  public static func menuContentKey(
+    kind: String?,
+    rowCount: Int,
+    loading: Bool,
+    hasLevel: Bool,
+    hasNotice: Bool,
+    presetCount: Int,
+    cornerCount: Int,
+    canResetPosition: Bool
+  ) -> String {
+    // The row *count* rather than the rows: two microphones and two cameras
+    // lay out to the same height, and a device renamed does not resize a sheet.
+    // A loading sheet is one row whatever the list holds, so it is its own key
+    // rather than a row count of zero — an empty list is a different sheet.
+    return [
+      kind ?? "unknown",
+      loading ? "loading" : "rows:\(rowCount)",
+      hasLevel ? "level" : "-",
+      hasNotice ? "notice" : "-",
+      "presets:\(presetCount)",
+      "corners:\(cornerCount)",
+      canResetPosition ? "reset" : "-",
+    ].joined(separator: "/")
+  }
+
   /// Whether a size can be given to a window that hosts a rendering surface.
   ///
   /// Zero, negative and non-finite are all rejected together: each of them

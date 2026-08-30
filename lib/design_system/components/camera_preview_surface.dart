@@ -32,6 +32,7 @@ class CameraPreviewSurface extends StatelessWidget {
     this.aspectRatio = 16 / 9,
     this.fit = CameraPipFit.contain,
     this.cornerRadiusRatio = 0,
+    this.pipAspectRatio,
   });
 
   /// The camera frames. Null renders the wireframe placeholder.
@@ -55,6 +56,16 @@ class CameraPreviewSurface extends StatelessWidget {
 
   /// Corner radius as a fraction of the tile's width. `0.5` is a circle.
   final double cornerRadiusRatio;
+
+  /// The shape of the box the picture is drawn into, where [aspectRatio] is the
+  /// shape of the feed itself.
+  ///
+  /// Only window mode needs the two to differ: there this window is a captioned
+  /// panel of its own shape, and the tile it stands for has the preset's — so
+  /// the picture is drawn at the tile's shape *inside* the panel. Null means
+  /// "the same as the feed", which is display mode and every caller that
+  /// predates presets.
+  final double? pipAspectRatio;
 
   @override
   Widget build(BuildContext context) {
@@ -112,17 +123,40 @@ class CameraPreviewSurface extends StatelessWidget {
       );
     }
 
+    // Window mode. The panel is a captioned rectangle in its own right and
+    // stays one (design `1e`) — but the tile it stands for is still composited
+    // into the file with the chosen preset, so the *picture* shows that shape.
+    // Drawing the whole frame here instead made Camera, Square and Circle look
+    // identical while the MP4 differed, which is the same lie about the output
+    // that `1p` forbids in display mode.
+    final double tileRatio = pipAspectRatio ?? aspectRatio;
     return BlueprintFrame(
       background: AppColors.background,
       boxShadow: AppShadows.large,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          // The window is a fixed rectangle; the feed is letterboxed inside it
-          // rather than driving its height, so a camera of any shape fits
-          // without overflowing the window or being stretched into it.
+          // The window is a fixed rectangle; the tile is letterboxed inside it
+          // rather than driving its height, so a tile of any shape fits without
+          // overflowing the window or being stretched into it.
           Expanded(
-            child: DuotoneFilter(enabled: feed == null, child: image),
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: tileRatio > 0 ? tileRatio : 1,
+                child: LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints constraints) =>
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(
+                          cornerRadiusRatio * constraints.maxWidth,
+                        ),
+                        child: DuotoneFilter(
+                          enabled: feed == null,
+                          child: image,
+                        ),
+                      ),
+                ),
+              ),
+            ),
           ),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
