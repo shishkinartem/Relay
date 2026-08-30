@@ -56,6 +56,9 @@ inspects a message string.
 | `setMicrophoneEnabled` | `enabled: bool` | `null` |
 | `setCameraEnabled` | `enabled: bool` | `null` |
 | `setSystemAudioEnabled` | `enabled: bool` | `null` |
+| `selectInputDevice` | `kind: String`, `deviceId: String?` | `null` — re-points the **running** capture (§33.2). A null id is the platform default |
+| `setCameraOverlay` | camera-overlay map | `null` — the tile's shape and position, applied between frames (§33.5) |
+| `cameraPreviewPosition` | — | `{x, y}` as a fraction of the canvas, or `null` in window mode where the preview is not the tile |
 | `recoverArtifact` | `path: String` | recording-file map, or `null` |
 | `releaseSession` | — | `null` |
 | `dispose` | — | `null` |
@@ -137,11 +140,11 @@ frozen at the moment of pause would read as a broken meter rather than a paused
 recording, and §33.7 treats a flat bar on an enabled input as a finding worth
 reporting.
 
-Changing the **recording's** device mid-session (§33.2) is still not carried
-here: the device a session records is chosen before `prepare`, in the
-configuration map, and re-pointing it arrives later as an additional method.
-`deviceId` on `startInputMetering` moves the meter alone — it never re-points a
-running capture.
+`deviceId` on `startInputMetering` moves the **meter** alone; it never re-points
+a running capture. Changing the **recording's** device mid-session is
+`selectInputDevice`, below — a separate method precisely so the two cannot be
+confused, since a meter that follows a device the recording is not using is the
+defect §33.2 exists to prevent.
 
 ### capabilities map
 
@@ -295,6 +298,33 @@ worst case is the right relative spot on the wrong screen, and one drag corrects
 it. The alternative — a second, stable display-id spelling maintained on both
 platforms purely for this — costs more than the case is worth. Recorded in
 `../development/compatibility-matrix.md`.
+
+### overlay-state map
+
+What the control strip draws, pushed from the application engine as one
+immutable snapshot (§6, §33.4). Referenced twice above and defined nowhere until
+now — which mattered, because the three `*HasMenu` flags are the only thing that
+decides whether a chevron is drawn at all.
+
+```jsonc
+{
+  "isPaused": false,
+  "elapsedMs": 872000,           // recorded milliseconds, paused time excluded
+  "microphoneEnabled": true,
+  "cameraEnabled": false,
+  "systemAudioEnabled": true,
+  "microphoneAvailable": true,   // false draws the control disabled, not hidden
+  "cameraAvailable": true,
+  "systemAudioAvailable": true,
+  "isStopping": false,           // Pause and Stop are disabled while true
+  // From `RecorderCapabilities.selectableDeviceKinds`, carried in the snapshot
+  // so the strip never asks which operating system it is on (§28). False draws
+  // no caret at all rather than a dead one.
+  "microphoneHasMenu": true,
+  "cameraHasMenu": true,
+  "systemAudioHasMenu": false
+}
+```
 
 ### input-menu map
 
@@ -510,6 +540,7 @@ Native → overlay:
 | Method | Arguments |
 |---|---|
 | `controlStripState` | overlay-state map |
+| `inputMenuState` | input-menu map — pushed to the menu engine, forwarded by both hosts untouched |
 | `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio, pipAspectRatio, fit, cornerRadiusRatio }` |
 
 Overlay → native:

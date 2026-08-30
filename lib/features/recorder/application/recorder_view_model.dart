@@ -548,9 +548,16 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       await closeInputMenu();
       return;
     }
+    // A sheet for another kind may be open; replacing it must release its
+    // meter, or a microphone stays held for a bar nobody is looking at and
+    // outlives the session that opened it (§33.7).
+    final MediaDeviceKind? replaced = _openMenu;
     _openMenu = kind;
     _pushedLevel = null;
     notifyListeners();
+    if (replaced != null) {
+      await stopMetering(replaced);
+    }
     await _overlays.showInputMenu(kind, menuStateFor(kind));
     // Enumerating can take a moment, and the menu is already on screen saying
     // so; the refresh below replaces the loading row in place.
@@ -674,7 +681,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       notice: unresolved == null
           ? null
           : '“$unresolved” was not found · using the default',
-      level: canMeter(kind) && isMeterRunningFor(kind) ? levelFor(kind) : null,
+      // Null only for a kind that is never metered. A kind that *can* be
+      // metered but is not reporting gets a level of silence, so the sheet
+      // draws the bar dead rather than removing it: §33.7 requires "off" and
+      // "broken" not to look alike, and a control that vanishes looks like
+      // neither — it looks like a sheet that has nothing to say.
+      level: canMeter(kind)
+          ? (isMeterRunningFor(kind) ? levelFor(kind) : InputLevel.silent)
+          : null,
       // The camera sheet's own control, where the microphone has its meter
       // (§33.4). Without it a preset could only be chosen before recording
       // started, which is the half of §33.5 that matters least: the shape is
@@ -1383,8 +1397,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     // to ask is not the user having dragged it back (§33.3).
     await _rememberStripPosition();
     await _rememberCameraPipPosition();
-    await closeInputMenu();
+    // Inside the guarded loop, not before it. `closeInputMenu` awaits a meter
+    // stop and a channel round trip, neither of which had a deadline; a hang in
+    // either left the main window hidden and never restored, because
+    // `setMainWindowVisible(true)` is the last step of that loop. The recording
+    // was safe and the application was unreachable. Every step here is
+    // best-effort for the same reason: none of them is worth the window.
     for (final Future<void> Function() step in <Future<void> Function()>[
+      closeInputMenu,
       _overlays.hideCameraPreview,
       _overlays.hideControlStrip,
       () => _overlays.setMainWindowVisible(true),

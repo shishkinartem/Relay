@@ -220,6 +220,52 @@ void main() {
     });
   });
 
+  group('nothing is left holding a device', () {
+    test('opening a second sheet releases the first one’s meter', () async {
+      // §33.7. Replacing a sheet used to leave the previous kind's meter
+      // demanded, so a microphone stayed open for a bar nobody was looking at —
+      // and outlived the session that opened it.
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      expect(harness.recorder.metering, contains(MediaDeviceKind.microphone));
+
+      await harness.viewModel.openInputMenu(MediaDeviceKind.camera);
+
+      expect(
+        harness.recorder.metering,
+        isNot(contains(MediaDeviceKind.microphone)),
+        reason: 'the sheet that went away took its microphone with it',
+      );
+    });
+
+    test('the session ending leaves no meter running', () async {
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+
+      await harness.viewModel.stop();
+
+      expect(harness.recorder.metering, isEmpty);
+    });
+
+    test('a sheet that hangs on close still gives the window back', () async {
+      // The main window is hidden for the whole of a recording and restored by
+      // the last step of the teardown. `closeInputMenu` used to run *before*
+      // that loop, unguarded: a hang in it left the recording safe and the
+      // application unreachable.
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      harness.overlays.hangOnHideInputMenu = true;
+
+      await harness.viewModel.stop();
+
+      expect(
+        harness.overlays.mainWindowVisible,
+        isTrue,
+        reason: 'a wedged sheet must not cost the user their window',
+      );
+    });
+  });
+
   group('the camera sheet carries the shapes', () {
     test('the three presets, with the current one marked', () async {
       final TestHarness harness = await recording();

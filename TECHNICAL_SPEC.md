@@ -1150,6 +1150,64 @@ finalizationFailed
 
 Upload errors belong to the upload subsystem and must not corrupt the recording state.
 
+### 19.1 What a session ends holding
+
+A session is over when the state machine says so **and** when nothing it built
+is still alive. The rest of §19 specifies only the first. This specifies the
+second, and it applies to every exit — Stop, Abort, a fatal capture error, and
+the user quitting mid-recording.
+
+The reason it is a requirement and not a tidiness note: the application is
+expected to record again immediately. A device left open, a stream left running
+or an observer left installed is a second recording that behaves differently
+from the first, and a privacy indicator that stays lit after the user has
+stopped is a bug they are entitled to read as spyware.
+
+**Released on every exit**
+
+| Thing | Released by | What a test asserts |
+|---|---|---|
+| the screen capture and its content filter | the stop, **before** finalization begins — so the recording indicator goes out when Stop is pressed, not when the post-recording screen appears | the capture is stopped before `stop()` resolves; the census reports zero live capture streams |
+| the camera capture **and its device input** | stopped by the stop; the input detached by `releaseSession` or by `dispose`. A release that lands *during* finalization must still detach it | census reports zero configured camera capture sessions once the post-recording screen is left |
+| the microphone capture and its device input | as the camera | as the camera |
+| the metering tap and its reference count | the last `stopInputMetering`. A sheet open at Stop holds one reference and releases it with the session; **opening a second kind's sheet releases the first kind's**; and **no device is opened in the gap between the session releasing the microphone and the sheet closing** | census reports zero open taps and a reference count of zero; a unit test drives open-microphone-sheet → open-camera-sheet → stop |
+| the writer, its inputs, the pixel-buffer adaptor and its pool | teardown, after finalization | census reports no writer |
+| the compositor and its caches | teardown | census reports no compositor |
+| the tick timer and the power/sleep assertion | teardown | census reports zero timers and zero assertions |
+| every event monitor, hook and observer a **session** installed — menu dismissal, drag end, low-level input hooks | the overlay teardown | census reports the launch counts |
+| the elapsed time, the levels, the open sheet, and **the last composited camera frame** | the overlay teardown | the strip reads `00:00` and the preview is blank the moment either is next shown, before any new frame arrives |
+| the `.part` artefact | renamed by a successful finalize; **kept** by every other exit | unchanged from §18 |
+
+**Survives, because it is a setting and not state**
+
+| Thing | Where |
+|---|---|
+| the strip's position, as a fraction of a named display (§33.3) | `AppSettings.stripPosition` |
+| the camera preset, corner and free position (§33.5) | `AppSettings` |
+| the chosen camera and microphone (§33.2) | `AppSettings.inputDevices` |
+| input on/off, quality, frame rate, cursor, disclosure states | `AppSettings` |
+| the overlay engines and their panels, where a host keeps them for the life of the process | a deliberate per-platform choice, recorded in `docs/development/compatibility-matrix.md`. Both lifetimes are lawful; **nothing session-scoped may survive inside them** — not a snapshot, not a texture's contents, not a scheduled frame |
+
+**Repeat runs.** Ten consecutive start → stop cycles end with the process
+holding exactly what it held after the first: no additional engine, texture
+registration, observer, event monitor, hook, capture session, thread or timer.
+
+**Quitting mid-recording is an ordinary user action**, not a crash. The
+application stops the capture, closes the devices and finalizes the artefact for
+§18 recovery before the process exits, and that path carries its own test.
+
+**How this is proved.** "State is cleaned up" is not a requirement — nothing can
+fail it. The recorder interface therefore gains one debug-only method,
+`debugResourceCensus`, answered by both hosts, returning integer counts of: live
+capture streams; configured camera and microphone capture sessions; open
+metering taps and the meter's reference count; registered textures; overlay
+engines; event monitors and OS hooks; session timers and power assertions; and
+whether a writer and a compositor exist. Two tests bind on it — **census
+equality** (census at launch, ten start → stop cycles, census again, assert
+equal) and **post-session** (census after one stop, assert every row of the
+first table is zero). Rows naming a visible state are asserted in the overlay
+widget tests instead.
+
 ---
 
 ## 20. Recorder interface
@@ -1365,7 +1423,10 @@ At minimum:
 - repeated camera/mic/system-audio toggles
 - Pause / Resume
 - selected window movement and resize
-- display source with both overlays on screen
+- display source with all three overlays on screen
+- **ten consecutive start → stop cycles**, verified through `debugResourceCensus`
+  for zero net growth in engines, texture registrations, observers, event
+  monitors, hooks, capture sessions, threads and timers (§19.1)
 - network unavailable after Stop
 - upload interruption and restart. Neither shipping destination resumes
   (`supportsResume: false`); a broken transfer restarts from zero, and that is the
@@ -1886,6 +1947,8 @@ unimplemented requirement.
 | Swap to a device that will not open | the previous device keeps running; a non-fatal error is shown |
 | Swap to the device already selected | no-op; no gap in the audio |
 | Repeated microphone swaps in a long session | audio stays in sync with video — §24 soak case |
+| Recording stops with a sheet open | the sheet closes, its meter reference is released, and no device is re-opened between the session releasing the microphone and the sheet closing (§19.1) |
+| A second kind's sheet is opened while one is already open | the first kind's meter stops. One sheet at a time is one *meter* at a time |
 
 **The click outside is deliberately not swallowed**, reversing this row's
 earlier requirement. Consuming it needs an invisible window spanning the whole
@@ -1907,6 +1970,7 @@ revisited, it needs a new decision, not a quiet change.
 | Flat for 3 s on an enabled input | reported as a finding — "nothing has reached this microphone" — not left as a blank control |
 | Input muted | the bar is drawn dead, not hidden: "off" and "broken" must not look alike |
 | Meter leaves the screen, or its disclosure is closed | metering stops; no device stays open to animate a bar nobody is looking at |
+| A meterable input is not reporting | the bar is **drawn dead**, never removed. A control that vanishes is a third state the user has to interpret, and §33.7 already forbids "off" and "broken" looking alike |
 | System audio | never metered, on either platform |
 | During recording | levels come from the live mixer; a device already in use is never opened a second time |
 | Clipping | the top of the scale is marked distinctly, so a level that is too hot is visible as such |

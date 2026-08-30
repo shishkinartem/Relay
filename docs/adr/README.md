@@ -31,9 +31,9 @@ so the numbered sections never describe behaviour that does not exist yet.
 
 | Decision | Status |
 |---|---|
-| [Inputs are chosen from a device list, before and during a recording](2026-08-30-input-device-selection.md) | Accepted — enumeration, selection and metering shipped; live swapping is not |
-| [The control strip moves, and each input discloses its devices](2026-08-30-movable-control-strip-and-input-menus.md) | Accepted — the launch-screen disclosure shipped; the strip is not built |
-| [The camera picture-in-picture is dragged by hand and sized by preset](2026-08-30-user-adjustable-camera-pip.md) | Accepted — amends a core product invariant; not built |
+| [Inputs are chosen from a device list, before and during a recording](2026-08-30-input-device-selection.md) | Accepted — shipped, live swapping included |
+| [The control strip moves, and each input discloses its devices](2026-08-30-movable-control-strip-and-input-menus.md) | Accepted — shipped. `Reset position` exists on the wire but has no affordance on the strip |
+| [The camera picture-in-picture is dragged by hand and sized by preset](2026-08-30-user-adjustable-camera-pip.md) | Accepted — shipped; amends a core product invariant |
 | [The panel has a width range, and the layout answers to it](2026-08-30-responsive-panel.md) | Accepted — shipped |
 
 ## Filename

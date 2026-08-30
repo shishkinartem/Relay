@@ -48,10 +48,13 @@ PiP geometry is configuration, not scattered compositor constants. Defaults:
 `0.16 x canvas width`, the camera's own aspect ratio, `0.01 x canvas width`
 margin, lower-right, preview mirrored and output not.
 
-The camera frame is composed **aspect-fit**: never cropped, never distorted —
-the same constraint the capture source gets. The tile takes the camera's shape
-by default, so the fit is exact; with `followsSourceAspectRatio` off the frame
-is letterboxed inside the configured shape instead. The shape is read from the
+The camera frame is **never distorted**, and is cropped **only** by an explicit
+shape preset — identically in the preview and in the file (§33.5, which amended
+this rule when presets shipped). The default `camera` preset takes the camera's
+own shape, so nothing is cropped and the fit is exact. `square` and `circle` are
+1:1 and take the centre of the frame, which is the crop the user asked for by
+name; `circle` additionally masks it. With `followsSourceAspectRatio` off and no
+crop configured, the frame is letterboxed inside the configured shape instead. The shape is read from the
 capture device's active format, so the preview can be placed before the first
 frame arrives. See `../adr/2026-08-23-camera-pip-follows-source-aspect.md`.
 

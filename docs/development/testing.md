@@ -15,9 +15,10 @@ A behavioral change is not complete until relevant automated tests are added/upd
 That is `dart format --set-exit-if-changed`, `flutter analyze`, and **every workspace
 package's** Dart/Flutter suite. Run `dart format .` first if you meant to reformat.
 
-Root `flutter test` on its own covers the application package only. The six packages
-under `packages/` have their own suites and CI runs each separately, so a change to
-`upload_telegram` verified by a root run has been verified by nothing.
+Root `flutter test` on its own covers the application package only. Five of the six
+packages under `packages/` have their own Dart suites and CI runs each separately, so a
+change to `upload_telegram` verified by a root run has been verified by nothing.
+`recorder_macos` is the sixth: its Dart `test/` is empty and its real suite is Swift.
 
 Four things `validate.sh` does **not** run:
 

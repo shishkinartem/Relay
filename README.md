@@ -66,8 +66,10 @@ flutter pub get
 flutter build windows --release
 ```
 
-This has never been compiled: there is no Windows host here. The code is written and
-unit-tested in CI, but treat the first build as unproven.
+Not compiled here — there is no Windows host. CI does build it under MSVC, but its
+unit-test job has failed on every run so far, so treat the Windows half as written and
+compiled, **not** as tested. The [compatibility matrix](docs/development/compatibility-matrix.md)
+is the authority on what is actually verified.
 
 ## Documentation
 
@@ -80,9 +82,10 @@ unit-tested in CI, but treat the first build as unproven.
 
 ## Status
 
-macOS is built, run and tested. Windows is fully written but never compiled on a real
-machine — see the [compatibility matrix](docs/development/compatibility-matrix.md) for
-exactly what is and is not verified. Linux is deferred by design.
+macOS is built, run and tested. Windows is fully written and compiles in CI, but its
+unit tests have never passed there and nobody has run the application — see the
+[compatibility matrix](docs/development/compatibility-matrix.md) for exactly what is and
+is not verified. Linux is deferred by design.
 
 ## Contributing
 

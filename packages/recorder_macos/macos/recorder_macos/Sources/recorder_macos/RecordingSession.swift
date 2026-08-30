@@ -470,6 +470,14 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   // MARK: - runtime toggles
 
   func setMicrophoneEnabled(_ enabled: Bool) {
+    // Serialised against a live swap of the same input, and against a second
+    // toggle. Both this and `selectInputDevice` reconfigure one
+    // `AVCaptureSession`, and two `beginConfiguration`/`commitConfiguration`
+    // sequences overlapping inside one session is a hang or an uncatchable
+    // exception — not a stale flag. Until this arm moved off the platform
+    // thread the serialisation was accidental: the thread itself was the lock.
+    guard claimSwap(.microphone) else { return }
+    defer { endSwap(.microphone) }
     guard inputs.microphoneEnabled != enabled else { return }
     inputs.microphoneEnabled = enabled
     if enabled && !microphone.isRunning {
@@ -521,6 +529,10 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   }
 
   func setCameraEnabled(_ enabled: Bool) {
+    // See `setMicrophoneEnabled`: one configuration change at a time on one
+    // capture session.
+    guard claimSwap(.camera) else { return }
+    defer { endSwap(.camera) }
     guard inputs.cameraEnabled != enabled else { return }
     inputs.cameraEnabled = enabled
     if enabled {

@@ -39,7 +39,7 @@ Then load only the topic relevant to the task.
 
 ## Decisions
 
-- `adr/README.md` — indexed list of all 12 recorded decisions, and when a new one is required
+- `adr/README.md` — the indexed list of recorded decisions, and when a new one is required
 
 ## Elsewhere in the repository
 

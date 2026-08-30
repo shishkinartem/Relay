@@ -244,7 +244,11 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     let arguments = call.arguments as? [String: Any] ?? [:]
     switch call.method {
     case "getCapabilities":
-      result(capabilities())
+      // Off the platform thread. This is where the process first touches
+      // AVFoundation's capture subsystem, and that start-up costs a fifth of a
+      // second — paid here once, before the first frame, but paid on the thread
+      // that drives every Flutter engine.
+      Task { await self.respondWithCapabilities(result: result) }
 
     case "getAvailableSources":
       let refresh = arguments["refreshThumbnails"] as? Bool ?? true
@@ -259,9 +263,18 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       // `FlutterMethodNotImplemented` reaches Dart as `unsupported`, which is a
       // failure rather than "there is nothing here to choose". What can be
       // chosen is gated by `selectableDeviceKinds` in `capabilities()` (§33.2).
+      //
+      // Off the platform thread: a discovery session is a fifth of a second
+      // cold, and unbounded when a Continuity Camera is coming into range. This
+      // runs on every chevron press and on every plug or unplug — during a
+      // recording, when a stalled platform thread stops all four overlay
+      // engines drawing.
       let deviceKind = MediaDeviceKind(name: arguments["kind"] as? String)
-      let devices = deviceKind.map { InputDeviceEnumerator.devices(kind: $0) } ?? []
-      result(devices.map { $0.toMap() })
+      Task {
+        let devices = deviceKind.map { InputDeviceEnumerator.devices(kind: $0) } ?? []
+        let payload = devices.map { $0.toMap() }
+        await MainActor.run { result(payload) }
+      }
 
     case "startInputMetering":
       // Reference counted, and a silent no-op for a kind that cannot be
@@ -282,7 +295,12 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       result(nil)
 
     case "checkPermissions":
-      result(RecorderPermissions.check())
+      // Off the platform thread. Measured at ~36 ms, and it is asked on every
+      // launch and every time the application is brought back to the front.
+      Task {
+        let permissions = RecorderPermissions.check()
+        await MainActor.run { result(permissions) }
+      }
 
     case "requestPermission":
       RecorderPermissions.request(kind: arguments["kind"] as? String ?? "") { status in
@@ -343,9 +361,19 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       Task { await self.setMicrophoneEnabled(microphoneEnabled, result: result) }
 
     case "setCameraEnabled":
-      let enabled = arguments["enabled"] as? Bool ?? false
-      session?.setCameraEnabled(enabled)
-      result(nil)
+      // Off the platform thread, for the reason spelled out on
+      // `setMicrophoneEnabled` above and for one more: turning the camera on
+      // resolves a device — a discovery session, a fifth of a second cold —
+      // then opens it and calls `startRunning()`, which is seconds on a
+      // Continuity or Bluetooth camera. On the platform thread that is a
+      // recording whose control strip stops drawing and whose timer stalls,
+      // followed by Dart's own eight-second deadline firing on a call that
+      // actually succeeded.
+      let cameraEnabled = arguments["enabled"] as? Bool ?? false
+      Task {
+        self.session?.setCameraEnabled(cameraEnabled)
+        await MainActor.run { result(nil) }
+      }
 
     case "setSystemAudioEnabled":
       session?.setSystemAudioEnabled(arguments["enabled"] as? Bool ?? false)
@@ -475,6 +503,12 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
 
   // MARK: - operations
 
+  /// `getCapabilities`, off the platform thread. See the `handle` arm.
+  private func respondWithCapabilities(result: @escaping FlutterResult) async {
+    let payload = capabilities()
+    await MainActor.run { result(payload) }
+  }
+
   private func capabilities() -> [String: Any] {
     let version = ProcessInfo.processInfo.operatingSystemVersion
     return [
@@ -530,8 +564,15 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
 
   private func respondWithSources(refresh: Bool, result: @escaping FlutterResult) async {
     do {
+      // `excludedWindowIDs` walks `NSApplication.shared.windows`, and the
+      // enumerator's `isCurrentDisplay` reads `NSScreen.screens`. AppKit is
+      // main-thread-only: reading it from this task is undefined behaviour,
+      // not merely a race — and this is one of the two most frequently
+      // executed paths in the plugin. `rebuildContentFilter` already hops for
+      // exactly this; these did not.
+      let excluded = await MainActor.run { self.overlays.excludedWindowIDs }
       let sources = try await enumerator.enumerate(
-        refreshThumbnails: refresh, excludedWindowIDs: overlays.excludedWindowIDs)
+        refreshThumbnails: refresh, excludedWindowIDs: excluded)
       let payload: [[String: Any]] = sources.map { source in
         var map: [String: Any] = [
           "id": source.id,
@@ -579,7 +620,8 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       await self.replaceSession(with: nil)
       let configuration = try RecordingConfiguration(map: arguments)
       let content = try await enumerator.shareableContent()
-      let requestedExclusions = overlays.excludedWindowIDs
+      // Main thread: see `respondWithSources`.
+      let requestedExclusions = await MainActor.run { self.overlays.excludedWindowIDs }
       let (filter, _) = try enumerator.filter(
         forSourceId: configuration.sourceId,
         excludedWindowIDs: requestedExclusions,

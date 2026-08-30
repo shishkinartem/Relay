@@ -133,8 +133,8 @@ the Flutter- and OS-bound half so it can be executed on its own.
 
 | Platform | Where | How to run | State |
 |---|---|---|---|
-| macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | **96 tests passing** (run 2026-08-30) |
-| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | 152 cases written, **never compiled** — `cmake`, `ctest` and `cl` are all absent from this host |
+| macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | green — **run the command for the count**, do not quote one from here. It has been hand-copied to three files and drifted three ways |
+| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | **never compiled on this host** — `cmake`, `ctest` and `cl` are all absent. CI *does* configure and build it under MSVC; what fails there is `ctest`, which is the row below |
 
 Both suites assert the same properties on purpose. The two platforms hand-write
 the same wire spellings and re-implement the same geometry, and nothing in the
@@ -216,7 +216,7 @@ Reason: no Developer ID certificate on this host.
 | Re-clamp on a display change | `didChangeScreenParametersNotification` | `WM_DISPLAYCHANGE` and `WM_SETTINGCHANGE`/`SPI_SETWORKAREA` |
 | Display id in a stored position | `CGDirectDisplayID` | `HMONITOR` |
 | Scale change while dragging across monitors | one scale per display, resolved on show | **gap** — see below |
-| Verified | `swift test` (136 cases) and a `flutter build macos --debug` | **nothing** — never compiled or run on this host |
+| Verified | `swift test` and a `flutter build macos --debug` | **nothing** — never compiled or run on this host |
 
 Neither `displayId` is stable across a reboot or a change of display topology,
 so a remembered position can resolve on a different physical display than the

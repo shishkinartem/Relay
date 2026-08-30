@@ -538,7 +538,12 @@ class FakeOverlayWindowController implements OverlayWindowController {
   }
 
   @override
-  Future<void> hideInputMenu() async => calls.add('hideInputMenu');
+  Future<void> hideInputMenu() async {
+    calls.add('hideInputMenu');
+    if (hangOnHideInputMenu) {
+      await Completer<void>().future;
+    }
+  }
 
   final List<Offset> nudges = <Offset>[];
 
@@ -558,8 +563,19 @@ class FakeOverlayWindowController implements OverlayWindowController {
   Future<void> hideControlStrip() async => calls.add('hideControlStrip');
 
   @override
-  Future<void> setMainWindowVisible(bool visible) async =>
-      calls.add('setMainWindowVisible($visible)');
+  Future<void> setMainWindowVisible(bool visible) async {
+    calls.add('setMainWindowVisible($visible)');
+    mainWindowVisible = visible;
+  }
+
+  /// The main window is hidden for the whole of a recording, so whether it came
+  /// back is the difference between a finished session and an unreachable app.
+  bool mainWindowVisible = true;
+
+  /// Makes the sheet's close hang the way a wedged channel call does, so a
+  /// teardown that is not guarded can be caught in a test rather than by a
+  /// user with no window.
+  bool hangOnHideInputMenu = false;
 
   @override
   Future<void> showCameraPreview(

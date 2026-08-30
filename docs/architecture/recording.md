@@ -48,7 +48,7 @@ Errors are typed states/results rather than arbitrary UI strings.
 - the control strip docks to the display's *usable* area — under the menu bar,
   above the taskbar. The menu-bar band contains the notch on a notched Mac,
   where a control is neither drawn nor clickable;
-- the two overlays are native always-on-top panels, each hosting its own
+- the three overlays are native always-on-top panels, each hosting its own
   secondary Flutter engine — which is why their entry points carry
   `@pragma('vm:entry-point')`, why their root widget must supply its own
   `Directionality`, and why they run on `OverlayBinding`. See
