@@ -90,6 +90,10 @@ void RecordingSession::EmitInputs() {
   }
 }
 
+void RecordingSession::SetMicrophoneLevelMeter(LevelAccumulator* meter) {
+  microphone_meter_ = meter;
+}
+
 void RecordingSession::OnPipelineError(const RecorderError& error) {
   if (events_.on_error) {
     events_.on_error(error);
@@ -243,10 +247,12 @@ bool RecordingSession::Start(RecorderError* error) {
   const auto input_error = [this](const RecorderError& failure) {
     OnPipelineError(failure);
   };
-  microphone_ =
-      std::make_unique<AudioCapture>(AudioCapture::Kind::kMicrophone, &microphone_ring_);
+  microphone_ = std::make_unique<AudioCapture>(AudioCapture::Kind::kMicrophone,
+                                              &microphone_ring_, microphone_meter_);
+  microphone_->SetDeviceId(config_.microphone_device_id);
   system_audio_ =
       std::make_unique<AudioCapture>(AudioCapture::Kind::kSystemAudio, &system_audio_ring_);
+  system_audio_->SetDeviceId(config_.system_audio_device_id);
   std::string audio_error;
   if (!microphone_->Start(&clock_, input_error, &audio_error)) {
     RecorderError failure;
@@ -265,6 +271,7 @@ bool RecordingSession::Start(RecorderError* error) {
 
   if (config_.camera_enabled) {
     std::string camera_error;
+    camera_.SetDeviceId(config_.camera_device_id);
     if (!camera_.Start(
             capture_.device(), &compositor_,
             [this](const uint8_t* pixels, uint32_t width, uint32_t height,
@@ -344,6 +351,7 @@ bool RecordingSession::SetCameraEnabled(bool enabled, RecorderError* error) {
   compositor_.SetCameraEnabled(enabled);
   if (enabled && !camera_.running() && capture_.device() != nullptr) {
     std::string camera_error;
+    camera_.SetDeviceId(config_.camera_device_id);
     if (!camera_.Start(
             capture_.device(), &compositor_,
             [this](const uint8_t* pixels, uint32_t width, uint32_t height,

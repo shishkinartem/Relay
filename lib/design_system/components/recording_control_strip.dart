@@ -41,6 +41,7 @@ class RecordingControlStrip extends StatelessWidget {
     this.cameraAvailable = true,
     this.systemAudioAvailable = true,
     this.isStopping = false,
+    this.onMoveRequested,
     this.onToggleMicrophone,
     this.onToggleCamera,
     this.onToggleSystemAudio,
@@ -50,6 +51,14 @@ class RecordingControlStrip extends StatelessWidget {
 
   /// The gap the design puts between two controls.
   static const double gap = 12;
+
+  /// How far a pointer must travel on the background before it is a drag and
+  /// not a click (§33.3).
+  ///
+  /// Small, because there is nothing to protect from it: the controls are in
+  /// front of the handle and take their own presses, so a gesture that reaches
+  /// the handle at all was never going to press anything.
+  static const double moveThreshold = 4;
 
   /// Half that gap, claimed by each neighbouring control's hit target. Two
   /// slopped controls sit flush and still read as [gap] apart.
@@ -68,6 +77,13 @@ class RecordingControlStrip extends StatelessWidget {
   final bool systemAudioAvailable;
   final bool isStopping;
 
+  /// Raised once a press on the strip's background has travelled
+  /// [moveThreshold]. The host takes the drag from there (§33.3).
+  ///
+  /// Null leaves the strip where it is docked — which is what a widget test
+  /// wants, and what a platform that cannot move a window has to fall back to.
+  final VoidCallback? onMoveRequested;
+
   final VoidCallback? onToggleMicrophone;
   final VoidCallback? onToggleCamera;
   final VoidCallback? onToggleSystemAudio;
@@ -76,7 +92,33 @@ class RecordingControlStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.background,
+        border: Border.all(
+          color: isPaused ? AppColors.accent : AppColors.ink(28),
+        ),
+        boxShadow: AppShadows.medium,
+      ),
+      // The handle sits *behind* the controls and *inside* the frame, so
+      // hit-testing reaches it for every press no control took — including the
+      // padding, which is inside the stack for exactly that reason.
+      //
+      // Inside, not behind the whole strip: `RenderDecoratedBox.hitTestSelf`
+      // consults the decoration, so a frame with a background absorbs every
+      // press within its bounds before anything underneath it is tried. A
+      // handle behind the strip would therefore never receive a single event.
+      child: Stack(
+        children: <Widget>[
+          Positioned.fill(child: _MoveHandle(onMove: onMoveRequested)),
+          _controls(),
+        ],
+      ),
+    );
+  }
+
+  Widget _controls() {
+    return Padding(
       // The trailing control carries half a gap of slop of its own, so the
       // right inset is halved to match; the leading status dot carries none.
       // The vertical inset is what is left of 8 once the controls grew by 7 —
@@ -87,23 +129,29 @@ class RecordingControlStrip extends StatelessWidget {
         top: 1,
         bottom: 1,
       ),
-      decoration: BoxDecoration(
-        color: AppColors.background,
-        border: Border.all(
-          color: isPaused ? AppColors.accent : AppColors.ink(28),
-        ),
-        boxShadow: AppShadows.medium,
-      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          StatusDot(active: !isPaused),
-          const SizedBox(width: 7),
-          Text(
-            formatClock(elapsed),
-            style: AppTypography.mono.copyWith(
-              fontSize: 13,
-              color: AppColors.text,
+          // The readouts are drawn, not pressed. Without this a press on the
+          // clock never reaches the drag handle behind the strip: a
+          // `RenderParagraph` reports a hit of its own — it has to, for
+          // selection and for recognizers inside spans — so it would swallow a
+          // gesture aimed at the one part of the strip that is most obviously
+          // grabbable.
+          IgnorePointer(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                StatusDot(active: !isPaused),
+                const SizedBox(width: 7),
+                Text(
+                  formatClock(elapsed),
+                  style: AppTypography.mono.copyWith(
+                    fontSize: 13,
+                    color: AppColors.text,
+                  ),
+                ),
+              ],
             ),
           ),
           const _StripDivider(leading: gap, trailing: gap / 2),
@@ -154,6 +202,62 @@ class RecordingControlStrip extends StatelessWidget {
             onPressed: isStopping ? null : onStop,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The strip's drag handle: everything behind the controls (§33.3).
+///
+/// A [Listener] rather than a gesture recognizer, because it must not join the
+/// gesture arena — there is nothing to compete with back here, and a recognizer
+/// that waited to see whether it won would add a delay to the one gesture that
+/// has to feel immediate.
+class _MoveHandle extends StatefulWidget {
+  const _MoveHandle({required this.onMove});
+
+  final VoidCallback? onMove;
+
+  @override
+  State<_MoveHandle> createState() => _MoveHandleState();
+}
+
+class _MoveHandleState extends State<_MoveHandle> {
+  Offset? _origin;
+
+  /// Raised at most once per press. After the host takes over, the operating
+  /// system owns the pointer and no further move events arrive — but a second
+  /// call on a stray one would ask for a drag with no button held.
+  bool _requested = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.onMove == null) {
+      return const SizedBox.expand();
+    }
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (PointerDownEvent event) {
+        _origin = event.position;
+        _requested = false;
+      },
+      onPointerMove: (PointerMoveEvent event) {
+        final Offset? origin = _origin;
+        if (_requested || origin == null) {
+          return;
+        }
+        if ((event.position - origin).distance <
+            RecordingControlStrip.moveThreshold) {
+          return;
+        }
+        _requested = true;
+        widget.onMove!();
+      },
+      onPointerUp: (_) => _origin = null,
+      onPointerCancel: (_) => _origin = null,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.grab,
+        child: const SizedBox.expand(),
       ),
     );
   }

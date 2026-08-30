@@ -108,19 +108,46 @@ void main() {
       );
     });
 
-    test('the walk reaches v2 from an unversioned document', () {
+    test(
+      'the walk reaches the current version from an unversioned document',
+      () {
+        final SettingsMigrationResult result = SettingsMigrator.standard()
+            .migrate(<String, Object?>{
+              AppSettings.keyUploadDestinationId: 'google_drive',
+            });
+
+        final SettingsMigrated migrated = result as SettingsMigrated;
+        expect(migrated.fromVersion, 0);
+        expect(migrated.toVersion, AppSettings.currentSchemaVersion);
+        expect(
+          AppSettings.fromJson(migrated.document).uploadDestinationId,
+          'telegram',
+        );
+      },
+    );
+  });
+
+  group('v2 to v3 (§33.2)', () {
+    test('a v2 document walks up and keeps everything it had', () {
+      // The step adds no key and rewrites none. What it prevents is the walk
+      // reporting a gap, which would have thrown the whole document away.
       final SettingsMigrationResult result = SettingsMigrator.standard()
           .migrate(<String, Object?>{
-            AppSettings.keyUploadDestinationId: 'google_drive',
+            AppSettings.keySchemaVersion: 2,
+            AppSettings.keyUploadDestinationId: 'telegram',
+            AppSettings.keyFrameRate: 60,
           });
 
       final SettingsMigrated migrated = result as SettingsMigrated;
-      expect(migrated.fromVersion, 0);
-      expect(migrated.toVersion, 2);
+      expect(migrated.toVersion, 3);
+      final AppSettings settings = AppSettings.fromJson(migrated.document);
+      expect(settings.frameRate, 60);
       expect(
-        AppSettings.fromJson(migrated.document).uploadDestinationId,
-        'telegram',
+        settings.inputDevices,
+        isEmpty,
+        reason: 'no choice made is what every existing document means',
       );
+      expect(settings.expandedInputs, isEmpty, reason: 'closed is the default');
     });
   });
 

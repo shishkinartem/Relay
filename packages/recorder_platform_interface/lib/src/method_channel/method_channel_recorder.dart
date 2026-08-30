@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../models/camera_overlay_configuration.dart';
 import '../models/capture_source.dart';
+import '../models/media_device.dart';
 import '../models/overlay.dart';
 import '../models/permissions.dart';
 import '../models/recorder_capabilities.dart';
@@ -68,6 +69,41 @@ class MethodChannelRecorder implements Recorder {
         ),
     ];
   });
+
+  @override
+  Future<List<MediaDevice>> getInputDevices(MediaDeviceKind kind) =>
+      _guard(() async {
+        final List<Object?>? raw = await _channel.invokeMethod<List<Object?>>(
+          'getInputDevices',
+          <String, Object?>{'kind': kind.name},
+        );
+        return <MediaDevice>[
+          for (final Object? entry in raw ?? const <Object?>[])
+            // A malformed entry is dropped, not defaulted: one unrecognized
+            // row must not cost the user the rest of the list.
+            ?MediaDevice.tryFromMap(
+              (entry! as Map<Object?, Object?>).cast<String, Object?>(),
+            ),
+        ];
+      });
+
+  @override
+  Future<void> startInputMetering(MediaDeviceKind kind, {String? deviceId}) =>
+      _guard(
+        () =>
+            _channel.invokeMethod<void>('startInputMetering', <String, Object?>{
+              'kind': kind.name,
+              // Always present, null included: the platform reads one shape.
+              'deviceId': deviceId,
+            }),
+      );
+
+  @override
+  Future<void> stopInputMetering(MediaDeviceKind kind) => _guard(
+    () => _channel.invokeMethod<void>('stopInputMetering', <String, Object?>{
+      'kind': kind.name,
+    }),
+  );
 
   @override
   Future<RecorderCapabilities> getCapabilities() => _guard(() async {
@@ -263,6 +299,19 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
   @override
   Future<void> hideControlStrip() =>
       _guard(() => _channel.invokeMethod<void>('hideControlStrip'));
+
+  @override
+  Future<OverlayStripPosition?> controlStripPosition() => _guard(() async {
+    final Map<Object?, Object?>? raw = await _channel
+        .invokeMethod<Map<Object?, Object?>>('controlStripPosition');
+    if (raw == null) {
+      return null;
+    }
+    // A malformed reply is *no* position, never a well-formed 0,0 one — the
+    // mistake `DisplayGeometry.tryFromMap` exists to prevent, which docked the
+    // strip to a display that was not there.
+    return OverlayStripPosition.tryFromMap(raw.cast<String, Object?>());
+  });
 
   @override
   Future<void> showCameraPreview(

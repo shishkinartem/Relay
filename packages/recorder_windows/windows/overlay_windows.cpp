@@ -5,9 +5,14 @@
 #include <shellscalingapi.h>
 
 #include <algorithm>
+#include <cmath>
+#include <memory>
 #include <optional>
 #include <sstream>
+#include <utility>
 #include <variant>
+
+#include "capture_source_enumerator.h"
 
 namespace relay {
 
@@ -17,6 +22,10 @@ constexpr wchar_t kOverlayClassName[] = L"RelayOverlayHostWindow";
 // Applies a measured content size on a later turn of the message loop. See
 // OverlayWindow::HandleCall for why it cannot be applied where it arrives.
 constexpr UINT kApplyContentSizeMessage = WM_APP + 0x51;
+// Enters the operating system's window-drag loop on a later turn of the message
+// loop. See OverlayWindow::HandleCall for why it cannot be entered where the
+// beginMove call arrives.
+constexpr UINT kBeginMoveMessage = WM_APP + 0x52;
 constexpr char kOverlayViewChannel[] = "relay/overlay/view";
 // The overlay engines run these Dart entrypoints (contract: relay/overlay/view).
 constexpr char kControlStripEntrypoint[] = "controlStripMain";
@@ -63,6 +72,86 @@ std::string StringAt(const flutter::EncodableMap& map, const char* key) {
   return text == nullptr ? std::string() : *text;
 }
 
+// The display a strip belongs to: the one holding its centre (spec 33.3).
+//
+// Deliberately not MonitorFromWindow's largest-intersection rule — a strip
+// dragged across the seam belongs to the display its centre ended on, which is
+// what the drag looks like to the person doing it.
+HMONITOR MonitorForStrip(HWND window) {
+  RECT frame{};
+  if (window == nullptr || ::GetWindowRect(window, &frame) == FALSE) {
+    return ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+  }
+  const POINT centre{frame.left + (frame.right - frame.left) / 2,
+                     frame.top + (frame.bottom - frame.top) / 2};
+  // NEAREST rather than NULL: a centre that lands in the gap between two
+  // monitors, or off the desktop entirely, still has to resolve to a display.
+  return ::MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST);
+}
+
+// The geometry of `monitor`, or false when it has none to report.
+//
+// GetMonitorInfoW's return is not decoration: a monitor removed between the
+// check that its handle was live and this call fails here and leaves the
+// structure zeroed, and a zeroed usable area would place the strip at the
+// virtual desktop's origin rather than on a screen.
+bool MonitorGeometry(HMONITOR monitor, MONITORINFO* out) {
+  if (monitor == nullptr || out == nullptr) {
+    return false;
+  }
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (::GetMonitorInfoW(monitor, &info) == FALSE || !IsUsableWorkArea(info.rcWork)) {
+    return false;
+  }
+  *out = info;
+  return true;
+}
+
+// The geometry to resolve a placement against: `monitor`'s when it reports any,
+// the primary display's when it does not.
+//
+// SPI_GETWORKAREA is the fallback because it has no handle to go stale under
+// it. It answers with a usable area and nothing else, so rcMonitor is filled
+// from it too: an absolute placement resolved against that is off by the
+// taskbar rather than off the desktop. When even that fails the structure stays
+// zeroed and the frame lands at the desktop's origin at the size it asked for,
+// which is the least wrong thing to hand a window that is about to exist
+// regardless.
+MONITORINFO GeometryOrPrimary(HMONITOR monitor) {
+  MONITORINFO info{};
+  if (MonitorGeometry(monitor, &info)) {
+    return info;
+  }
+  RECT work_area{};
+  if (::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0) != FALSE &&
+      IsUsableWorkArea(work_area)) {
+    info.rcWork = work_area;
+    info.rcMonitor = work_area;
+  }
+  return info;
+}
+
+// The usable area of `monitor` — rcWork, never rcMonitor (spec 6).
+bool WorkAreaOf(HMONITOR monitor, RECT* out) {
+  MONITORINFO info{};
+  if (out == nullptr || !MonitorGeometry(monitor, &info)) {
+    return false;
+  }
+  *out = info.rcWork;
+  return true;
+}
+
+// A window's own frame and the usable area it is on, in one step: every
+// placement decision below needs both or neither.
+bool WindowAndWorkArea(HWND window, RECT* frame, RECT* work_area) {
+  if (window == nullptr || frame == nullptr || work_area == nullptr) {
+    return false;
+  }
+  return ::GetWindowRect(window, frame) != FALSE &&
+         WorkAreaOf(MonitorForStrip(window), work_area);
+}
+
 }  // namespace
 
 OverlayPlacement OverlayPlacement::FromMap(const flutter::EncodableMap& map) {
@@ -84,6 +173,22 @@ OverlayPlacement OverlayPlacement::FromMap(const flutter::EncodableMap& map) {
   placement.anchor = StringAt(map, "anchor") == "bottomCenter"
                          ? OverlayPlacement::Anchor::kBottomCenter
                          : OverlayPlacement::Anchor::kTopCenter;
+  // Absent for a strip that has never been moved, and the anchor above is then
+  // the whole placement (spec 33.3).
+  if (const flutter::EncodableValue* position = Find(map, "position")) {
+    if (const auto* spot = std::get_if<flutter::EncodableMap>(position)) {
+      std::string display_id = StringAt(*spot, "displayId");
+      // A position that cannot name a display is no position: it would resolve
+      // against whichever monitor happened to be current, which is the anchor's
+      // job. Dart drops the same shape on the way in.
+      if (!display_id.empty()) {
+        placement.has_position = true;
+        placement.position_display_id = std::move(display_id);
+        placement.position_x = DoubleAt(*spot, "x", 0);
+        placement.position_y = DoubleAt(*spot, "y", 0);
+      }
+    }
+  }
   return placement;
 }
 
@@ -103,14 +208,40 @@ void OverlayWindows::SetCommandHandler(CommandHandler handler) {
   on_command_ = std::move(handler);
 }
 
-RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement) const {
-  const HMONITOR monitor =
-      main_window_ != nullptr
-          ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
-          : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement,
+                                  bool* from_remembered_position) const {
+  // A remembered position names its own display; everything else lands on the
+  // current one (spec 5).
+  //
+  // An HMONITOR is not stable across a display change: Windows may never hand
+  // that value out again, and may hand it to a different monitor. Both ends are
+  // survivable, which is why a stored display id can only ever be a hint.
+  // ParseMonitorSourceId — the same reader getAvailableSources' ids go through —
+  // rejects a handle that names no live monitor, so a stale id falls back to the
+  // anchor on the current display (spec 33.7, "Stored display no longer
+  // exists"); a recycled one resolves the fraction against a real monitor's
+  // usable area, clamped like any other, so the worst case is the right spot on
+  // the wrong display rather than a strip nobody can reach.
+  const HMONITOR remembered =
+      placement.has_position ? ParseMonitorSourceId(placement.position_display_id)
+                             : nullptr;
+  // The read is the second half of that check, and the one that catches a
+  // display removed between the two calls: a handle that was live a moment ago
+  // reports no geometry now, and a fraction of nothing is not a position. Such
+  // a placement takes the same fallback a stale id does.
   MONITORINFO info{};
-  info.cbSize = sizeof(info);
-  ::GetMonitorInfoW(monitor, &info);
+  const bool on_remembered = MonitorGeometry(remembered, &info);
+  const HMONITOR monitor =
+      on_remembered ? remembered
+                    : (main_window_ != nullptr
+                           ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
+                           : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+  if (!on_remembered) {
+    info = GeometryOrPrimary(monitor);
+  }
+  if (from_remembered_position != nullptr) {
+    *from_remembered_position = on_remembered;
+  }
   const double scale = MonitorScale(monitor);
 
   const LONG width = static_cast<LONG>(placement.width * scale + 0.5);
@@ -119,17 +250,30 @@ RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement) const {
   if (placement.absolute) {
     frame.left = info.rcMonitor.left + static_cast<LONG>(placement.x * scale + 0.5);
     frame.top = info.rcMonitor.top + static_cast<LONG>(placement.y * scale + 0.5);
-  } else {
-    const LONG work_width = info.rcWork.right - info.rcWork.left;
-    const LONG margin = static_cast<LONG>(placement.margin * scale + 0.5);
-    frame.left = info.rcWork.left + (work_width - width) / 2;
-    frame.top = placement.anchor == OverlayPlacement::Anchor::kBottomCenter
-                    ? info.rcWork.bottom - margin - height
-                    : info.rcWork.top + margin;
+    frame.right = frame.left + width;
+    frame.bottom = frame.top + height;
+    // Returned unclamped, alone among the three: this frame is the composited
+    // picture-in-picture's own rectangle, and nudging it would break design
+    // 1p's promise that the preview and the tile are one object.
+    return frame;
   }
+  if (on_remembered) {
+    // Resolved against the usable area and clamped into it, which is what keeps
+    // the taskbar uncovered whatever fraction was stored (spec 6, 33.3).
+    return FractionalStripFrame(info.rcWork, placement.position_x, placement.position_y,
+                                width, height);
+  }
+  const LONG work_width = info.rcWork.right - info.rcWork.left;
+  const LONG margin = static_cast<LONG>(placement.margin * scale + 0.5);
+  frame.left = info.rcWork.left + (work_width - width) / 2;
+  frame.top = placement.anchor == OverlayPlacement::Anchor::kBottomCenter
+                  ? info.rcWork.bottom - margin - height
+                  : info.rcWork.top + margin;
   frame.right = frame.left + width;
   frame.bottom = frame.top + height;
-  return frame;
+  // The default dock is inside the usable area by construction — but only for a
+  // strip that fits on the display, and this is the one place that says so.
+  return ClampToWorkArea(info.rcWork, frame);
 }
 
 bool OverlayWindows::ShowControlStrip(const OverlayPlacement& placement,
@@ -140,12 +284,15 @@ bool OverlayWindows::ShowControlStrip(const OverlayPlacement& placement,
     resolved.width = strip_content_width_;
     resolved.height = strip_content_height_;
   }
-  const RECT frame = ResolveFrame(resolved);
+  bool from_remembered_position = false;
+  const RECT frame = ResolveFrame(resolved, &from_remembered_position);
   if (control_strip_) {
     control_strip_->SetFrame(frame);
+    RememberStripPlacement(resolved, from_remembered_position);
     return true;
   }
-  auto window = std::make_unique<OverlayWindow>(kControlStripEntrypoint, "control_strip");
+  auto window =
+      std::make_unique<OverlayWindow>(kControlStripEntrypoint, "control_strip", true);
   const CommandHandler handler = on_command_;
   if (!window->Create(
           frame, [handler](const std::string& command) {
@@ -171,7 +318,29 @@ bool OverlayWindows::ShowControlStrip(const OverlayPlacement& placement,
     return false;
   }
   control_strip_ = std::move(window);
+  RememberStripPlacement(resolved, from_remembered_position);
   return true;
+}
+
+// The spot a display change re-resolves the strip to, after a show has just put
+// it somewhere (spec 33.3).
+//
+// A restored position is adopted as the number Dart stored, not re-measured
+// from the window: resolving a fraction clamps it into the usable area, and
+// measuring the clamped result back would hand the next display change a spot
+// the user never chose. A placement with no position to restore is the anchor,
+// and the anchor is where the strip now is.
+void OverlayWindows::RememberStripPlacement(const OverlayPlacement& placement,
+                                            bool from_remembered_position) {
+  if (!control_strip_) {
+    return;
+  }
+  if (from_remembered_position) {
+    control_strip_->RememberRestoredPosition(placement.position_x,
+                                             placement.position_y);
+    return;
+  }
+  control_strip_->RememberPosition();
 }
 
 void OverlayWindows::HideControlStrip() {
@@ -191,7 +360,7 @@ bool OverlayWindows::ShowCameraPreview(const OverlayPlacement& placement,
     return true;
   }
   auto window =
-      std::make_unique<OverlayWindow>(kCameraPreviewEntrypoint, "camera_preview");
+      std::make_unique<OverlayWindow>(kCameraPreviewEntrypoint, "camera_preview", false);
   const CommandHandler handler = on_command_;
   if (!window->Create(
           frame, [handler](const std::string& command) {
@@ -212,6 +381,40 @@ void OverlayWindows::HideCameraPreview() {
     camera_preview_->Destroy();
     camera_preview_.reset();
   }
+}
+
+bool OverlayWindows::ControlStripPosition(std::string* display_id, double* x,
+                                          double* y) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (display_id == nullptr || x == nullptr || y == nullptr || !control_strip_) {
+    return false;
+  }
+  const HWND window = control_strip_->window();
+  if (window == nullptr) {
+    return false;
+  }
+  const HMONITOR monitor = MonitorForStrip(window);
+  // The fraction the user established, not the pixels the strip is sitting at.
+  //
+  // The two agree except while the usable area is temporarily smaller than the
+  // fraction asks for — a taskbar shown, a display in the middle of changing
+  // mode — and then the window is clamped inwards and its measured fraction is
+  // not the one to persist: storing it would move the strip a little further
+  // from where the user put it every time that happened (spec 33.3). Measuring
+  // is the fallback for a strip that has established no fraction at all.
+  RECT frame{};
+  RECT work_area{};
+  if (!control_strip_->RememberedPosition(x, y) &&
+      (::GetWindowRect(window, &frame) == FALSE || !WorkAreaOf(monitor, &work_area) ||
+       !StripPositionRatio(work_area, frame, x, y))) {
+    return false;
+  }
+  // capture_source_enumerator's spelling, reused rather than invented a second
+  // time: "display:<HMONITOR as decimal>" is already the id getAvailableSources
+  // gives Dart for a display (spec 4.1), and a second spelling for the same
+  // thing is a second thing to keep in step.
+  *display_id = MonitorSourceId(monitor);
+  return true;
 }
 
 void OverlayWindows::UpdateControlStrip(const flutter::EncodableMap& state) {
@@ -304,8 +507,10 @@ void OverlayWindows::DisposeAll() {
 }
 
 OverlayWindows::OverlayWindow::OverlayWindow(std::string entrypoint,
-                                             std::string channel_owner)
-    : entrypoint_(std::move(entrypoint)), channel_owner_(std::move(channel_owner)) {}
+                                             std::string channel_owner, bool movable)
+    : entrypoint_(std::move(entrypoint)),
+      channel_owner_(std::move(channel_owner)),
+      movable_(movable) {}
 
 OverlayWindows::OverlayWindow::~OverlayWindow() {
   Destroy();
@@ -402,10 +607,17 @@ bool OverlayWindows::OverlayWindow::Create(
   ::ShowWindow(window_, SW_SHOWNOACTIVATE);
   ::SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  // The fraction to re-resolve this window against is seeded by the caller,
+  // which is the only place that knows whether the placement restored a
+  // position or fell back to the anchor.
   return true;
 }
 
 void OverlayWindows::OverlayWindow::Destroy() {
+  // Before anything else is torn down: a drag whose modal loop is still on the
+  // stack reads this flag when that loop returns, and everything below is a
+  // reason for it not to touch this object again.
+  *alive_ = false;
   if (texture_id_ >= 0 && registrar_ != nullptr) {
     registrar_->texture_registrar()->UnregisterTexture(texture_id_);
     texture_id_ = -1;
@@ -435,13 +647,196 @@ void OverlayWindows::OverlayWindow::SetFrame(const RECT& frame) {
   if (controller_ != nullptr && controller_->view() != nullptr) {
     ::MoveWindow(controller_->view()->GetNativeWindow(), 0, 0, width, height, TRUE);
   }
+  // Deliberately does not remember where that put the strip. Every path that
+  // moves the window ends here, and most of them are the ground moving under
+  // it rather than the user moving it: a clamp that wrote its result back would
+  // ratchet the fraction towards the near edge on every taskbar change. Only
+  // the paths that are the user's own doing remember, and they say so.
+}
+
+// The whole drag protocol (spec 33.3), and deliberately not a per-move message
+// over the channel: 3 keeps that channel for commands, and the operating system
+// already owns a loop that tracks the pointer at the display's own rate.
+void OverlayWindows::OverlayWindow::BeginMove() {
+  if (window_ == nullptr) {
+    return;
+  }
+  // The button the gesture is being held with — the right one when the user has
+  // swapped them, since WM_LBUTTONDOWN comes from the primary button whichever
+  // side of the mouse it is on.
+  //
+  // Asked now rather than when the request was posted: this runs a turn of the
+  // message loop later, and a request whose button is already up is dropped. A
+  // move loop entered with nothing held is ended by nothing — DefWindowProc
+  // tracks the pointer until the *next* press — so the strip would follow the
+  // cursor across the desktop until the user clicked to put it down.
+  //
+  // The refusal for a second request inside the loop the first one started is
+  // in the same gate: the modal loop pumps the message queue, so a posted
+  // message is dispatched mid-drag, and nesting two loops behind one finger
+  // would leave one of them running with nobody's finger down.
+  const bool button_down =
+      ::GetAsyncKeyState(VK_LBUTTON) < 0 ||
+      (::GetSystemMetrics(SM_SWAPBUTTON) != 0 && ::GetAsyncKeyState(VK_RBUTTON) < 0);
+  if (!ShouldBeginStripMove(movable_, move_pending_, button_down)) {
+    return;
+  }
+  move_pending_ = true;
+  // ReleaseCapture drops the capture the hosted Flutter view took on the press;
+  // without it the move loop never sees the mouse. WM_NCLBUTTONDOWN with
+  // HTCAPTION then starts that loop on a window that has no caption to click,
+  // which is the standard idiom for a borderless one.
+  //
+  // Nothing clamps *during* the drag, on purpose: a strip held inside the
+  // current monitor's usable area could never be dragged onto a second display,
+  // which 33.3 allows. The clamp belongs at the end.
+  ::ReleaseCapture();
+  // A copy of the liveness flag, taken before the loop and read after it. That
+  // loop is modal and pumps the platform thread's message queue, which is how
+  // Dart's calls into this plugin are delivered: hideControlStrip and dispose
+  // can both run inside it and destroy this window — and free this object —
+  // while the call below is still on the stack. Nothing may touch a member
+  // afterwards without asking this first, because asking any member is already
+  // the read that would be too late.
+  const std::shared_ptr<bool> alive = alive_;
+  // SendMessage is synchronous and the loop it starts is modal, so the drag is
+  // over by the time this returns. WM_EXITSIZEMOVE normally gets there first —
+  // it is also the end of a move the user started some other way — and this is
+  // the fallback for a DefWindowProc that never entered the loop at all.
+  ::SendMessageW(window_, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+  if (!*alive) {
+    return;
+  }
+  if (move_pending_) {
+    FinishMove();
+  }
+}
+
+void OverlayWindows::OverlayWindow::FinishMove() {
+  move_pending_ = false;
+  if (!movable_ || window_ == nullptr) {
+    return;
+  }
+  RECT frame{};
+  RECT work_area{};
+  if (!WindowAndWorkArea(window_, &frame, &work_area)) {
+    return;
+  }
+  const RECT snapped = SnapStripFrame(
+      work_area, frame, StripSnapPixels(MonitorScale(MonitorForStrip(window_))));
+  // The snap never changes the size, so the corner is the whole comparison.
+  // Skipping an unchanged frame keeps a click that crossed the threshold and
+  // went nowhere from repainting the hosted view.
+  if (snapped.left != frame.left || snapped.top != frame.top) {
+    SetFrame(snapped);
+  }
+  // A drag ending is the one thing that establishes where the user wants the
+  // strip, so it is the one thing that rewrites the fraction.
+  RememberPosition();
+}
+
+void OverlayWindows::OverlayWindow::ClampIntoWorkArea() {
+  if (!movable_ || window_ == nullptr) {
+    return;
+  }
+  RECT frame{};
+  RECT work_area{};
+  if (!WindowAndWorkArea(window_, &frame, &work_area)) {
+    return;
+  }
+  const RECT clamped = ClampToWorkArea(work_area, frame);
+  if (clamped.left != frame.left || clamped.top != frame.top) {
+    SetFrame(clamped);
+  }
+  // Reached only for a strip that has no remembered fraction to re-resolve, and
+  // it deliberately does not invent one: where a clamp had to put the strip is
+  // not somewhere the user chose to put it.
+}
+
+void OverlayWindows::OverlayWindow::ReresolveRememberedFraction() {
+  if (!movable_ || window_ == nullptr) {
+    return;
+  }
+  if (!has_ratio_) {
+    // Nothing proportional to restore; the usable area still moved.
+    ClampIntoWorkArea();
+    return;
+  }
+  RECT frame{};
+  RECT work_area{};
+  if (!WindowAndWorkArea(window_, &frame, &work_area)) {
+    return;
+  }
+  // Against whichever display holds the strip now: when a monitor is
+  // disconnected Windows has already moved the window onto a surviving one, and
+  // resolving the fraction there is exactly 33.7's "the strip moves to the
+  // current display, at its stored fraction there".
+  const RECT resolved =
+      FractionalStripFrame(work_area, ratio_x_, ratio_y_, frame.right - frame.left,
+                           frame.bottom - frame.top);
+  if (resolved.left != frame.left || resolved.top != frame.top) {
+    SetFrame(resolved);
+  }
+  // The fraction is the input here, never the output. FractionalStripFrame
+  // clamps what it resolves, and measuring the clamped result back would make
+  // a display that is briefly smaller — or a taskbar that appeared — a
+  // permanent move towards the near edge: the strip would come back to 0.719
+  // of a display it was left at 0.80 of, and lose a little more every time.
+}
+
+void OverlayWindows::OverlayWindow::RememberPosition() {
+  if (!movable_ || window_ == nullptr) {
+    return;
+  }
+  RECT frame{};
+  RECT work_area{};
+  if (!WindowAndWorkArea(window_, &frame, &work_area)) {
+    return;
+  }
+  // Left as it was when the usable area has no extent to measure against: a
+  // fabricated 0, 0 would move the strip to the corner the next time a display
+  // change re-resolved it.
+  double x = 0;
+  double y = 0;
+  if (StripPositionRatio(work_area, frame, &x, &y)) {
+    has_ratio_ = true;
+    ratio_x_ = x;
+    ratio_y_ = y;
+  }
+}
+
+void OverlayWindows::OverlayWindow::RememberRestoredPosition(double x, double y) {
+  // A fraction that is not a number is not a position, and the last one is
+  // better than a fabricated corner.
+  if (!movable_ || std::isnan(x) || std::isnan(y)) {
+    return;
+  }
+  has_ratio_ = true;
+  // Into the unit square, the way StripPositionRatio reports one and Dart's
+  // OverlayStripPosition.tryFrom stores one. This is the clamp of a *fraction*
+  // — idempotent, and the same number back on a display of any size. The
+  // ratchet is the other clamp, the one that re-derives a fraction from pixels
+  // a shrunken usable area pushed inwards.
+  ratio_x_ = (std::min)(1.0, (std::max)(0.0, x));
+  ratio_y_ = (std::min)(1.0, (std::max)(0.0, y));
+}
+
+bool OverlayWindows::OverlayWindow::RememberedPosition(double* x, double* y) const {
+  if (!has_ratio_ || x == nullptr || y == nullptr) {
+    return false;
+  }
+  *x = ratio_x_;
+  *y = ratio_y_;
+  return true;
 }
 
 // Grows the window about its own top-left, to the size the engine measured.
 //
 // The measurement is in logical points and the frame is in physical pixels, so
-// it is scaled by the monitor the window is actually on rather than the one the
-// placement was resolved against.
+// it is scaled by the display the strip is on rather than the one the placement
+// was resolved against — and by 33.3's rule for which display that is, the one
+// holding the strip's centre, so that the scale and the clamp below cannot end
+// up asking two different monitors.
 void OverlayWindows::OverlayWindow::ApplyPendingContentSize() {
   if (window_ == nullptr || pending_width_ <= 1 || pending_height_ <= 1) {
     return;
@@ -453,12 +848,24 @@ void OverlayWindows::OverlayWindow::ApplyPendingContentSize() {
 
   RECT current{};
   ::GetWindowRect(window_, &current);
-  const double scale = MonitorScale(::MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST));
+  // One monitor for both the scale and the clamp, resolved once: with
+  // MonitorFromWindow's largest-intersection rule for the scale and the centre
+  // rule for the clamp, a strip straddling a seam would be sized against one
+  // display and placed on the other.
+  const HMONITOR monitor = MonitorForStrip(window_);
+  const double scale = MonitorScale(monitor);
   RECT frame = current;
   frame.right = frame.left + static_cast<LONG>(width * scale + 0.5);
   frame.bottom = frame.top + static_cast<LONG>(height * scale + 0.5);
   if (frame.right == current.right && frame.bottom == current.bottom) {
     return;
+  }
+  // A strip parked against the right or bottom edge of the usable area would
+  // otherwise grow straight out of it: the window grows about its top-left, and
+  // 33.3 clamps on every show, not only on the first one.
+  RECT work_area{};
+  if (movable_ && WorkAreaOf(monitor, &work_area)) {
+    frame = ClampToWorkArea(work_area, frame);
   }
   SetFrame(frame);
   if (on_content_size_) {
@@ -515,6 +922,31 @@ void OverlayWindows::OverlayWindow::HandleCall(
     result->Success();
     return;
   }
+  if (call.method_name() == "beginMove") {
+    // Only the strip is draggable. The preview's frame is the composited
+    // picture-in-picture's and is set by the compositor (spec 33.5), so a drag
+    // there is not a window move and must not silently succeed as one.
+    if (!movable_ || window_ == nullptr) {
+      result->NotImplemented();
+      return;
+    }
+    // Posted, never run here, for the reason "contentSize" below is: the move
+    // loop is modal and this handler is on the engine's own platform thread, so
+    // entering it here would hold the channel call — and the Dart side of the
+    // gesture — open for as long as the user drags. Posting hands it to the next
+    // turn of the message loop, with the mouse button still down.
+    if (::PostMessageW(window_, kBeginMoveMessage, 0, 0) == FALSE) {
+      // A queue that would not take the message is a drag that will not happen,
+      // and the strip asks once per gesture: answering Success would leave the
+      // caller waiting for a move loop that was never entered, with no way to
+      // tell that from one it is already inside.
+      result->Error(ErrorCodeName(RecorderErrorCode::kUnknown),
+                    "The overlay could not start a window move.");
+      return;
+    }
+    result->Success();
+    return;
+  }
   if (call.method_name() == "contentSize") {
     // Recorded and applied later, never here. Resizing a window that hosts a
     // Flutter view blocks the calling thread until that engine presents a
@@ -551,6 +983,32 @@ LRESULT CALLBACK OverlayWindows::OverlayWindow::WindowProc(HWND window, UINT mes
 
 LRESULT OverlayWindows::OverlayWindow::HandleMessage(HWND window, UINT message,
                                                      WPARAM wparam, LPARAM lparam) {
+  // Observed before the engine gets its refusal, and never consumed: each of
+  // these says the ground moved under a window that is already placed, and
+  // whether the hosted engine also wants the message is its own business. A
+  // clamp that only ran when the engine happened not to handle a broadcast
+  // would be a strip left under the taskbar (spec 33.7).
+  switch (message) {
+    case WM_EXITSIZEMOVE:
+      // The authoritative end of a move loop, including one this window did not
+      // start itself.
+      FinishMove();
+      break;
+    case WM_DISPLAYCHANGE:
+      ReresolveRememberedFraction();
+      break;
+    case WM_SETTINGCHANGE:
+      // A taskbar shown, hidden, resized or moved to another edge. The strip
+      // keeps the fraction the user left it at; the usable area it resolves
+      // against is what changed — and resolving it again, rather than clamping
+      // the pixels, is what brings the strip back when the taskbar goes away.
+      if (wparam == static_cast<WPARAM>(SPI_SETWORKAREA)) {
+        ReresolveRememberedFraction();
+      }
+      break;
+    default:
+      break;
+  }
   if (controller_ != nullptr) {
     // Give the hosted engine first refusal, exactly as the runner's top-level
     // window does: DPI changes, IME and accessibility depend on it.
@@ -563,6 +1021,13 @@ LRESULT OverlayWindows::OverlayWindow::HandleMessage(HWND window, UINT message,
   switch (message) {
     case kApplyContentSizeMessage: {
       ApplyPendingContentSize();
+      return 0;
+    }
+    case kBeginMoveMessage: {
+      // Nothing may follow this that touches a member: the drag runs a modal
+      // loop, that loop pumps the queue Dart's calls arrive on, and this window
+      // can be destroyed and freed inside it. The return is deliberate.
+      BeginMove();
       return 0;
     }
     case WM_SIZE: {

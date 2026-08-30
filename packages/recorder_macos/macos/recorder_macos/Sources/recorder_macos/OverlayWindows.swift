@@ -85,6 +85,44 @@ final class OverlayWindowController {
   /// recording begins, so the answer is taken once and kept.
   private var sessionScreen: NSScreen?
 
+  /// Where the strip sits, as the fraction §33.3 stores (`OverlayStripRatio`).
+  ///
+  /// Kept so a display change can re-resolve the *fraction* rather than shuffle
+  /// whatever pixels AppKit left the window at: once a display is unplugged the
+  /// panel has already been relocated, and its frame no longer says where the
+  /// user had put it.
+  ///
+  /// Main-thread state, like every other field here except `previewSignal`. It
+  /// is written from `showControlStrip`, from the end of a drag, from a
+  /// measured resize and from the screen-parameters notification — all AppKit
+  /// callbacks on the main thread — and read from the same place, so it needs
+  /// no lock of its own.
+  private var stripPosition: OverlayStripRatio?
+
+  /// The registration for `didChangeScreenParametersNotification`, held so it
+  /// can be taken back down in `deinit`.
+  private var screenObserver: NSObjectProtocol?
+
+  init() {
+    // A display disconnected, a resolution or scale change, and the Dock being
+    // shown, hidden or moved all change the usable area under a strip that is
+    // already placed (§33.7). The strip is re-resolved rather than left where
+    // it was, which is what keeps the menu bar and the notch uncovered
+    // continuously instead of only at the moment it was first docked.
+    screenObserver = NotificationCenter.default.addObserver(
+      forName: NSApplication.didChangeScreenParametersNotification,
+      object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.reclampControlStrip()
+    }
+  }
+
+  deinit {
+    if let screenObserver {
+      NotificationCenter.default.removeObserver(screenObserver)
+    }
+  }
+
   /// Raised by the control strip and forwarded to the application engine.
   var onCommand: ((String) -> Void)?
 
@@ -120,15 +158,36 @@ final class OverlayWindowController {
 
     // Resolved before the panel exists, so a first show creates the panel at
     // its final size and a later show is a no-op rather than a resize.
-    let frame = stripFrame(placement: placement)
-    let panel = stripPanel ?? makePanel(for: engine, contentRect: frame, acceptsMouse: true)
+    let placed = stripPlacement(placement)
+    let panel =
+      stripPanel
+      ?? makePanel(
+        for: engine, contentRect: placed.frame, acceptsMouse: true, movable: true)
     stripPanel = panel
     // Pushed before the panel comes back, so the strip has the corrected
     // snapshot in flight by the time its pixels are on screen again.
     if !lastStripState.isEmpty {
       stripChannel?.invokeMethod("controlStripState", arguments: lastStripState)
     }
-    place(panel, at: frame)
+    place(panel, at: placed.frame)
+    rememberStripPosition(of: placed.frame, on: placed.screen)
+  }
+
+  /// Where the strip is now, as the fraction the contract stores (§33.3).
+  ///
+  /// Null when no strip is on screen, or when its display cannot be named. The
+  /// application keeps whatever it had stored in that case: failing to read a
+  /// position is not the user having dragged the strip back.
+  func controlStripPosition() -> [String: Any]? {
+    guard let panel = stripPanel, panel.isVisible,
+      let screen = screenHoldingCenter(of: panel.frame) ?? panel.screen,
+      let id = displayId(of: screen),
+      let ratio = OverlayPlacementGeometry.positionRatio(
+        of: panel.frame, inVisibleFrame: screen.visibleFrame, displayId: id)
+    else { return nil }
+    return [
+      "displayId": ratio.displayId, "x": Double(ratio.x), "y": Double(ratio.y),
+    ]
   }
 
   func hideControlStrip() {
@@ -308,6 +367,14 @@ final class OverlayWindowController {
         onCommand?(command)
       }
       result(nil)
+    case "beginMove":
+      // Replied before the drag rather than after it: the drag loop below runs
+      // for the whole gesture, and the caller waiting on this reply is the very
+      // engine whose frames the strip needs while it is being dragged.
+      result(nil)
+      if isStrip {
+        beginStripMove()
+      }
     case "contentSize":
       if isStrip, let arguments = call.arguments as? [String: Any],
         let width = arguments["width"] as? Double,
@@ -323,7 +390,8 @@ final class OverlayWindowController {
   }
 
   private func makePanel(
-    for engine: FlutterEngine, contentRect: NSRect, acceptsMouse: Bool
+    for engine: FlutterEngine, contentRect: NSRect, acceptsMouse: Bool,
+    movable: Bool = false
   ) -> NSPanel {
     let controller = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
     // Sized before it is installed, not after. `contentViewController` resizes
@@ -347,7 +415,14 @@ final class OverlayWindowController {
     panel.backgroundColor = .clear
     panel.hasShadow = false
     panel.hidesOnDeactivate = false
-    panel.isMovable = false
+    // `performDrag(with:)` does nothing on a window AppKit considers immovable,
+    // so the strip has to be movable for §33.3's drag to run at all; the camera
+    // preview stays fixed. `isMovableByWindowBackground` is left off in both
+    // cases: the only drag is the one the strip asks for once its own 4 px
+    // threshold is crossed, and AppKit's background drag would start one under
+    // it without that threshold, eating slow clicks on the controls.
+    panel.isMovable = movable
+    panel.isMovableByWindowBackground = false
     panel.ignoresMouseEvents = !acceptsMouse
     panel.collectionBehavior = [
       .canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle,
@@ -376,17 +451,134 @@ final class OverlayWindowController {
     panel.orderFrontRegardless()
   }
 
-  /// The control strip's frame, with its size resolved exactly once.
-  private func stripFrame(placement: [String: Any]) -> NSRect {
+  /// The control strip's frame and the display it belongs on.
+  ///
+  /// Its size is resolved exactly once, as ever. The *placement* has two
+  /// shapes: the spot the user left it at, as a fraction of one named display's
+  /// usable area (§33.3), and the default dock on §5's current display. A
+  /// fraction whose display is no longer attached falls back to the dock, so a
+  /// placement always resolves — §33.7's "stored display no longer exists" row,
+  /// where the stale entry is dropped rather than pointed at.
+  private func stripPlacement(_ placement: [String: Any]) -> (
+    frame: NSRect, screen: NSScreen
+  ) {
     let requested = NSSize(
       width: placement["width"] as? Double ?? 360,
       height: placement["height"] as? Double ?? 46)
     let size = OverlayPlacementGeometry.effectiveSize(
       requested: requested, measured: stripContentSize)
-    var resolved = placement
-    resolved["width"] = Double(size.width)
-    resolved["height"] = Double(size.height)
-    return frame(for: resolved, defaultSize: size)
+
+    if let position = placement["position"] as? [String: Any],
+      let id = position["displayId"] as? String,
+      let x = position["x"] as? Double,
+      let y = position["y"] as? Double,
+      let screen = screen(withDisplayId: id)
+    {
+      let frame = OverlayPlacementGeometry.fractionalFrame(
+        size: size,
+        ratio: OverlayStripRatio(displayId: id, x: CGFloat(x), y: CGFloat(y)),
+        inVisibleFrame: screen.visibleFrame)
+      return (frame, screen)
+    }
+
+    let screen = currentScreen()
+    let frame = OverlayPlacementGeometry.anchoredFrame(
+      size: size,
+      anchor: placement["anchor"] as? String ?? "topCenter",
+      margin: placement["margin"] as? Double ?? 6,
+      inVisibleFrame: screen.visibleFrame)
+    return (frame, screen)
+  }
+
+  // MARK: - moving the strip (§33.3)
+
+  /// Hands the gesture to AppKit's own window-drag loop.
+  ///
+  /// One call rather than a message per pointer move: the operating system
+  /// already tracks the pointer at the display's refresh rate and ends the drag
+  /// on mouse-up, and `relay/overlay/view` is a command channel (§3).
+  ///
+  /// `performDrag(with:)` **blocks until the drag ends** — it runs an event
+  /// tracking loop of its own — so the snap and the clamp below run once the
+  /// user has let go, which is exactly when §33.3 asks for them.
+  private func beginStripMove() {
+    guard let panel = stripPanel, panel.isVisible else { return }
+    // A method call can be drained a turn late, by which time the button that
+    // started the gesture may already be up. A drag loop begun with nothing
+    // held has nothing to end it, so a late call is dropped rather than turned
+    // into a strip that follows the pointer with no button down.
+    guard let event = NSApp.currentEvent,
+      event.type == .leftMouseDown || event.type == .leftMouseDragged
+    else { return }
+    panel.performDrag(with: event)
+    settleStripAfterMove(panel)
+  }
+
+  /// Snaps and clamps wherever the drag left the strip.
+  ///
+  /// The strip belongs to whichever display holds its **centre** when the drag
+  /// ends — deliberately not §5's current display, because overriding that
+  /// placement is the whole point of being able to drag it.
+  private func settleStripAfterMove(_ panel: NSPanel) {
+    let screen =
+      screenHoldingCenter(of: panel.frame) ?? panel.screen ?? currentScreen()
+    let settled = OverlayPlacementGeometry.snapped(
+      panel.frame, inVisibleFrame: screen.visibleFrame)
+    move(panel, to: settled)
+    rememberStripPosition(of: settled, on: screen)
+  }
+
+  /// Re-resolves the strip after the display configuration changed (§33.7).
+  ///
+  /// The *fraction* is re-resolved rather than the pixels re-clamped, which is
+  /// what makes one handler cover three rows at once: a resolution or scale
+  /// change keeps the strip proportionally where it was, a Dock that appeared
+  /// shrinks the usable area under it, and a display that was unplugged leaves
+  /// the strip at the same fraction of whichever display it is on now. AppKit
+  /// has already relocated the panel by then, so its frame is not the answer.
+  private func reclampControlStrip() {
+    guard let panel = stripPanel, panel.isVisible else { return }
+    guard let position = stripPosition else {
+      let screen = screenHoldingCenter(of: panel.frame) ?? currentScreen()
+      move(
+        panel,
+        to: OverlayPlacementGeometry.clamped(
+          panel.frame, inVisibleFrame: screen.visibleFrame))
+      return
+    }
+    let screen =
+      screen(withDisplayId: position.displayId)
+      ?? screenHoldingCenter(of: panel.frame) ?? currentScreen()
+    let frame = OverlayPlacementGeometry.fractionalFrame(
+      size: panel.frame.size, ratio: position,
+      inVisibleFrame: screen.visibleFrame)
+    move(panel, to: frame)
+    // The display may have changed under it, and the fraction is stored against
+    // a display.
+    rememberStripPosition(of: frame, on: screen)
+  }
+
+  /// Records where the strip is, for the next display change to re-resolve.
+  ///
+  /// A spot that cannot be named leaves the last one alone: a display that
+  /// momentarily reports nothing usable is not the user having moved the strip,
+  /// which is the same reading the application takes of a null
+  /// `controlStripPosition`.
+  private func rememberStripPosition(of frame: NSRect, on screen: NSScreen) {
+    guard let id = displayId(of: screen),
+      let ratio = OverlayPlacementGeometry.positionRatio(
+        of: frame, inVisibleFrame: screen.visibleFrame, displayId: id)
+    else { return }
+    stripPosition = ratio
+  }
+
+  /// A move, never a resize: the frame carries the panel's own size.
+  ///
+  /// Moving a window does not recreate its rendering surface, so this costs
+  /// nothing of what a resize costs — the distinction this whole file turns on.
+  private func move(_ panel: NSPanel, to frame: NSRect) {
+    guard panel.frame != frame else { return }
+    panel.setFrame(frame, display: true)
   }
 
   /// Resolves the contract's anchored and absolute placements against the
@@ -459,23 +651,67 @@ final class OverlayWindowController {
 
   /// Grows the strip about its own top centre, kept inside the visible frame.
   private func resizeKeepingTopCenter(_ panel: NSPanel, to size: NSSize) {
-    let visible = (panel.screen ?? currentScreen()).visibleFrame
+    let screen = panel.screen ?? currentScreen()
     let target = OverlayPlacementGeometry.resizedKeepingTopCenter(
-      panel.frame, to: size, inVisibleFrame: visible)
+      panel.frame, to: size, inVisibleFrame: screen.visibleFrame)
     guard OverlayPlacementGeometry.needsResize(from: panel.frame, to: target)
     else { return }
     panel.setFrame(target, display: true)
+    // Growing about the top centre moves the leading edge, so the remembered
+    // fraction is no longer the one the strip is at.
+    rememberStripPosition(of: target, on: screen)
   }
 
   /// The display this session's overlays belong on.
   ///
   /// Pinned at `showControlStrip` and held for the session; see `sessionScreen`.
   private func currentScreen() -> NSScreen {
-    return sessionScreen ?? mainWindowScreen()
+    guard let sessionScreen else { return mainWindowScreen() }
+    // The pin is honoured by display id, not by object identity: AppKit
+    // replaces its `NSScreen` instances whenever the display configuration
+    // changes, and a stale one whose display has been unplugged reports an
+    // empty `visibleFrame` — a usable area nothing can be placed inside.
+    if let id = displayId(of: sessionScreen),
+      let live = screen(withDisplayId: id)
+    {
+      return live
+    }
+    return mainWindowScreen()
   }
 
   private func mainWindowScreen() -> NSScreen {
     let window = NSApplication.shared.windows.first { !($0 is NSPanel) && $0.isVisible }
     return window?.screen ?? NSScreen.main ?? NSScreen.screens[0]
+  }
+
+  /// The display holding a frame's centre.
+  ///
+  /// Not `NSWindow.screen`, which reports the display a window *overlaps most*.
+  /// That is a different question, and §33.3 asks this one: a strip straddling
+  /// two displays belongs to the one under its middle.
+  private func screenHoldingCenter(of frame: NSRect) -> NSScreen? {
+    let center = CGPoint(x: frame.midX, y: frame.midY)
+    return NSScreen.screens.first { $0.frame.contains(center) }
+  }
+
+  /// The attached display with this id, or nil once it is no longer attached.
+  private func screen(withDisplayId id: String) -> NSScreen? {
+    guard !id.isEmpty else { return nil }
+    return NSScreen.screens.first { displayId(of: $0) == id }
+  }
+
+  /// A display's id, spelled the way the contract already spells display ids.
+  ///
+  /// The decimal `CGDirectDisplayID` from `NSScreenNumber` — the same string
+  /// `CaptureSourceEnumerator.currentDisplayGeometry()` reports as
+  /// `DisplayGeometry.id`, and the same number the `display:<n>` capture-source
+  /// ids wrap. One spelling, so a stored position names a display the rest of
+  /// the contract can already point at.
+  private func displayId(of screen: NSScreen) -> String? {
+    guard
+      let number = screen.deviceDescription[
+        NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+    else { return nil }
+    return String(number.uint32Value)
   }
 }

@@ -73,7 +73,7 @@ class SettingsMigrator {
 
   /// The migrations this build ships.
   SettingsMigrator.standard()
-    : this(const <SettingsMigration>[_V0ToV1(), _V1ToV2()]);
+    : this(const <SettingsMigration>[_V0ToV1(), _V1ToV2(), _V2ToV3()]);
 
   final int targetVersion;
   final Map<int, SettingsMigration> _migrations;
@@ -176,4 +176,24 @@ class _V1ToV2 implements SettingsMigration {
     }
     return migrated;
   }
+}
+
+/// Input-device choices and the launch screen's disclosure state arrived
+/// (§33.2).
+///
+/// Nothing stored has to change: both keys are new, and both readers default
+/// them to "no choice made" and "closed", which is the behaviour every existing
+/// document already had. The step exists anyway because the migrator walks
+/// version by version and a gap in the walk is a typed failure, not a skip —
+/// a v2 document with no v2→v3 step would be reported as unmigratable and the
+/// user would silently get defaults for everything, not just the new keys.
+class _V2ToV3 implements SettingsMigration {
+  const _V2ToV3();
+
+  @override
+  int get fromVersion => 2;
+
+  @override
+  Map<String, Object?> apply(Map<String, Object?> json) =>
+      Map<String, Object?>.of(json);
 }

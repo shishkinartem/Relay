@@ -1,8 +1,8 @@
 # Technical Specification — Cross-platform Screen Recorder
 
 **Status:** MVP specification  
-**Version:** 0.4  
-**Date:** 2026-08-22  
+**Version:** 0.4 — plus §33, proposed v0.5 scope awaiting review  
+**Date:** 2026-08-22 (§33 added 2026-08-30)  
 **Target platforms for MVP:** macOS, Windows  
 **Deferred platform:** Linux  
 **Primary UI stack:** Flutter / Dart
@@ -33,6 +33,20 @@ wins — the tables are digests and drift first.
 
 Two consequences of the Drive removal are **not** resolved here and are owner
 decisions: §24's resumable-upload release gate and §30 item 6. Both are marked in place.
+
+### Proposed, not yet in force
+
+**§33** carries scope requested on 2026-08-30 — device selection with level
+meters, a movable control strip with device menus, a camera picture-in-picture
+dragged by hand and sized by preset, and a responsive panel. All four ADRs were
+**accepted on 2026-08-30** and the work is delivering in stages, so §33 is the
+live requirement for what it covers and §33.10 says which stages have shipped.
+Each part folds into its numbered section as it lands.
+
+One item there is not an addition but an amendment to a **core invariant**: the
+`Square` and `Circle` camera presets crop the frame, which §7 and `CLAUDE.md`
+still forbid outright. §33.5 states the replacement rule; both are amended when
+that stage ships, and not before.
 
 ---
 
@@ -267,6 +281,34 @@ Required behavior:
 Rationale: a custom list is the only option that renders both source types in one
 surface, keeps the thumbnail/selection presentation inside the design system, and
 behaves identically on macOS and Windows.
+
+#### Which windows are listed
+
+The list offers windows a user can point at, and nothing else. One rule, the
+same on both platforms — the alt-tab rule:
+
+| Offered | Not offered |
+|---|---|
+| on screen | minimised, offscreen, or cloaked |
+| at the ordinary window level | menu bar and its status items, the Dock, notification banners, tooltips, wallpaper and desktop layers, other applications' floating palettes |
+| top-level | owned/child windows, unless explicitly marked app-like |
+| titled | untitled surfaces, whose entry could only read as the application name repeated |
+| owned by a named application | windows with no owning application |
+| at least 96 × 96 | smaller helper surfaces |
+| any application but this one | this application's own panel and overlays |
+
+macOS resolves the level from `SCWindow.windowLayer` and Windows from the
+`WS_EX_TOOLWINDOW` / `GW_OWNER` / `DWMWA_CLOAKED` triple; the *rule* is one
+rule, and it is expressed in a pure, unit-tested predicate on each side
+(`CapturableWindowRule`, `IsCapturableWindow`). Two pickers that disagreed about
+what a window is would be two products.
+
+#### Thumbnails are not decorative
+
+A capture thumbnail is how the user tells one of fifteen windows from another,
+so it is shown in its own colours. The design system's `.duotone` accent wash
+applies to photography and to placeholders; it does not apply here, because two
+accent-washed screenshots look like the same screenshot.
 
 ### 4.2 Platform implementation
 
@@ -1635,3 +1677,282 @@ Checked against current official documentation as of 2026-08-22:
   https://developers.google.com/identity/protocols/oauth2/native-app
 - Google Drive API scopes  
   https://developers.google.com/workspace/drive/api/guides/api-specific-auth
+
+---
+
+## 33. Interactive capture controls (v0.5, in delivery)
+
+**Status: Accepted 2026-08-30, delivering in stages.**
+
+The specification for four changes requested on 2026-08-30, each decided by an
+**Accepted** ADR of the same date. It stays here, whole, while it is being
+built: each part is folded into §2, §4, §6, §7, §8, §10 and §31 **as it ships**,
+so those numbered sections never describe behaviour that does not exist yet.
+§33.10 says what has shipped.
+
+One scope boundary was set explicitly by the product owner and is not a
+technical limitation: **the capture source is chosen before recording only.**
+Display and window selection stays where §4.1 puts it. The camera and the two
+audio inputs are selectable before *and* during a session.
+
+### 33.1 What this adds
+
+| # | Change | ADR |
+|---|---|---|
+| 1 | The camera, the microphone and (where the platform allows) system audio are chosen from a list of real devices, before and during a recording; the microphone shows a live level meter, and every detail sits behind a disclosure that is closed by default | `docs/adr/2026-08-30-input-device-selection.md` |
+| 2 | The control strip can be moved anywhere in the display's usable area, and remembers where | `docs/adr/2026-08-30-movable-control-strip-and-input-menus.md` |
+| 3 | Each input control discloses its device list from a chevron, in an action sheet | same |
+| 4 | The camera picture-in-picture is dragged into place, and sized by one of three presets — Camera, Square · small, Circle · small | `docs/adr/2026-08-30-user-adjustable-camera-pip.md` |
+| 5 | The panel has a width range and the layouts answer to it, identically on both platforms | `docs/adr/2026-08-30-responsive-panel.md` |
+
+Already delivered under this request, and **not** proposed — §4.1 now states it:
+the source list shows only real windows, and capture thumbnails are shown in
+their own colours instead of accent-washed.
+
+### 33.2 Input devices
+
+```text
+MediaDevice { id, kind, label, isSystemDefault, isAvailable }
+MediaDeviceKind = camera | microphone | systemAudio
+```
+
+| Requirement | |
+|---|---|
+| Enumeration | behind the platform interface, like `CaptureSource`; ids are opaque |
+| Default | null device id — the platform's own default, which is today's behaviour |
+| Change before recording | from the launch screen, per input |
+| Change during recording | from the strip's action sheet (§33.4) |
+| Effect of a change | the input is swapped on the live session; the output keeps one video track and one mixed audio track |
+| Availability | `RecorderCapabilities.selectableDeviceKinds`; a kind absent from it is recorded but not chosen |
+| Persistence | id **and** label in `AppSettings`; an id that no longer resolves falls back to the system default and the launch screen says so |
+| Failure | degrades, never stops the recording — the rule in `docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md` |
+| Level meter | the **microphone** shows the selected device's live level, so the choice can be made by speaking. The meter is started *with the device it is to listen to* — a bar under a device row that showed the system default would answer a question nobody asked — and re-points when the choice changes. A metering value crosses the channel, never audio (§3); metering runs only while a meter is on screen. System audio is **not** metered — the user can act on neither the endpoint nor what the machine is playing |
+| Disclosure | On / Off stays on the input's row; the device, the meter and the camera's presets sit behind a per-input disclosure, closed by default and remembered between launches |
+
+### 33.3 The control strip moves
+
+Amends §6's placement rule. The default placement is unchanged.
+
+| Requirement | |
+|---|---|
+| Handle | everything inside the frame that a control did not take — the grip, the status dot, the clock, the dividers and the padding. The readouts are drawn, not pressed, so they never swallow a gesture aimed at the strip |
+| Threshold | 4 px — under it the gesture is a click, and no control fires from a gesture that crossed it |
+| Who runs the drag | the operating system. The strip asks once, and the platform's own window-drag loop tracks the pointer until mouse-up: a per-move message on a channel meant for commands is both slower and against §3 |
+| Stored as | a fraction of the display's usable area, plus the display id |
+| Clamped | to the usable area on every show, drag end and display change — so the menu bar, the notch and the taskbar stay uncovered |
+| Snap | 24 px to a usable-area edge or the horizontal centre, applied after the drag ends |
+| Second display | allowed; the strip belongs to the display holding its centre when the drag ends |
+| Remembered | read when the session tears down and persisted then. A position the host cannot report leaves the stored one alone: failing to ask is not the user having dragged it back |
+| Reset | automatic when the stored spot cannot be resolved |
+
+**Deferred to §33.4, with reasons.** Two rows of the original table are not
+shipped and are not forgotten:
+
+- *keyboard movement* — arrows by 8 px, Shift by 32. It needs the strip's window
+  to receive key events, and that window is deliberately non-activating so it
+  cannot take focus from the application being recorded (§33.4). Resolving that
+  properly belongs with the action sheet, which has the same constraint.
+- *an explicit `Reset position`* — it is a menu item, and the strip has no menu
+  until the action sheet arrives.
+
+Until then the accessible path is the automatic reset above, and the snap, which
+puts the strip back on the centre line without precision.
+
+### 33.4 Device menus on the strip
+
+A chevron on the trailing edge of each selectable input opens an action sheet —
+a labelled device list, the pattern a Zoom user already knows.
+
+| Requirement | |
+|---|---|
+| Window | its own always-on-top panel, **not** part of the strip, because the strip keeps one size in every state (§6) |
+| Exclusion | a third overlay kind, in the capture filter's exclusion list; §6's "must never appear in the captured video" applies in full |
+| Placement | below the strip when there is room, above it otherwise; aligned to the chevron; clamped to the usable area |
+| Focus | non-activating: opening it must not take key focus from the application being recorded |
+| Contents | `System default`, then devices, current one checked, then `Off` — which is the existing toggle |
+| Microphone sheet | carries the level meter for the selected device, under the list |
+| System-audio sheet | list only, no meter |
+| Camera sheet | carries the three shape presets (§33.5) instead of a meter — the preview window already is one |
+| One at a time | a second chevron replaces the first sheet |
+| Not selectable on this platform | no chevron; the control stays a plain toggle |
+
+### 33.5 The camera picture-in-picture
+
+Amends §7, and one of `CLAUDE.md`'s core invariants. Position is dragged; size
+and shape are presets. There are **no resize handles**.
+
+| Preset | Shape | Width | Frame |
+|---|---|---|---|
+| **Camera** — default | the camera's own aspect ratio | the camera's own width mapped onto the canvas, capped at `0.16 × canvas width`, floored at `0.08` | whole, never cropped |
+| **Square · small** | 1:1 | `0.10 × canvas width` | centre-cropped |
+| **Circle · small** | 1:1, masked to a circle | `0.10 × canvas width` | centre-cropped |
+
+| Rule | |
+|---|---|
+| Position | free, as a fraction of the canvas; clamped to the `0.01 × canvas width` margin; snaps to a corner within 2% of the canvas width |
+| Dragged from | the live preview in display mode, where the preview **is** the tile (design `1p`); in window mode it is not (design `1e`), so position there is one of the four corners, chosen in the camera menu |
+| Applied | between frames, for the next frame; the encoder canvas never changes, so the file keeps one continuous video track |
+| Persisted | when the session ends normally, so a mid-session experiment does not survive a crash |
+
+**The no-crop invariant changes, deliberately.** §7 and `CLAUDE.md` currently
+say the camera frame is never cropped and never distorted. A 16:9 sensor cannot
+fill a square or a circle without cropping, and letterboxing inside them would
+leave a tile that is partly desktop. The rule becomes:
+
+> The camera frame is **never distorted**, and is cropped **only** by an explicit
+> shape preset — identically in the preview and in the file.
+
+The default still never crops, and no crop happens that the user did not ask for
+by name. The preview shows the same crop as the output, so `1p`'s promise holds.
+
+### 33.6 A panel that answers to its width
+
+Amends the design's fixed-panel note, for the panel only.
+
+| Width | Layout |
+|---|---|
+| `< 560` | the reference layout, exactly as drawn — this stays the minimum |
+| `560 – 767` | source grid at three columns |
+| `≥ 768` | source grid at four columns; control rows may pair where the design has room |
+
+Maximum 960. No horizontal scrolling at any width. Tokens do not scale — the
+grid changes, the objects on it do not. Both platforms open at the same
+preferred size and enforce the same limits; `windows/runner/main.cpp` currently
+opens the Flutter template's 1280 × 720 and must not.
+
+### 33.7 Corner cases
+
+The list is the specification, not a reminder. An unanswered row is an
+unimplemented requirement.
+
+#### Moving the strip
+
+| Case | Required behaviour |
+|---|---|
+| Slow click on a control | stays a click — a control is in front of the handle and takes the press itself, so a gesture that reaches the handle was never going to press anything |
+| Press on the clock or the status dot | drags. They are readouts, not targets |
+| Drag ends off the usable area | clamped back inside it |
+| Drag while stopping or finalizing | the window still moves; the controls stay disabled |
+| Drag with a sheet open | the sheet closes |
+| Display holding the strip is disconnected | the strip moves to the current display, at its stored fraction there, or the default |
+| Resolution or scale factor changes | the fraction is re-resolved; the strip stays proportionally where it was |
+| Dock or taskbar shown, hidden or moved | the usable area changed — re-clamp |
+| macOS notch / menu bar | unreachable by construction: clamping is against `visibleFrame` |
+| Windows per-monitor DPI, taskbar on any edge | the fraction is stored per display; placement re-resolves on the target monitor's `rcWork`. **Partly met:** a drag *across* a scale boundary does not re-scale the hosted engine — `docs/development/compatibility-matrix.md` says why it is open rather than half-fixed |
+| macOS full-screen Space | the panel joins the active Space, or it vanishes when the recorded app goes full screen |
+| Display sleeps or the screen locks | the strip hides with the display and returns unmoved |
+| Strip overlaps the camera preview | cosmetic only — both are excluded from capture; the strip draws above |
+| Next session | the strip returns where the user left it |
+| Stored display no longer exists | default anchor, and the stale entry is dropped |
+
+#### Device menus and swapping
+
+| Case | Required behaviour |
+|---|---|
+| Recording stops with a sheet open | the sheet closes with the session |
+| Selected device unplugged while its sheet is open | the list re-renders, the fallback is shown selected, the sheet stays open |
+| Selected device unplugged with no sheet open | fall back to the system default; if there is none, that input turns off and the strip shows it off |
+| No device of that kind at all | `No microphone found` — never an empty panel |
+| Permission for that kind not granted | the list shows what the platform reports; choosing prompts; a refusal degrades the session, it does not block it |
+| Sheet would extend past the usable area | flips to the other side of the strip, then clamps |
+| Click outside the sheet | closes the sheet; the click is not forwarded to what is underneath |
+| Two chevrons in quick succession | one sheet; the second replaces the first |
+| Swap requested while a swap is in flight | dropped, not queued — §6's one-command-at-a-time rule |
+| Swap to a device that will not open | the previous device keeps running; a non-fatal error is shown |
+| Swap to the device already selected | no-op; no gap in the audio |
+| Repeated microphone swaps in a long session | audio stays in sync with video — §24 soak case |
+
+#### The level meter
+
+| Case | Required behaviour |
+|---|---|
+| Selection changes | the meter follows the newly selected device immediately |
+| Permission not granted | the bar is drawn dead and says why; the session may still start, with a silent track |
+| Device busy or held exclusively by another application | the meter says so rather than reading zero |
+| Flat for 3 s on an enabled input | reported as a finding — "nothing has reached this microphone" — not left as a blank control |
+| Input muted | the bar is drawn dead, not hidden: "off" and "broken" must not look alike |
+| Meter leaves the screen, or its disclosure is closed | metering stops; no device stays open to animate a bar nobody is looking at |
+| System audio | never metered, on either platform |
+| During recording | levels come from the live mixer; a device already in use is never opened a second time |
+| Clipping | the top of the scale is marked distinctly, so a level that is too hot is visible as such |
+
+#### Camera picture-in-picture
+
+| Case | Required behaviour |
+|---|---|
+| Drag past a canvas edge | clamped to the margin |
+| Preset changed mid-drag | the drag ends at the tile's current position; the new preset's size is applied around it, then re-clamped |
+| Camera swapped for one with a different shape, on the `Camera` preset | the tile keeps its top-left and width; the height changes; the position is re-clamped if that pushes it out |
+| Camera swapped, on `Square` or `Circle` | nothing moves — the tile is 1:1 whatever the sensor is; only what the centre crop contains changes |
+| A camera narrower than the crop needs | the crop takes the full width and the full height it can; it is never upscaled past the sensor's own pixels |
+| Camera turned off mid-drag | the drag ends; the preset and position are kept for when the camera returns |
+| Adjusted while paused | allowed; applies to frames after resume |
+| Source window resized mid-session | ratios are relative to the canvas, so the tile follows whatever §30.3 resolves — **this scope does not resolve §30.3** |
+| Crash mid-session | neither the position nor the preset is persisted; the next session starts from the previous default |
+| Preview and output disagree about the crop | a defect, not a tolerance: design `1p` promises they are the same object |
+
+#### Responsive panel
+
+| Case | Required behaviour |
+|---|---|
+| Disclosure open when the window is resized | it stays open and its content reflows; the state is per input, not per width |
+| Disclosure state | remembered between launches, per input; a disclosure whose input has no details on this platform is not drawn |
+| Window resized while the source picker is open | the grid re-columns; selection and scroll position survive |
+| Window dragged between monitors of different DPI | the layout re-measures at the new scale |
+| Very tall window | the list grows; the footer stays pinned |
+| Any width | no horizontal scrolling |
+
+### 33.8 Platform differences this scope creates
+
+| | macOS | Windows |
+|---|---|---|
+| Camera device choice | yes | yes |
+| Microphone device choice | yes | yes |
+| System-audio device choice | **no** — ScreenCaptureKit delivers the system mix, there is no endpoint to choose | yes — WASAPI loopback is per render endpoint |
+
+Expressed as `RecorderCapabilities.selectableDeviceKinds`, never as an
+operating-system name (§28), and recorded in
+`docs/development/compatibility-matrix.md` on acceptance.
+
+### 33.9 What must be tested
+
+| Level | Coverage |
+|---|---|
+| Pure/unit | the capturable-window rule (**done**); strip drag, snap and clamp arithmetic; preset resolution and picture-in-picture geometry at every canvas size, both bounds and all three presets |
+| Widget | the disclosure — closed by default, opens, persists; the action sheet's states — loading, empty, selected, device lost, no permission, silent; the meter's dead and clipping states; the strip's click-versus-drag threshold; every reflowing screen at all three widths |
+| Plugin | device enumeration and `selectInputDevice` payloads, on both platforms or neither |
+| Integration | the third overlay is absent from a recording made from a **display** source; a device swapped mid-recording produces one continuous file; each camera preset lands in the file at the geometry the preview drew |
+| Soak (§24) | repeated microphone swaps during a long recording, verified for A/V sync at the end |
+
+### 33.10 Suggested delivery order
+
+Each stage is shippable on its own and none of them requires the next.
+
+| Stage | Contents | State |
+|---|---|---|
+| A | Real windows only; thumbnails in their own colours | **shipped** — §4.1 |
+| B | Responsive panel; Windows opens at the right size | **shipped** — §33.6 |
+| C | Device enumeration and selection *before* recording, behind a disclosure, with the microphone's level meter | **shipped** — §33.2, §33.4 (launch screen only) |
+| D | The strip moves, and remembers where it was left | **shipped** — §33.3 |
+| E | Device menus **on the strip**; live swapping mid-recording; the strip's keyboard movement and `Reset position` | not started |
+| F | The camera picture-in-picture is dragged, and sized by preset | not started |
+
+What stage C did **not** ship, and §33.2 still requires: `selectInputDevice` —
+changing a device while a recording is running. Choosing before a recording
+works on both platforms; changing during one is stage E.
+
+### 33.11 Folding this section away
+
+Each stage folds into the numbered sections as it ships, and §33 is deleted once
+the last one has:
+
+| When this ships | Fold into |
+|---|---|
+| C (device selection) — **done**, fold pending stage E | §8 and §20 |
+| D and E (the strip) | §6 |
+| F (the picture-in-picture) | §7, §2's deferred list, and the no-crop invariant in §7 **and in `CLAUDE.md`** — see §33.5 |
+| B (the panel) — **done**, fold pending | the design notes and §29 |
+
+`docs/architecture/platform-channel-contract.md` is updated with each stage that
+changes the wire, not at the end. `docs/development/compatibility-matrix.md`
+records what is verified per platform as each stage lands.

@@ -29,6 +29,17 @@ constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme"
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
 
+// The panel's width range and minimum height, in logical pixels
+// (TECHNICAL_SPEC.md §33.6, and `lib/design_system/tokens/app_spacing.dart`).
+//
+// 420 is the width every screen is drawn at and stays the minimum; past 960 a
+// utility panel is a window pretending to be an application. macOS enforces the
+// same three numbers through `contentMinSize` / `contentMaxSize`, and the two
+// must be changed together or the same build has two different shapes.
+constexpr int kPanelMinWidth = 420;
+constexpr int kPanelMaxWidth = 960;
+constexpr int kPanelMinHeight = 460;
+
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 
 // Scale helper to convert logical scaler values to physical using passed in
@@ -204,6 +215,38 @@ Win32Window::MessageHandler(HWND hwnd,
         MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
                    rect.bottom - rect.top, TRUE);
       }
+      return 0;
+    }
+
+    case WM_GETMINMAXINFO: {
+      // The limits above are the size of the Flutter *client* area, so the
+      // non-client chrome has to be added back before they are reported as
+      // window sizes — otherwise the title bar and borders eat into the 420 and
+      // the reference layout is squeezed below the width it is drawn at.
+      RECT window_rect;
+      RECT client_rect;
+      if (GetWindowRect(hwnd, &window_rect) == FALSE ||
+          GetClientRect(hwnd, &client_rect) == FALSE) {
+        break;
+      }
+      const LONG chrome_width = (window_rect.right - window_rect.left) -
+                                (client_rect.right - client_rect.left);
+      const LONG chrome_height = (window_rect.bottom - window_rect.top) -
+                                 (client_rect.bottom - client_rect.top);
+      const UINT dpi = FlutterDesktopGetDpiForMonitor(
+          MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+      const double scale_factor = dpi / 96.0;
+
+      auto* bounds = reinterpret_cast<MINMAXINFO*>(lparam);
+      bounds->ptMinTrackSize.x =
+          Scale(kPanelMinWidth, scale_factor) + chrome_width;
+      bounds->ptMinTrackSize.y =
+          Scale(kPanelMinHeight, scale_factor) + chrome_height;
+      bounds->ptMaxTrackSize.x =
+          Scale(kPanelMaxWidth, scale_factor) + chrome_width;
+      // Height is deliberately left unbounded: a long source list is worth a
+      // tall window, and only the width has a point past which it stops
+      // helping.
       return 0;
     }
 

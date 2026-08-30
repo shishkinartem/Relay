@@ -182,6 +182,31 @@ Each control's hit target also claims half the 12 px gap on each side, so the
 row of controls has no dead space in it and every control spans the strip's full
 height. The drawn squares are unchanged.
 
+### Components added for §33.2
+
+| Component | What it is | Why it is shared |
+|---|---|---|
+| `AppDisclosure` | A row whose detail settings are put away until asked for. Its primary control — the input's On / Off — sits in `headerTrailing`, **outside** the tap target | The separation is the point: reaching for Off must never open a panel, and reaching for the details must never mute an input. A screen that rebuilt this would eventually get that wrong |
+| `AppLevelMeter` | A ticked bar with a fill and a peak marker, plus a dashed *dead* state | Two values rather than one: the fill is the sustained level a user reads as "am I coming through", the hairline marker is the loudest instant, which is what says "too hot" before anything clips. Drawn dead rather than hidden, so "off" and "broken" do not look the same |
+| `AppSelectField` | The closed state of a choice — what is chosen, and a chevron. A dashed border and no chevron when there is nothing to pick | "There is one of these" and "you may pick one" must not be the same picture |
+| `AppOptionTile` | One row of an open choice, with a disabled state for a device the platform lists but cannot open | The control strip's action sheet reuses this shape when it arrives (§33.4) |
+
+### Documented deviation: capture thumbnails are not duotoned
+
+The Industry system washes photography in the accent — "every content
+photograph goes through `.duotone`". Capture thumbnails do not, in the source
+picker (`SourceCard`) or in the launch screen's selected-source row.
+
+They are not content photographs. They exist so a user can tell one of fifteen
+windows from another, and the accent wash removes exactly the information that
+distinguishes them: a blue-washed screenshot of an editor and a blue-washed
+screenshot of a browser read as the same object. `TECHNICAL_SPEC.md` §4.1 states
+this as behaviour.
+
+`DuotoneFilter` is unchanged and still correct everywhere else it is used — the
+camera-preview placeholder and the ready screen's figure, both of which are
+decorative rather than identifying.
+
 ## Missing states
 
 The technical model may contain states not yet designed.

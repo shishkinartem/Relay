@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import 'media_device.dart';
 import 'recorder_error.dart';
 
 /// Where the platform session currently is.
@@ -54,6 +55,25 @@ sealed class RecorderEvent {
           microphoneEnabled: map['microphoneEnabled'] as bool? ?? false,
           cameraEnabled: map['cameraEnabled'] as bool? ?? false,
           systemAudioEnabled: map['systemAudioEnabled'] as bool? ?? false,
+        );
+      case 'inputLevel':
+        final MediaDeviceKind? kind = MediaDeviceKind.fromName(
+          map['kind'] as String?,
+        );
+        if (kind == null) {
+          // A level for an input this build does not know is not a level it can
+          // draw. Reported as an event it will simply ignore, rather than
+          // attributed to the wrong meter.
+          return RecorderErrorEvent(
+            RecorderErrorCode.unknown,
+            'Level for an unknown input kind: ${map['kind']}',
+            fatal: false,
+          );
+        }
+        return RecorderInputLevelEvent(kind, InputLevel.fromMap(map));
+      case 'devicesChanged':
+        return RecorderDevicesChangedEvent(
+          MediaDeviceKind.fromName(map['kind'] as String?),
         );
       case 'error':
         return RecorderErrorEvent(
@@ -131,4 +151,27 @@ class RecorderErrorEvent extends RecorderEvent {
   /// A non-fatal error degrades the session (an optional input dropped out);
   /// a fatal one ends it.
   final bool fatal;
+}
+
+/// A metering sample for one input (§33.2).
+///
+/// Arrives only while metering is running — `startInputMetering` opens the tap
+/// and `stopInputMetering` closes it, so nothing streams for a bar nobody is
+/// looking at.
+class RecorderInputLevelEvent extends RecorderEvent {
+  const RecorderInputLevelEvent(this.kind, this.level);
+
+  final MediaDeviceKind kind;
+  final InputLevel level;
+}
+
+/// The set of devices of some kind changed — something was plugged in, removed,
+/// or became the system default.
+///
+/// [kind] is null when the platform cannot say which kind changed, which means
+/// "re-read everything".
+class RecorderDevicesChangedEvent extends RecorderEvent {
+  const RecorderDevicesChangedEvent(this.kind);
+
+  final MediaDeviceKind? kind;
 }

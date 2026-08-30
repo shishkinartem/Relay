@@ -81,6 +81,13 @@ class RecordingSession {
   // affinity is the only thing keeping the overlays out of the file (spec 6).
   void SetExcludedWindows(std::vector<HWND> windows);
 
+  // The accumulator the plugin's input meter drains. Owned by the plugin,
+  // which outlives every session, and filled only while the microphone capture
+  // is running: the meter reads the live level from here rather than opening a
+  // second handle on a microphone this session already holds (spec 33.2). Set
+  // before Prepare.
+  void SetMicrophoneLevelMeter(LevelAccumulator* meter);
+
   bool Prepare(const RecordingConfig& config, RecorderError* error);
   bool Start(RecorderError* error);
   bool Pause(RecorderError* error);
@@ -143,6 +150,7 @@ class RecordingSession {
   AudioRingBuffer system_audio_ring_{kAudioRingFrames};
   AudioMixer mixer_{&microphone_ring_, &system_audio_ring_};
   std::unique_ptr<AudioCapture> microphone_;
+  LevelAccumulator* microphone_meter_ = nullptr;
   std::unique_ptr<AudioCapture> system_audio_;
 
   // Composed frames waiting for the encoder. Capacity 2, and a frame arriving

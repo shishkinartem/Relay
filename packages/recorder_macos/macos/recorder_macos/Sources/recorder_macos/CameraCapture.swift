@@ -49,13 +49,15 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     return 16.0 / 9.0
   }
 
-  func start() throws {
+  /// Opens `device`, which the session resolved from the configuration — nil
+  /// where the machine has no camera at all (§33.2).
+  ///
+  /// The device arrives rather than being looked up here so one place decides
+  /// what a null device id means: `InputDeviceEnumerator.defaultDevice`, which
+  /// still evaluates exactly the expression this method used to hard-code.
+  func start(device: AVCaptureDevice?) throws {
     guard !isRunning else { return }
-    guard
-      let device = AVCaptureDevice.default(
-        .builtInWideAngleCamera, for: .video, position: .front)
-        ?? AVCaptureDevice.default(for: .video)
-    else {
+    guard let device else {
       throw RecorderError(.cameraUnavailable, "No camera is available.")
     }
     guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
@@ -163,11 +165,49 @@ final class MicrophoneCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
   /// Called on the capture queue. Must not block or touch the file system.
   var onSampleBuffer: ((CMSampleBuffer) -> Void)?
 
-  private(set) var isRunning = false
+  /// Guards the two things the capture queue shares with this object's owner:
+  /// `running`, which `InputMeter` reads from its own queue to decide whether a
+  /// recording already holds this microphone, and `level`, which the meter
+  /// installs and clears while buffers are already arriving.
+  private let stateLock = NSLock()
+  private var running = false
+  private var level: ((AudioLevel) -> Void)?
 
-  func start() throws {
+  /// The meter's tap, called on the capture queue with every buffer's level.
+  ///
+  /// A level, never the buffer: the meter reads the capture a recording already
+  /// owns instead of opening a second handle on the same microphone (§33.7),
+  /// and §3 keeps the audio itself native.
+  var onLevel: ((AudioLevel) -> Void)? {
+    get {
+      stateLock.lock()
+      defer { stateLock.unlock() }
+      return level
+    }
+    set {
+      stateLock.lock()
+      level = newValue
+      stateLock.unlock()
+    }
+  }
+
+  var isRunning: Bool {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return running
+  }
+
+  private func setRunning(_ value: Bool) {
+    stateLock.lock()
+    running = value
+    stateLock.unlock()
+  }
+
+  /// Opens `device` — the one the session resolved, or the meter's own default.
+  /// See `CameraCapture.start(device:)` for why it is passed in.
+  func start(device: AVCaptureDevice?) throws {
     guard !isRunning else { return }
-    guard let device = AVCaptureDevice.default(for: .audio) else {
+    guard let device else {
       throw RecorderError(.microphoneUnavailable, "No microphone is available.")
     }
     guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
@@ -215,12 +255,12 @@ final class MicrophoneCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     session.commitConfiguration()
 
     session.startRunning()
-    isRunning = true
+    setRunning(true)
   }
 
   func stop() {
     guard isRunning else { return }
-    isRunning = false
+    setRunning(false)
     session.stopRunning()
     output.setSampleBufferDelegate(nil, queue: nil)
   }
@@ -240,5 +280,66 @@ final class MicrophoneCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     from connection: AVCaptureConnection
   ) {
     onSampleBuffer?(sampleBuffer)
+    // Measured only while something is metering, so an ordinary recording pays
+    // nothing for a meter nobody asked for (§33.2).
+    if let onLevel {
+      onLevel(MicrophoneCapture.level(of: sampleBuffer))
+    }
+  }
+
+  /// One buffer's peak and RMS, in linear amplitude.
+  ///
+  /// Reads the 32-bit float samples `output.audioSettings` above asks for; a
+  /// buffer in any other format is reported as silence rather than as noise
+  /// read out of a misread layout. The arithmetic itself is in `AudioLevel`,
+  /// where `swift test` covers it.
+  private static func level(of sampleBuffer: CMSampleBuffer) -> AudioLevel {
+    guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+      let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
+      asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+      asbd.mBitsPerChannel == 32
+    else { return .silent }
+
+    // Sized from the buffer rather than assumed: a non-interleaved list needs
+    // one `AudioBuffer` per channel, and a list too small to hold it fails the
+    // second call outright.
+    var listSize = 0
+    guard
+      CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer, bufferListSizeNeededOut: &listSize, bufferListOut: nil,
+        bufferListSize: 0, blockBufferAllocator: nil,
+        blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: nil) == noErr,
+      listSize >= MemoryLayout<AudioBufferList>.size
+    else { return .silent }
+
+    let memory = UnsafeMutableRawPointer.allocate(
+      byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+    defer { memory.deallocate() }
+    let list = memory.bindMemory(to: AudioBufferList.self, capacity: 1)
+
+    var blockBuffer: CMBlockBuffer?
+    guard
+      CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer, bufferListSizeNeededOut: nil, bufferListOut: list,
+        bufferListSize: listSize, blockBufferAllocator: nil,
+        blockBufferMemoryAllocator: nil,
+        flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        blockBufferOut: &blockBuffer) == noErr
+    else { return .silent }
+
+    // The samples live in the block buffer, so it has to outlive the reads;
+    // its last use above is an `inout` argument, which is where ARC would
+    // otherwise be free to release it.
+    return withExtendedLifetime(blockBuffer) {
+      var level = AudioLevel.silent
+      for buffer in UnsafeMutableAudioBufferListPointer(list) {
+        guard let data = buffer.mData else { continue }
+        let samples = UnsafeBufferPointer(
+          start: data.assumingMemoryBound(to: Float.self),
+          count: Int(buffer.mDataByteSize) / MemoryLayout<Float>.size)
+        level = level.loudest(AudioLevel.measuring(samples))
+      }
+      return level
+    }
   }
 }

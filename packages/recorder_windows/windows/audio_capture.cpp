@@ -5,6 +5,7 @@
 #include <objbase.h>
 
 #include <algorithm>
+#include <utility>
 
 namespace relay {
 
@@ -18,7 +19,12 @@ constexpr DWORD kMicrophoneWaitMs = 200;
 // small to accumulate.
 constexpr REFERENCE_TIME kBufferDuration = 5000000;
 
-bool FormatIsFloat(const WAVEFORMATEX* format) {
+}  // namespace
+
+bool WaveFormatIsFloat(const WAVEFORMATEX* format) {
+  if (format == nullptr) {
+    return false;
+  }
   if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
     return true;
   }
@@ -32,12 +38,15 @@ bool FormatIsFloat(const WAVEFORMATEX* format) {
   return false;
 }
 
-}  // namespace
-
-AudioCapture::AudioCapture(Kind kind, AudioRingBuffer* sink) : kind_(kind), sink_(sink) {}
+AudioCapture::AudioCapture(Kind kind, AudioRingBuffer* sink, LevelAccumulator* meter)
+    : kind_(kind), sink_(sink), meter_(meter) {}
 
 AudioCapture::~AudioCapture() {
   Stop();
+}
+
+void AudioCapture::SetDeviceId(std::string id) {
+  device_id_ = std::move(id);
 }
 
 bool AudioCapture::OpenEndpoint(std::string* error) {
@@ -50,12 +59,30 @@ bool AudioCapture::OpenEndpoint(std::string* error) {
     return false;
   }
   const EDataFlow flow = kind_ == Kind::kSystemAudio ? eRender : eCapture;
-  hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, device_.put());
-  if (FAILED(hr)) {
-    *error = kind_ == Kind::kSystemAudio
-                 ? "No audio output device is available to record."
-                 : "No microphone is available.";
-    return false;
+  // A chosen endpoint that no longer resolves — unplugged between the last
+  // enumeration and this recording — degrades to the default rather than
+  // failing prepare: a wrong endpoint is a degraded recording, a refused
+  // prepare is no recording at all (spec 33.2).
+  bool fell_back = false;
+  if (!device_id_.empty()) {
+    DWORD state = 0;
+    if (FAILED(enumerator->GetDevice(Widen(device_id_).c_str(), device_.put())) ||
+        FAILED(device_->GetState(&state)) || state != DEVICE_STATE_ACTIVE) {
+      device_ = nullptr;
+      fell_back = true;
+    }
+  }
+  if (!device_) {
+    hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, device_.put());
+    if (FAILED(hr)) {
+      *error = kind_ == Kind::kSystemAudio
+                   ? "No audio output device is available to record."
+                   : "No microphone is available.";
+      return false;
+    }
+  }
+  if (fell_back) {
+    ReportFallback();
   }
   hr = device_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, client_.put_void());
   if (FAILED(hr)) {
@@ -96,7 +123,7 @@ bool AudioCapture::OpenEndpoint(std::string* error) {
   }
 
   resampler_.Configure(mix_format_->nSamplesPerSec, mix_format_->nChannels,
-                       FormatIsFloat(mix_format_), mix_format_->wBitsPerSample);
+                       WaveFormatIsFloat(mix_format_), mix_format_->wBitsPerSample);
   return true;
 }
 
@@ -163,6 +190,25 @@ void AudioCapture::ReportFailure(const std::string& message, HRESULT hr) {
   on_error_(error);
 }
 
+void AudioCapture::ReportFallback() {
+  if (!on_error_) {
+    return;
+  }
+  RecorderError error;
+  error.code = kind_ == Kind::kSystemAudio ? RecorderErrorCode::kSystemAudioUnavailable
+                                           : RecorderErrorCode::kMicrophoneUnavailable;
+  error.message = kind_ == Kind::kSystemAudio
+                      ? "The chosen audio output is no longer available. Recording "
+                        "the system default instead."
+                      : "The chosen microphone is no longer available. Recording the "
+                        "system default instead.";
+  error.details = device_id_;
+  // The recording continues on the default device: this degrades the session,
+  // it never ends it (spec 19, 23).
+  error.fatal = false;
+  on_error_(error);
+}
+
 void AudioCapture::CaptureThread() {
   const HRESULT com = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   DWORD task_index = 0;
@@ -176,6 +222,14 @@ void AudioCapture::CaptureThread() {
     if (FAILED(hr)) {
       ReportFailure("The audio stream could not be started.", hr);
     } else {
+      if (meter_ != nullptr) {
+        // This capture owns the device from here until the loop exits, so the
+        // meter reads its levels instead of opening a handle of its own
+        // (spec 33.2). Claimed only once the stream is actually running: a
+        // capture that never opened must not stand between the meter and its
+        // own endpoint tap.
+        meter_->SetLive(true);
+      }
       while (running_.load()) {
         const HANDLE wait_handle =
             kind_ == Kind::kMicrophone && ready_event_ != nullptr ? ready_event_ : nullptr;
@@ -224,15 +278,34 @@ void AudioCapture::CaptureThread() {
               clock_ != nullptr ? clock_->MediaTime100ns(static_cast<int64_t>(qpc_position))
                                 : -1;
           const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-          if (media_100ns >= 0 && !silent && data != nullptr && sink_ != nullptr) {
+          const bool writing =
+              media_100ns >= 0 && !silent && data != nullptr && sink_ != nullptr;
+          // The meter is fed from the packets this capture already reads, so a
+          // level never costs a second handle on this device (spec 33.2), and
+          // none of this arithmetic happens at all while nothing is metering.
+          //
+          // A packet that arrives while the session is paused is metered but
+          // not written: the bar keeps showing what the microphone hears even
+          // though none of it is being recorded. That is this platform's answer
+          // to the open point in the channel contract, and macOS is free to
+          // answer differently until the specification decides.
+          const bool metering = meter_ != nullptr && meter_->enabled();
+          if (writing || (metering && !silent && data != nullptr)) {
             converted_.clear();
             resampler_.Process(data, frames, &converted_);
+            if (metering) {
+              meter_->Add(converted_.data(), converted_.size());
+            }
             const size_t converted_frames = converted_.size() / kMixChannels;
-            if (converted_frames > 0) {
+            if (writing && converted_frames > 0) {
               const int64_t start_frame =
                   (media_100ns * static_cast<int64_t>(kMixSampleRate)) / 10000000LL;
               sink_->Write(start_frame, converted_.data(), converted_frames);
             }
+          } else if (metering) {
+            // A silent packet is a level of zero, not the absence of one: a
+            // bar that stops updating reads as frozen rather than as quiet.
+            meter_->Add(nullptr, static_cast<size_t>(frames) * kMixChannels);
           }
           capture_->ReleaseBuffer(frames);
         }
@@ -240,6 +313,11 @@ void AudioCapture::CaptureThread() {
     }
   }
 
+  if (meter_ != nullptr) {
+    // Released before the endpoint is, on every exit path — including the ones
+    // that never claimed it, where this is a no-op.
+    meter_->SetLive(false);
+  }
   CloseEndpoint();
   if (task != nullptr) {
     ::AvRevertMmThreadCharacteristics(task);

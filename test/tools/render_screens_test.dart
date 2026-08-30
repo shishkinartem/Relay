@@ -87,6 +87,56 @@ void main() {
     await capture(tester, '1c_launch', harness.wrap(const LaunchScreen()));
   });
 
+  testWidgets('1c launch screen with the input details open', (
+    WidgetTester tester,
+  ) async {
+    // §33.2: closed is the default and the screen that shipped; this is the
+    // other half of the disclosure, and the one the design review has to see.
+    final TestHarness harness = await TestHarness.create(
+      settings: const AppSettings(
+        cameraEnabled: true,
+        expandedInputs: <MediaDeviceKind>{
+          MediaDeviceKind.microphone,
+          MediaDeviceKind.systemAudio,
+          MediaDeviceKind.camera,
+        },
+      ),
+    );
+    addTearDown(harness.dispose);
+    await harness.initialize();
+    // The tap is opened first: a level that arrives before it would be the tail
+    // of a stream nobody asked for, and the meter drops it by design.
+    await harness.viewModel.startMetering(MediaDeviceKind.microphone);
+    harness.recorder.emit(
+      const RecorderInputLevelEvent(
+        MediaDeviceKind.microphone,
+        InputLevel(peak: 0.74, rms: 0.62),
+      ),
+    );
+    await capture(
+      tester,
+      '1c_launch_inputs_open',
+      harness.wrap(const LaunchScreen()),
+      size: const Size(AppSpacing.panelWidth, 900),
+    );
+  });
+
+  testWidgets('1a source picker at the wide breakpoint', (
+    WidgetTester tester,
+  ) async {
+    // §33.6: the same screen at the width where the grid takes four columns.
+    final TestHarness harness = await TestHarness.create();
+    addTearDown(harness.dispose);
+    await harness.initialize();
+    await harness.viewModel.openSourcePicker();
+    await capture(
+      tester,
+      '1a_source_picker_wide',
+      harness.wrap(const SourcePickerScreen()),
+      size: const Size(AppSpacing.panelMaxWidth, AppSpacing.panelMaxHeight),
+    );
+  });
+
   testWidgets('1a source picker', (WidgetTester tester) async {
     final TestHarness harness = await TestHarness.create();
     addTearDown(harness.dispose);

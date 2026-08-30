@@ -22,6 +22,20 @@ it decides. Where the two disagree, the ADR is current and the spec is stale.
 | [Overlay panels are sized once per show](2026-08-24-overlay-panels-are-sized-once-per-show.md) | Accepted |
 | [A screen-recording answer is pending until the app reopens, and Relay reopens itself](2026-08-24-screen-recording-permission-applies-on-relaunch.md) | Accepted |
 
+## Accepted 2026-08-30, in delivery
+
+Accepted together after the design review. `TECHNICAL_SPEC.md` §33 is the live
+specification for the scope they describe and tracks which stages have shipped;
+each part is folded into its numbered spec section as it lands, not before —
+so the numbered sections never describe behaviour that does not exist yet.
+
+| Decision | Status |
+|---|---|
+| [Inputs are chosen from a device list, before and during a recording](2026-08-30-input-device-selection.md) | Accepted — enumeration, selection and metering shipped; live swapping is not |
+| [The control strip moves, and each input discloses its devices](2026-08-30-movable-control-strip-and-input-menus.md) | Accepted — the launch-screen disclosure shipped; the strip is not built |
+| [The camera picture-in-picture is dragged by hand and sized by preset](2026-08-30-user-adjustable-camera-pip.md) | Accepted — amends a core product invariant; not built |
+| [The panel has a width range, and the layout answers to it](2026-08-30-responsive-panel.md) | Accepted — shipped |
+
 ## Filename
 
 ```text

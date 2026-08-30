@@ -22,6 +22,11 @@ class FakeRecorder implements Recorder {
         CaptureSourceType.display,
         CaptureSourceType.window,
       },
+      selectableDeviceKinds: <MediaDeviceKind>{
+        MediaDeviceKind.camera,
+        MediaDeviceKind.microphone,
+      },
+      meterableDeviceKinds: <MediaDeviceKind>{MediaDeviceKind.microphone},
       supportsCamera: true,
       supportsMicrophone: true,
       supportsSystemAudio: true,
@@ -31,7 +36,9 @@ class FakeRecorder implements Recorder {
       platformName: 'fake',
     ),
     List<CaptureSource>? sources,
-  }) : sources = sources ?? defaultSources;
+    Map<MediaDeviceKind, List<MediaDevice>>? devices,
+  }) : sources = sources ?? defaultSources,
+       devices = devices ?? defaultDevices;
 
   static final List<CaptureSource> defaultSources = <CaptureSource>[
     const CaptureSource(
@@ -61,8 +68,49 @@ class FakeRecorder implements Recorder {
     ),
   ];
 
+  /// System default first, then the platform's own order — the ordering the
+  /// contract promises (§33.2).
+  static final Map<MediaDeviceKind, List<MediaDevice>> defaultDevices =
+      <MediaDeviceKind, List<MediaDevice>>{
+        MediaDeviceKind.camera: <MediaDevice>[
+          const MediaDevice(
+            id: 'camera:facetime',
+            kind: MediaDeviceKind.camera,
+            label: 'FaceTime HD Camera',
+            isSystemDefault: true,
+          ),
+          const MediaDevice(
+            id: 'camera:brio',
+            kind: MediaDeviceKind.camera,
+            label: 'Logitech Brio',
+          ),
+        ],
+        MediaDeviceKind.microphone: <MediaDevice>[
+          const MediaDevice(
+            id: 'mic:builtin',
+            kind: MediaDeviceKind.microphone,
+            label: 'MacBook Pro Microphone',
+            isSystemDefault: true,
+          ),
+          const MediaDevice(
+            id: 'mic:mv7',
+            kind: MediaDeviceKind.microphone,
+            label: 'Shure MV7',
+          ),
+        ],
+        MediaDeviceKind.systemAudio: <MediaDevice>[],
+      };
+
   RecorderCapabilities capabilities;
   List<CaptureSource> sources;
+  Map<MediaDeviceKind, List<MediaDevice>> devices;
+
+  /// Kinds currently metering, so a test can assert the tap is closed again.
+  final Set<MediaDeviceKind> metering = <MediaDeviceKind>{};
+
+  /// Which device each open tap was asked for. Null is the platform default.
+  final Map<MediaDeviceKind, String?> meteredDevices =
+      <MediaDeviceKind, String?>{};
 
   final List<String> calls = <String>[];
   final StreamController<RecorderEvent> _events =
@@ -73,6 +121,7 @@ class FakeRecorder implements Recorder {
   RecorderException? failOnEnumerate;
   RecorderException? failOnPause;
   RecorderException? failOnMicrophoneToggle;
+  RecorderException? failOnEnumerateDevices;
 
   /// Completed by the test to release a pause that is "in flight", so an
   /// overlapping command can be issued the way a second click would.
@@ -152,6 +201,33 @@ class FakeRecorder implements Recorder {
       throw failure;
     }
     return sources;
+  }
+
+  @override
+  Future<List<MediaDevice>> getInputDevices(MediaDeviceKind kind) async {
+    calls.add('getInputDevices(${kind.name})');
+    final RecorderException? failure = failOnEnumerateDevices;
+    if (failure != null) {
+      throw failure;
+    }
+    return devices[kind] ?? const <MediaDevice>[];
+  }
+
+  @override
+  Future<void> startInputMetering(
+    MediaDeviceKind kind, {
+    String? deviceId,
+  }) async {
+    calls.add('startInputMetering(${kind.name}, ${deviceId ?? 'default'})');
+    metering.add(kind);
+    meteredDevices[kind] = deviceId;
+  }
+
+  @override
+  Future<void> stopInputMetering(MediaDeviceKind kind) async {
+    calls.add('stopInputMetering(${kind.name})');
+    metering.remove(kind);
+    meteredDevices.remove(kind);
   }
 
   @override
@@ -353,8 +429,23 @@ class FakeOverlayWindowController implements OverlayWindowController {
       StreamController<OverlayCommand>.broadcast();
   List<String> excluded = <String>['3001', '3002'];
 
+  /// The placements the strip was shown at, so a test can assert what the
+  /// remembered position turned into.
+  final List<OverlayPlacement> stripPlacements = <OverlayPlacement>[];
+
+  /// What the host would report the strip's position to be. Null stands for a
+  /// host that cannot read one — a strip already hidden, or a display it can no
+  /// longer name.
+  OverlayStripPosition? reportedStripPosition;
+
   @override
   Stream<OverlayCommand> get commands => commandController.stream;
+
+  @override
+  Future<OverlayStripPosition?> controlStripPosition() async {
+    calls.add('controlStripPosition');
+    return reportedStripPosition;
+  }
 
   @override
   Future<List<String>> excludedWindowIds() async => excluded;
@@ -382,8 +473,10 @@ class FakeOverlayWindowController implements OverlayWindowController {
   }
 
   @override
-  Future<void> showControlStrip(OverlayPlacement placement) async =>
-      calls.add('showControlStrip');
+  Future<void> showControlStrip(OverlayPlacement placement) async {
+    calls.add('showControlStrip');
+    stripPlacements.add(placement);
+  }
 
   @override
   Future<void> updateControlStrip(RecordingOverlayState state) async {

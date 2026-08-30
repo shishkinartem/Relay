@@ -26,7 +26,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
+  // The panel's preferred size, matching macOS. The Flutter template's default
+  // 1280 x 720 stretched a layout drawn for 420 across a whole window, so the
+  // same build looked considered on one platform and unfinished on the other
+  // (TECHNICAL_SPEC.md §33.6). `WM_GETMINMAXINFO` in win32_window.cpp holds the
+  // range this opens inside.
+  Win32Window::Size size(420, 560);
   if (!window.Create(L"relay", origin, size)) {
     return EXIT_FAILURE;
   }

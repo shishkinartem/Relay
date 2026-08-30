@@ -520,6 +520,231 @@ void main() {
     });
   });
 
+  group('SourceCard', () {
+    // §4.1: a source entry exists so the user can tell one of fifteen windows
+    // from another. The system duotones photography into the accent, and a
+    // capture thumbnail is the one image in the product that must not be
+    // recoloured — two blue-washed screenshots look like the same screenshot.
+    testWidgets('capture thumbnails are shown in their own colours', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          SourceCard(
+            title: 'Terminal',
+            subtitle: 'zsh — flutter run',
+            selected: false,
+            onSelected: () {},
+          ),
+        ),
+      );
+
+      expect(
+        find.descendant(
+          of: find.byType(SourceCard),
+          matching: find.byType(DuotoneFilter),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the thumbnail is clipped to its slot', (
+      WidgetTester tester,
+    ) async {
+      // `BoxFit.cover` paints outside the box it is given. The clip used to
+      // come from `DuotoneFilter`; dropping the wash must not drop the clip.
+      await tester.pumpWidget(
+        host(
+          SourceCard(
+            title: 'Terminal',
+            subtitle: 'zsh — flutter run',
+            selected: false,
+            onSelected: () {},
+          ),
+        ),
+      );
+
+      expect(
+        find.descendant(
+          of: find.byType(SourceCard),
+          matching: find.byType(ClipRect),
+        ),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('AppDisclosure (§33.2)', () {
+    testWidgets('the row control is not part of the disclosure target', (
+      WidgetTester tester,
+    ) async {
+      // The failure this prevents: reaching for Off and opening a panel, or
+      // reaching for the details and muting an input.
+      int toggles = 0;
+      int controlTaps = 0;
+      await tester.pumpWidget(
+        host(
+          AppDisclosure(
+            semanticLabel: 'Microphone settings',
+            expanded: false,
+            onToggle: (_) => toggles++,
+            header: const Text('Microphone'),
+            headerTrailing: GestureDetector(
+              onTap: () => controlTaps++,
+              child: const SizedBox(width: 60, height: 24, child: Text('Off')),
+            ),
+            child: const Text('details'),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Off'));
+      expect(toggles, 0);
+      expect(controlTaps, 1);
+
+      await tester.tap(find.text('Microphone'));
+      expect(toggles, 1);
+    });
+
+    testWidgets('a closed disclosure builds none of its detail', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          AppDisclosure(
+            semanticLabel: 'Microphone settings',
+            expanded: false,
+            onToggle: (_) {},
+            header: const Text('Microphone'),
+            child: const Text('details'),
+          ),
+        ),
+      );
+
+      expect(find.text('details'), findsNothing);
+    });
+
+    testWidgets('nothing to disclose draws no chevron at all', (
+      WidgetTester tester,
+    ) async {
+      // A control that can never do anything is not a disabled control.
+      await tester.pumpWidget(
+        host(
+          AppDisclosure(
+            semanticLabel: 'System audio settings',
+            expanded: false,
+            enabled: false,
+            onToggle: (_) {},
+            header: const Text('System audio'),
+            child: const Text('details'),
+          ),
+        ),
+      );
+
+      expect(find.byType(AppIcon), findsNothing);
+    });
+  });
+
+  group('AppLevelMeter (§33.2)', () {
+    testWidgets('reports the level it is drawing', (WidgetTester tester) async {
+      await tester.pumpWidget(
+        host(
+          const SizedBox(
+            width: 200,
+            child: AppLevelMeter(
+              level: 0.62,
+              peak: 0.74,
+              semanticLabel: 'Microphone level',
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        tester.getSemantics(find.byType(AppLevelMeter)),
+        matchesSemantics(label: 'Microphone level', value: '62%'),
+      );
+    });
+
+    testWidgets('a dead meter reports no value, and still occupies its row', (
+      WidgetTester tester,
+    ) async {
+      // Drawn rather than hidden: "off" and "broken" must not look the same,
+      // and a control that disappears reads as a layout bug.
+      await tester.pumpWidget(
+        host(
+          const SizedBox(
+            width: 200,
+            child: AppLevelMeter(
+              level: 0,
+              peak: 0,
+              enabled: false,
+              semanticLabel: 'Microphone level',
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byType(AppLevelMeter), findsOneWidget);
+      expect(tester.getSize(find.byType(AppLevelMeter)).height, 8);
+      expect(
+        tester.getSemantics(find.byType(AppLevelMeter)),
+        matchesSemantics(label: 'Microphone level'),
+      );
+    });
+  });
+
+  group('AppSelectField and AppOptionTile (§33.2)', () {
+    testWidgets('a field with nothing to choose is not a button', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          const AppSelectField(
+            label: 'System mix',
+            meta: 'not selectable here',
+            semanticLabel: 'System audio device',
+          ),
+        ),
+      );
+
+      expect(find.text('System mix'), findsOneWidget);
+      expect(
+        tester.getSemantics(find.byType(AppSelectField)),
+        matchesSemantics(
+          label: 'System audio device',
+          value: 'System mix',
+          hasEnabledState: false,
+          isReadOnly: true,
+        ),
+      );
+    });
+
+    testWidgets('an option the platform cannot open cannot be chosen', (
+      WidgetTester tester,
+    ) async {
+      int taps = 0;
+      await tester.pumpWidget(
+        host(
+          AppOptionTile(
+            label: 'Studio Interface',
+            meta: 'in use',
+            selected: false,
+            enabled: false,
+            onPressed: () => taps++,
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Studio Interface'));
+      expect(
+        taps,
+        0,
+        reason: 'shown so its absence is legible, not selectable',
+      );
+    });
+  });
+
   group('camera picture-in-picture geometry (§7)', () {
     test('the defaults are the accepted ADR values', () {
       const CameraOverlayConfiguration configuration =

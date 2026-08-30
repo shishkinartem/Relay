@@ -6,11 +6,11 @@
 # Flutter application build, so it cannot be configured on its own — and a test
 # target added there would drag GoogleTest into every app build.
 #
-# `recorder_types.cpp` is self-contained: it includes its own header, <algorithm>
-# and <sstream>, and nothing else in the plugin. That is what makes the pure
-# half — the wire contract, the picture-in-picture geometry, the canvas
-# arithmetic and the session clock — testable without Media Foundation, WGC or
-# Flutter.
+# `recorder_types.cpp` is self-contained: it includes its own header,
+# <algorithm>, <cmath> and <sstream>, and nothing else in the plugin. That is
+# what makes the pure half — the wire contract, the picture-in-picture geometry,
+# the canvas arithmetic, the session clock, the input-device ordering and the
+# level arithmetic — testable without Media Foundation, WGC or Flutter.
 #
 # Run on a Windows host:
 #

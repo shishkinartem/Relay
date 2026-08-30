@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'capture_source.dart';
+import 'media_device.dart';
 import 'recording_quality.dart';
 
 /// What the running platform implementation can actually do.
@@ -14,6 +15,8 @@ class RecorderCapabilities {
     required this.qualities,
     required this.supportedFrameRates,
     required this.supportedSourceTypes,
+    this.selectableDeviceKinds = const <MediaDeviceKind>{},
+    this.meterableDeviceKinds = const <MediaDeviceKind>{},
     required this.supportsCamera,
     required this.supportsMicrophone,
     required this.supportsSystemAudio,
@@ -32,6 +35,8 @@ class RecorderCapabilities {
     : qualities = const <RecordingQuality>{},
       supportedFrameRates = const <int>{},
       supportedSourceTypes = const <CaptureSourceType>{},
+      selectableDeviceKinds = const <MediaDeviceKind>{},
+      meterableDeviceKinds = const <MediaDeviceKind>{},
       supportsCamera = false,
       supportsMicrophone = false,
       supportsSystemAudio = false,
@@ -47,6 +52,23 @@ class RecorderCapabilities {
   final Set<RecordingQuality> qualities;
   final Set<int> supportedFrameRates;
   final Set<CaptureSourceType> supportedSourceTypes;
+
+  /// Which inputs offer a *choice* of device (§33.2).
+  ///
+  /// A kind absent from this set is still recorded; it simply has one device,
+  /// so the UI names it instead of offering a list of one. macOS reports
+  /// `{camera, microphone}` — ScreenCaptureKit delivers the system mix and
+  /// there is no endpoint to pick. This is the capability the UI reads; it must
+  /// never ask which operating system it is running on (§28).
+  final Set<MediaDeviceKind> selectableDeviceKinds;
+
+  /// Which inputs can report a live level (§33.2).
+  ///
+  /// System audio is deliberately absent on both platforms: a level the user
+  /// can act on is worth showing, and they can change neither the endpoint on
+  /// macOS nor what the machine is playing from inside this application.
+  final Set<MediaDeviceKind> meterableDeviceKinds;
+
   final bool supportsCamera;
   final bool supportsMicrophone;
   final bool supportsSystemAudio;
@@ -82,6 +104,13 @@ class RecorderCapabilities {
           a.targetHeight.compareTo(b.targetHeight),
     );
 
+  /// Unknown members are dropped rather than defaulted: a kind this build does
+  /// not know is not a kind it can offer.
+  static Set<MediaDeviceKind> _deviceKinds(Object? raw) => <MediaDeviceKind>{
+    for (final Object? entry in (raw as List<Object?>? ?? const <Object?>[]))
+      ?MediaDeviceKind.fromName(entry as String?),
+  };
+
   static RecorderCapabilities fromMap(Map<String, Object?> map) {
     return RecorderCapabilities(
       qualities: <RecordingQuality>{
@@ -102,6 +131,8 @@ class RecorderCapabilities {
             orElse: () => CaptureSourceType.display,
           ),
       },
+      selectableDeviceKinds: _deviceKinds(map['selectableDeviceKinds']),
+      meterableDeviceKinds: _deviceKinds(map['meterableDeviceKinds']),
       supportsCamera: map['supportsCamera'] as bool? ?? false,
       supportsMicrophone: map['supportsMicrophone'] as bool? ?? false,
       supportsSystemAudio: map['supportsSystemAudio'] as bool? ?? false,

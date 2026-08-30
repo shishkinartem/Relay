@@ -18,6 +18,13 @@
 
 namespace relay {
 
+// True when `format` carries IEEE float samples, which is what a shared-mode
+// endpoint hands out on almost every machine. Named rather than local because
+// the input meter's own tap converts its packets through the same resampler
+// this capture does, and a second copy of this test is a second answer
+// (input_devices.cpp).
+bool WaveFormatIsFloat(const WAVEFORMATEX* format);
+
 // WASAPI capture for one logical audio source.
 //
 // System audio is a loopback capture on the default render endpoint;
@@ -29,7 +36,10 @@ class AudioCapture {
 
   using ErrorHandler = std::function<void(const RecorderError&)>;
 
-  AudioCapture(Kind kind, AudioRingBuffer* sink);
+  // `meter` is the level accumulator the plugin's input meter drains while a
+  // recording is under way, so a level never costs a second handle on a device
+  // this capture already holds (spec 33.2). Null for a capture nothing meters.
+  AudioCapture(Kind kind, AudioRingBuffer* sink, LevelAccumulator* meter = nullptr);
   ~AudioCapture();
 
   AudioCapture(const AudioCapture&) = delete;
@@ -42,6 +52,12 @@ class AudioCapture {
   // Idempotent.
   void Stop();
 
+  // The endpoint to open, or empty for the platform's own default — which is
+  // exactly what this capture opened before device selection existed. Set
+  // before Start; an id that no longer resolves falls back to the default and
+  // reports a non-fatal error rather than failing the recording (spec 33.2).
+  void SetDeviceId(std::string id);
+
   bool running() const { return running_.load(); }
   Kind kind() const { return kind_; }
 
@@ -50,9 +66,12 @@ class AudioCapture {
   bool OpenEndpoint(std::string* error);
   void CloseEndpoint();
   void ReportFailure(const std::string& message, HRESULT hr);
+  void ReportFallback();
 
   const Kind kind_;
   AudioRingBuffer* const sink_;
+  LevelAccumulator* const meter_;
+  std::string device_id_;
   const SessionClock* clock_ = nullptr;
   ErrorHandler on_error_;
 

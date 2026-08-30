@@ -35,6 +35,63 @@ Only then does the second gate apply: the recording test skips when
 If you have granted screen recording and still see zero tests, it is the first gate,
 not a permission problem.
 
+## Input devices (§33.2)
+
+What each platform reports in `selectableDeviceKinds` / `meterableDeviceKinds`.
+The UI reads those capabilities, never the platform name.
+
+| Platform | Camera choice | Microphone choice | System-audio choice | Metering |
+|---|---|---|---|---|
+| macOS | selectable | selectable | **none** — ScreenCaptureKit delivers the system mix, so there is no endpoint to pick | microphone only |
+| Windows *(not built)* | selectable | selectable | selectable — WASAPI loopback is per render endpoint | microphone only |
+| Linux | deferred (§2) | deferred | deferred | deferred |
+
+Only the microphone is meterable on either platform. System audio carries no
+level on purpose: a level is worth showing where the user can act on it, and
+they can change neither the macOS endpoint nor what the machine is playing from
+inside this application.
+
+The Dart half of the contract is unit-tested by
+`packages/recorder_platform_interface/test/contract_test.dart`, group
+*input devices (§33.2)*. The table above is what each platform is contracted to
+report (§33.8), not a measurement: live enumeration against attached hardware
+was not exercised while it was written, and the Windows half has been neither
+compiled nor run on this host — see *Not verified*.
+
+### Where the two halves actually diverge
+
+Read off the sources on 2026-08-30, not intended behaviour. Anything here that
+disagrees with `../architecture/platform-channel-contract.md` is a gap in a
+platform, not a second reading of the contract.
+
+| Behaviour | macOS | Windows |
+|---|---|---|
+| `startInputMetering`'s `deviceId` | **ignored.** `InputMeter.openTap()` opens `InputDeviceEnumerator.defaultDevice(kind: .microphone)` whatever id arrived | **ignored.** `OpenDefaultCaptureMeter()` takes the default `eCapture` endpoint whatever id arrived |
+| `getInputDevices` with an absent or unrecognised `kind` | `[]` — `MediaDeviceKind(name:)` yields nil and the plugin answers with an empty list | **rejects** with `unknown` ("An input device kind is required.") |
+| `getInputDevices` under load | always answers; no queue between the call and AVFoundation | **rejects** with `unknown` ("busy with an earlier request") once the 16-deep serial COM worker is full |
+| `start`/`stopInputMetering` with an absent or unrecognised `kind` | silent no-op | **rejects** with `unknown`, before the meter is reached |
+| `isAvailable` on a media-device map | **computed**: `isConnected && !isSuspended && !isInUseByAnotherApplication` | **constant `true`** for every row. Only `DEVICE_STATE_ACTIVE` endpoints are enumerated at all, and openability is never probed — so §33.7's "device busy or held exclusively by another application: the meter says so rather than reading zero" cannot be satisfied from this field on Windows |
+| `isSystemDefault` | the device `AVCaptureDevice.default(for:)` would return | audio: the endpoint `GetDefaultAudioEndpoint(…, eConsole)` names. Cameras: **index 0**, because Media Foundation names no default and the recorder opens the first source |
+| Metering across `pause` | keeps reporting; `pause()` touches the clock and the state only | keeps reporting; packets are metered and simply not written |
+
+### What `devicesChanged` actually watches
+
+| Aspect | macOS | Windows |
+|---|---|---|
+| Registered | at plugin registration, always | on the **first `getInputDevices`** — nothing is watched until Dart enumerates once |
+| Source | `AVCaptureDevice.wasConnected` / `wasDisconnected` | `IMMNotificationClient` on the endpoint enumerator |
+| Cameras connecting / disconnecting | reported | **missed.** Audio endpoints only; a webcam plugged in mid-run needs a `WM_DEVICECHANGE` registration this plugin does not make |
+| Microphones connecting / disconnecting | reported | reported (`OnDeviceAdded` / `OnDeviceRemoved`) |
+| A device changing state without being unplugged | **not watched** — the two AVFoundation notifications are the whole registration | reported (`OnDeviceStateChanged`) |
+| The system default changing with nothing replugged | **missed.** There is no CoreAudio default-device listener anywhere in the macOS sources, so switching the default microphone in System Settings emits nothing | reported (`OnDefaultDeviceChanged`) |
+| A device renamed | not watched | deliberately ignored — a renamed device is the same device |
+| `kind` on the event | named when the device carries exactly one media type; omitted for a capture card, which means "re-read everything" | **never named** — always the bare "re-read everything" form |
+| The standalone meter's tap after a default change | re-points, but only off a connect/disconnect: `deviceListChanged()` compares the tap's device against the current default and re-opens. A default switched in System Settings with nothing replugged never reaches it | **keeps the endpoint it opened.** Nothing tells `InputMeter` to re-read; the tap re-opens only once `GetPeakValue` starts failing |
+
+Neither platform's `devicesChanged` is exercised by an automated test: macOS's
+observers need real hardware to arrive or leave, and the Windows half has not
+been compiled.
+
 ## Provisional minimum versions
 
 Both minimums are **open questions in the specification** (§30.8, §30.9) and are
@@ -65,8 +122,8 @@ the Flutter- and OS-bound half so it can be executed on its own.
 
 | Platform | Where | How to run | State |
 |---|---|---|---|
-| macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | **47 tests passing** |
-| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | written, **never compiled** |
+| macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | **96 tests passing** (run 2026-08-30) |
+| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | 68 cases written, **never compiled** — `cmake`, `ctest` and `cl` are all absent from this host |
 
 Both suites assert the same properties on purpose. The two platforms hand-write
 the same wire spellings and re-implement the same geometry, and nothing in the
@@ -92,6 +149,15 @@ Reason: same. docs/adr/2026-08-23-fragmented-mp4-on-both-platforms.md changes
 the sink writer's container type so an aborted `.part` is recoverable; it must
 be compiled and a mid-session abort confirmed recoverable before release.
 
+NOT RUN: Windows native input-device enumeration and metering (§33.2)
+Reason: same. input_devices.cpp/.h and the plugin arms that call them have never
+been through a compiler on this host, so the endpoint enumeration, the camera
+enumeration through Media Foundation, the default-first ordering, the
+reference-counted meter, the IMMNotificationClient watcher and every divergence
+listed under *Where the two halves actually diverge* are read off the source and
+not measured. The 68 cases in windows/test/recorder_types_test.cpp cover the pure
+half only, and they have not been compiled either.
+
 NOT RUN: Windows integration tests
 Reason: same.
 
@@ -109,10 +175,55 @@ NOT RUN: tool/package-dmg.sh notarization path
 Reason: no Developer ID certificate on this host.
 ```
 
+## The movable control strip (§33.3)
+
+| | macOS | Windows |
+|---|---|---|
+| Drag | `NSWindow.performDrag(with:)` from `beginMove` | `ReleaseCapture()` + `WM_NCLBUTTONDOWN`/`HTCAPTION` |
+| Usable area | `NSScreen.visibleFrame` | `MONITORINFO.rcWork` |
+| Re-clamp on a display change | `didChangeScreenParametersNotification` | `WM_DISPLAYCHANGE` and `WM_SETTINGCHANGE`/`SPI_SETWORKAREA` |
+| Display id in a stored position | `CGDirectDisplayID` | `HMONITOR` |
+| Scale change while dragging across monitors | one scale per display, resolved on show | **gap** — see below |
+| Verified | `swift test` (136 cases) and a `flutter build macos --debug` | **nothing** — never compiled or run on this host |
+
+Neither `displayId` is stable across a reboot or a change of display topology,
+so a remembered position can resolve on a different physical display than the
+one the strip was left on. The fraction still resolves against a real usable
+area and is still clamped, so the strip is always reachable; one drag corrects
+it. Stated in `../architecture/platform-channel-contract.md` → *strip-position
+map*, and deliberately not fixed with a second id spelling.
+
+**The Windows DPI gap, and why it is still open.** Dragging the strip from a
+100% monitor to a 200% one does not re-scale the hosted overlay engine.
+`WM_DPICHANGED` reaches top-level windows, but the Flutter view is a child HWND
+parented in with `SetParent`, and moving the host window does nothing about
+scale — so the strip renders at half size on the second monitor, and the next
+content measurement can then scale stale logical points by the new monitor's
+factor and double the *window* around content still drawn at the old one.
+
+It is unfixed rather than half-fixed because the two plausible engine behaviours
+want opposite remedies, and neither can be told apart without a Windows host:
+if the embedder re-scales itself under the process's `PerMonitorV2` manifest,
+the fix is to re-apply the frame at `last measured logical size × new scale`;
+if it does not, that same resize makes it strictly worse. Whoever has a Windows
+machine should drag the strip across a scale boundary, log the view's device
+pixel ratio and the host window's DPI on each side, and only then choose.
+
+Keyboard movement and the strip's own `Reset position` are not implemented on
+either platform — see §33.3, which records why they wait for the action sheet.
+
 ## Known gaps
 
 - **Windows is written but not built.** No MSVC toolchain on the development
   host — see *Not verified* above.
+- **`deviceId` on `startInputMetering` is not honoured by either platform.** The
+  Dart half sends it and the contract requires the meter to follow it; both
+  native meters still open the platform default. A bar under a non-default
+  microphone row is therefore metering the wrong device on macOS and Windows
+  alike — see *Where the two halves actually diverge*.
+- **`getInputDevices` can fail on Windows**, where the contract says it always
+  answers: an absent or unrecognised `kind` and a full COM worker queue are both
+  rejections there and empty lists (or impossible) on macOS.
 - **Open specification decisions** are implemented conservatively and marked in
   code rather than silently resolved: §30.3 (non-16:9 sources), §30.4 (pause
   timeline — implemented as "paused time is excluded", the recommendation),

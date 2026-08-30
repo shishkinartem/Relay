@@ -125,7 +125,12 @@ class _WindowGrid extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (BuildContext context, BoxConstraints constraints) {
       const double gap = 14;
-      final double columnWidth = (constraints.maxWidth - gap) / 2;
+      // The grid answers to the width it is given, not to a platform or a
+      // window size (§33.6). Fifteen windows in two columns at 420 is a long
+      // scroll of small thumbnails on a display with room for four.
+      final int columns = AppSpacing.gridColumns(constraints.maxWidth);
+      final double columnWidth =
+          (constraints.maxWidth - gap * (columns - 1)) / columns;
       return Wrap(
         spacing: gap,
         runSpacing: gap,

@@ -89,6 +89,42 @@ void main() {
     );
   });
 
+  testWidgets('the window grid answers to the width it is given (§33.6)', (
+    WidgetTester tester,
+  ) async {
+    // Fifteen windows in two columns at 420 is a long scroll of small
+    // thumbnails on a display with room for four. The columns come from the
+    // constraints, never from a platform name (§28).
+    await loadDesignFonts();
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final TestHarness harness = await TestHarness.create();
+    addTearDown(harness.dispose);
+    await harness.initialize();
+
+    double cardWidth(double surfaceWidth) {
+      return tester.getSize(find.widgetWithText(SourceCard, 'Terminal')).width;
+    }
+
+    for (final (double width, int columns) in <(double, int)>[
+      (420, 2),
+      (640, 3),
+      (900, 4),
+    ]) {
+      await tester.binding.setSurfaceSize(Size(width, 1400));
+      await tester.pumpWidget(harness.wrap(const SourcePickerScreen()));
+      await tester.pumpAndSettle();
+
+      const double gap = 14;
+      const double padding = 14 * 2;
+      final double expected = (width - padding - gap * (columns - 1)) / columns;
+      expect(
+        cardWidth(width),
+        closeTo(expected, 0.5),
+        reason: '\$width pt should lay the grid out in \$columns columns',
+      );
+    }
+  });
+
   testWidgets('a platform with nothing to offer does not offer a source', (
     WidgetTester tester,
   ) async {

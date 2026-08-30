@@ -17,6 +17,33 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
   private let enumerator = CaptureSourceEnumerator()
   private let overlays = OverlayWindowController()
 
+  /// The microphone meter. Reference counted and thread-safe in its own right,
+  /// so it needs no part of `sessionLock`; what it shares with a live session
+  /// is that session's `MicrophoneCapture`, handed to it by
+  /// `refreshMeterSource()` whenever the session changes.
+  /// Built once, in `attach(registrar:)`, on the platform thread.
+  ///
+  /// Deliberately not `lazy`: a `lazy var` on a class has no locking, and this
+  /// is reached from the platform thread (the metering and microphone arms, and
+  /// the device observers) *and* from the concurrency pool (`refreshMeterSource`
+  /// inside `prepare`, `stop`, `abort` and `releaseSession`). Two threads
+  /// arriving at an uninitialised `lazy` both construct and both store, which
+  /// over-releases one instance — the same hazard `sessionLock` exists for
+  /// below — and orphans whatever tap the losing instance had opened.
+  private var meter: InputMeter!
+
+  /// The connect/disconnect observers. A block-based observer is not detached
+  /// when its owner goes, so these are removed in `deinit`; the blocks hold
+  /// `self` weakly so a notification arriving in between is a no-op rather than
+  /// a call into a freed plugin.
+  private var deviceObservers: [NSObjectProtocol] = []
+
+  /// The other half of "the device lists changed": the machine moving its own
+  /// default from one device to another, which unplugs nothing and so posts
+  /// none of the notifications above. It removes its own registrations when it
+  /// is released with the plugin.
+  private var defaultDevices: DefaultDeviceObserver?
+
   /// The live session, behind a lock.
   ///
   /// It is written from a `Task` (`prepare`, `dispose`), read synchronously on
@@ -58,6 +85,30 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     if let previous, previous !== next {
       await previous.release()
     }
+    refreshMeterSource()
+  }
+
+  /// Hands the meter whichever microphone the live session holds, if any.
+  ///
+  /// Called wherever that can have changed: a session installed or dropped, a
+  /// recording stopped or aborted, the microphone toggled mid-session. While
+  /// the session's microphone is running the meter reads its levels and closes
+  /// its own tap, so the device is never open twice (§33.7).
+  private func refreshMeterSource() {
+    meter.setLiveMicrophone(session?.microphoneLevelProvider)
+  }
+
+  /// The same re-sourcing, for a session that died rather than settled.
+  ///
+  /// It goes through the meter's other door on purpose. This runs from a
+  /// session's own teardown, which is not ordered against anything the plugin
+  /// is doing: the release that follows a fatal error is a detached task nobody
+  /// awaits, so a dead session's last word can land after the user has started
+  /// recording again and the next `prepare` has already yielded the microphone.
+  /// Ending that handover here would re-open the meter's tap on the device that
+  /// `prepare` is in the middle of taking (§33.7).
+  private func meterLostSessionCapture() {
+    meter.liveMicrophoneStopped(session?.microphoneLevelProvider)
   }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -66,6 +117,11 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
   }
 
   private func attach(registrar: FlutterPluginRegistrar) {
+    // Before any channel is wired up, so nothing can reach `meter` unset.
+    meter = InputMeter(emit: { [weak self] event in
+      DispatchQueue.main.async { self?.eventSink?(event) }
+    })
+
     let recorder = FlutterMethodChannel(
       name: "relay/recorder", binaryMessenger: registrar.messenger)
     registrar.addMethodCallDelegate(self, channel: recorder)
@@ -94,6 +150,38 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     overlays.onCommand = { [weak self] command in
       DispatchQueue.main.async { self?.overlayEventSink?(command) }
     }
+
+    // Device lists change under the user: a webcam is unplugged, an iPhone
+    // comes into range. Dart is told to re-read rather than told what changed
+    // (§33.7), because the list it should draw is the enumeration, not a diff.
+    for name in [
+      AVCaptureDevice.wasConnectedNotification,
+      AVCaptureDevice.wasDisconnectedNotification,
+    ] {
+      deviceObservers.append(
+        NotificationCenter.default.addObserver(
+          forName: name, object: nil, queue: .main
+        ) { [weak self] notification in
+          let device = notification.object as? AVCaptureDevice
+          self?.devicesChanged(
+            DeviceChangeNotice.device(
+              isCamera: device?.hasMediaType(.video) ?? false,
+              isMicrophone: device?.hasMediaType(.audio) ?? false))
+        })
+    }
+
+    // And the change that plugs nothing in and pulls nothing out: the machine
+    // moving its default input, output or camera. It reaches the same event,
+    // because what Dart does about it is the same — read the lists again.
+    defaultDevices = DefaultDeviceObserver { [weak self] notice in
+      self?.devicesChanged(notice)
+    }
+  }
+
+  deinit {
+    for observer in deviceObservers {
+      NotificationCenter.default.removeObserver(observer)
+    }
   }
 
   // MARK: - relay/recorder
@@ -110,6 +198,34 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
 
     case "getCurrentDisplay":
       result(CaptureSourceEnumerator.currentDisplayGeometry())
+
+    case "getInputDevices":
+      // Every kind answers, including one this platform cannot enumerate and
+      // one it does not recognise: falling through to
+      // `FlutterMethodNotImplemented` reaches Dart as `unsupported`, which is a
+      // failure rather than "there is nothing here to choose". What can be
+      // chosen is gated by `selectableDeviceKinds` in `capabilities()` (§33.2).
+      let deviceKind = MediaDeviceKind(name: arguments["kind"] as? String)
+      let devices = deviceKind.map { InputDeviceEnumerator.devices(kind: $0) } ?? []
+      result(devices.map { $0.toMap() })
+
+    case "startInputMetering":
+      // Reference counted, and a silent no-op for a kind that cannot be
+      // metered. Opening the tap happens on the meter's own queue, so an
+      // `AVCaptureSession` starting up never blocks the platform thread.
+      //
+      // The device travels with the call: a missing `deviceId` is the platform
+      // default, the same meaning it has on the configuration map, and a start
+      // naming a different one moves the tap rather than opening a second
+      // (§33.2).
+      meter.start(
+        kind: MediaDeviceKind(name: arguments["kind"] as? String),
+        deviceId: arguments["deviceId"] as? String)
+      result(nil)
+
+    case "stopInputMetering":
+      meter.stop(kind: MediaDeviceKind(name: arguments["kind"] as? String))
+      result(nil)
 
     case "checkPermissions":
       result(RecorderPermissions.check())
@@ -158,12 +274,19 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     case "abort":
       Task {
         await self.session?.abort()
+        self.refreshMeterSource()
         await MainActor.run { result(nil) }
       }
 
     case "setMicrophoneEnabled":
-      session?.setMicrophoneEnabled(arguments["enabled"] as? Bool ?? false)
-      result(nil)
+      // Off the platform thread, like every other arm here that talks to
+      // hardware. Turning the microphone on closes the meter's tap and then
+      // opens the session's capture on that same device — `stopRunning()` and
+      // `startRunning()`, seconds of either on a Bluetooth or Continuity
+      // input. Run on the main thread they stop the control strip, a Flutter
+      // view driven from it, drawing, and stall its elapsed timer with it.
+      let microphoneEnabled = arguments["enabled"] as? Bool ?? false
+      Task { await self.setMicrophoneEnabled(microphoneEnabled, result: result) }
 
     case "setCameraEnabled":
       let enabled = arguments["enabled"] as? Bool ?? false
@@ -191,6 +314,8 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     case "dispose":
       Task {
         await self.replaceSession(with: nil)
+        // No device may stay open for a meter nobody is watching.
+        self.meter.releaseAll()
         await MainActor.run { result(nil) }
       }
 
@@ -210,6 +335,10 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     case "hideControlStrip":
       overlays.hideControlStrip()
       result(nil)
+    case "controlStripPosition":
+      // Null when there is no strip to read, so the application keeps whatever
+      // position it had stored (§33.3).
+      result(overlays.controlStripPosition())
     case "updateControlStrip":
       overlays.updateControlStrip(arguments)
       result(nil)
@@ -255,6 +384,17 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       "qualities": ["hd720", "fullHd1080"],
       "frameRates": [30, 60],
       "sourceTypes": ["display", "window"],
+      // Cameras and microphones are picked from a list of real devices; system
+      // audio is not, because ScreenCaptureKit delivers the system mix and
+      // there is no endpoint to choose (§33.8). The UI reads this, never the
+      // operating system's name (§28).
+      "selectableDeviceKinds": [
+        MediaDeviceKind.camera.rawValue, MediaDeviceKind.microphone.rawValue,
+      ],
+      // Only the microphone: a level the user can act on is worth showing, and
+      // they can change neither the endpoint nor what the machine is playing
+      // (§33.2).
+      "meterableDeviceKinds": [MediaDeviceKind.microphone.rawValue],
       "supportsCamera": AVCaptureDevice.default(for: .video) != nil,
       "supportsMicrophone": AVCaptureDevice.default(for: .audio) != nil,
       "supportsSystemAudio": true,
@@ -274,6 +414,21 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       "platformVersion":
         "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)",
     ]
+  }
+
+  /// Tells Dart to re-read the device lists, naming the kind when the change
+  /// belongs to exactly one of them.
+  ///
+  /// Which kind a change names, and whether it can have moved the metered
+  /// microphone, is decided in `DeviceChangeNotice` where `swift test` reaches
+  /// it.
+  private func devicesChanged(_ notice: DeviceChangeNotice) {
+    eventSink?(notice.toMap())
+    if notice.affectsMicrophone {
+      // The metered device may have left, or the machine may have moved the
+      // default the tap is following (§33.7).
+      meter.deviceListChanged()
+    }
   }
 
   private func respondWithSources(refresh: Bool, result: @escaping FlutterResult) async {
@@ -302,6 +457,14 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
   }
 
   private func prepare(arguments: [String: Any], result: @escaping FlutterResult) async {
+    // Whatever happens below, the meter is re-sourced. It used to be re-sourced
+    // only where a session was installed — inside the `do` this `catch`
+    // swallows — so a `prepare` that threw left the meter bound to a capture
+    // that was gone, or, once it has yielded the device, holding nothing at
+    // all. Either way the bar read zero for a working microphone until the next
+    // session, and Dart's silence detector accused it of hearing nothing
+    // (§33.7).
+    defer { refreshMeterSource() }
     do {
       // A live recording is never replaced silently. The plugin builds a fresh
       // session per prepare, so `RecordingSession`'s own "already in progress"
@@ -327,12 +490,45 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
       let session = RecordingSession(emit: { [weak self] event in
         DispatchQueue.main.async { self?.eventSink?(event) }
       })
+      // A session that dies on its own reaches none of the plugin's teardown
+      // paths, so nothing here re-sourced the meter and it went on reading a
+      // capture that had stopped delivering (§33.7).
+      session.onInputsReleased = { [weak self] in self?.meterLostSessionCapture() }
+      if configuration.microphoneEnabled {
+        // `prepare` below opens the microphone. A meter on the launch screen
+        // has its own `AVCaptureSession` on that same device, and two of them
+        // holding one microphone is the state the contract forbids outright —
+        // so the tap is closed *before* the session opens it, not after
+        // (§33.7). The hold is lifted by the `refreshMeterSource()` this
+        // function defers, on every path out of here.
+        await meter.yieldToSession()
+      }
       try session.prepare(configuration: configuration, filter: filter)
       await self.replaceSession(with: session)
       await MainActor.run { result(nil) }
     } catch {
       await MainActor.run { result(Self.flutterError(error)) }
     }
+  }
+
+  /// The microphone toggle, off the platform thread. See the `handle` arm.
+  private func setMicrophoneEnabled(
+    _ enabled: Bool, result: @escaping FlutterResult
+  ) async {
+    // Either direction of the toggle is a moment the meter must switch between
+    // its own tap and the session's capture, and on the `true` path this is
+    // also what lifts the handover below — on every path out of here.
+    defer { refreshMeterSource() }
+    if let session {
+      // Turning it on can start a microphone `prepare` never opened. The
+      // meter's own tap is on that device, so — as in `prepare` — it is closed
+      // *before* the session opens it, never afterwards (§33.7). Awaiting is
+      // what orders the two; it suspends this task rather than holding a
+      // thread.
+      if enabled { await meter.yieldToSession() }
+      session.setMicrophoneEnabled(enabled)
+    }
+    await MainActor.run { result(nil) }
   }
 
   private func start(result: @escaping FlutterResult) async {
@@ -345,6 +541,11 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
   }
 
   private func stop(result: @escaping FlutterResult) async {
+    // The session's microphone is closed by the time this returns, however it
+    // returns: a stop that throws still tore the capture down, and a meter left
+    // attached to it would emit zeroes forever instead of going back to its own
+    // tap (§33.7).
+    defer { refreshMeterSource() }
     do {
       let metadata = try await currentSession().stop()
       await MainActor.run { result(metadata) }

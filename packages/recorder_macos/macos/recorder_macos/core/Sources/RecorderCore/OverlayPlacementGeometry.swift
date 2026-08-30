@@ -110,4 +110,151 @@ public enum OverlayPlacementGeometry {
     return abs(current.width - target.width) > 0.5
       || abs(current.height - target.height) > 0.5
   }
+
+  /// How close to an edge or to the centre a drag has to end to land on it.
+  ///
+  /// §33.3's 24 points. A snap is a hint, not a constraint: it only ever moves
+  /// the strip to a spot the clamp below would have allowed anyway.
+  public static let stripSnapDistance: Double = 24
+
+  /// The remembered spot, resolved against the display's **usable** area.
+  ///
+  /// `visibleFrame` for the same reason `anchoredFrame` uses it: the fraction
+  /// was recorded against the usable area, and resolving it against the full
+  /// frame would walk the strip under the menu bar and into the notch a little
+  /// further on every session. The result is clamped, so a fraction arrived at
+  /// on a display of a different shape still lands somewhere clickable.
+  ///
+  /// The contract's fraction is top-left and AppKit is bottom-left — the flip
+  /// `absoluteFrame` documents — so `y: 0` is the **top** of the usable area.
+  public static func fractionalFrame(
+    size: CGSize, ratio: OverlayStripRatio, inVisibleFrame visible: CGRect
+  ) -> CGRect {
+    let x = unitFraction(ratio.x)
+    let y = unitFraction(ratio.y)
+    let left = visible.minX + x * visible.width
+    let top = visible.maxY - y * visible.height
+    return clamped(
+      CGRect(
+        x: left, y: top - size.height, width: size.width, height: size.height),
+      inVisibleFrame: visible)
+  }
+
+  /// Where a frame sits, as the fraction the contract stores.
+  ///
+  /// The inverse of `fractionalFrame` against the same usable area, so a strip
+  /// that is shown and then read back reports the fraction it was shown at.
+  ///
+  /// Null for a usable area nothing can be a fraction of. A caller that cannot
+  /// read a position keeps whatever it had stored: failing to ask is not the
+  /// user having dragged the strip back (§33.3).
+  public static func positionRatio(
+    of frame: CGRect, inVisibleFrame visible: CGRect, displayId: String
+  ) -> OverlayStripRatio? {
+    guard !displayId.isEmpty, visible.width > 0, visible.height > 0,
+      frame.minX.isFinite, frame.maxY.isFinite
+    else { return nil }
+    return OverlayStripRatio(
+      displayId: displayId,
+      x: unitFraction((frame.minX - visible.minX) / visible.width),
+      y: unitFraction((visible.maxY - frame.maxY) / visible.height))
+  }
+
+  /// A frame pulled back inside the display's usable area.
+  ///
+  /// Applied on every show, every drag end and every display change (§33.3), so
+  /// the menu bar, the notch and the Dock stay uncovered continuously rather
+  /// than only at the moment the strip was first docked. A strip wider than the
+  /// usable area is pinned to its leading edge rather than centred on nothing:
+  /// the controls that matter — Pause and Stop — are at that end.
+  public static func clamped(_ frame: CGRect, inVisibleFrame visible: CGRect)
+    -> CGRect
+  {
+    let x = min(
+      max(frame.minX, visible.minX), max(visible.maxX - frame.width, visible.minX))
+    let y = min(
+      max(frame.minY, visible.minY),
+      max(visible.maxY - frame.height, visible.minY))
+    return CGRect(origin: CGPoint(x: x, y: y), size: frame.size)
+  }
+
+  /// Where a drag ends: on the nearest edge or centre line it came close to.
+  ///
+  /// Horizontally the candidates are both edges of the usable area and its
+  /// centre; vertically only the edges, because §33.3 snaps to the *horizontal*
+  /// centre alone. The nearest candidate within the distance wins, and an edge
+  /// takes a tie, so a strip almost as wide as the display is not pulled off an
+  /// edge it was already flush with by a centre line at the same remove.
+  ///
+  /// Clamped afterwards: on a display narrower than the strip the centre
+  /// candidate hangs off both edges at once, and a snap must never be the thing
+  /// that puts a control out of reach.
+  public static func snapped(
+    _ frame: CGRect, inVisibleFrame visible: CGRect,
+    within distance: Double = stripSnapDistance
+  ) -> CGRect {
+    let origin = CGPoint(
+      x: snap(
+        frame.minX,
+        to: [
+          visible.minX, visible.maxX - frame.width,
+          visible.midX - frame.width / 2,
+        ], within: distance),
+      y: snap(
+        frame.minY, to: [visible.minY, visible.maxY - frame.height],
+        within: distance))
+    return clamped(
+      CGRect(origin: origin, size: frame.size), inVisibleFrame: visible)
+  }
+
+  /// The nearest candidate within `distance`, or the value unchanged.
+  private static func snap(
+    _ value: CGFloat, to candidates: [CGFloat], within distance: Double
+  ) -> CGFloat {
+    let limit = CGFloat(distance)
+    var best = value
+    var bestDelta = CGFloat.infinity
+    for candidate in candidates where candidate.isFinite {
+      let delta = abs(candidate - value)
+      // `<=` accepts a candidate exactly at the distance, `<` keeps the first
+      // one on a tie — which is why the edges are listed before the centre.
+      if delta <= limit && delta < bestDelta {
+        best = candidate
+        bestDelta = delta
+      }
+    }
+    return best
+  }
+
+  /// A fraction pulled into `[0, 1]`, with anything unrepresentable read as 0.
+  ///
+  /// A fraction slightly outside the unit square is a rounding artefact of a
+  /// display that changed shape, not a lost spot — the same reading the Dart
+  /// side takes. A non-finite one is neither, and it must not reach a window:
+  /// a NaN origin makes AppKit place a panel nowhere.
+  private static func unitFraction(_ value: CGFloat) -> CGFloat {
+    guard value.isFinite else { return 0 }
+    return min(max(value, 0), 1)
+  }
+}
+
+/// Where the control strip sits, as a fraction of one display's usable area.
+///
+/// The wire shape of §33.3's stored position, mirroring
+/// `OverlayStripPosition` on the Dart side. A fraction rather than a point,
+/// because a point survives neither a resolution change nor an undocked
+/// monitor; [displayId] is the display holding the strip's centre when the drag
+/// ended, not §5's current display.
+public struct OverlayStripRatio: Equatable {
+  public let displayId: String
+
+  /// Top-left as a fraction of the usable area, each in `[0, 1]`.
+  public let x: CGFloat
+  public let y: CGFloat
+
+  public init(displayId: String, x: CGFloat, y: CGFloat) {
+    self.displayId = displayId
+    self.x = x
+    self.y = y
+  }
 }

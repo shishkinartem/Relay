@@ -10,6 +10,7 @@ import '../../settings/presentation/settings_screen.dart';
 import '../application/recorder_view_model.dart';
 import 'source_picker_screen.dart';
 import 'widgets/destination_summary_row.dart';
+import 'widgets/input_settings_row.dart';
 import 'widgets/labelled_control_row.dart';
 
 /// The screen the application opens on: source, per-session settings and Start
@@ -94,9 +95,12 @@ class _SelectedSourceRow extends StatelessWidget {
             height: 26,
             child: BlueprintFrame(
               showCorners: false,
+              // Unduotoned, for the same reason as `SourceCard`: this thumbnail
+              // is here to confirm *which* screen or window is about to be
+              // recorded, and an accent wash makes every one of them look alike.
               child: (source?.thumbnail?.isEmpty ?? true)
                   ? const HatchedSurface(stripe: 5)
-                  : DuotoneFilter(
+                  : ClipRect(
                       child: Image.memory(
                         source!.thumbnail!,
                         fit: BoxFit.cover,
@@ -190,40 +194,38 @@ class _SessionControls extends StatelessWidget {
           ),
         ),
         const AppDivider(margin: EdgeInsets.symmetric(vertical: 10)),
-        LabelledControlRow(
+        InputSettingsRow(
+          kind: MediaDeviceKind.microphone,
           icon: AppIcons.microphone,
           label: 'Microphone',
-          control: AppOnOffControl(
-            semanticLabel: 'Microphone',
-            value: settings.settings.microphoneEnabled,
-            onChanged: capabilities.supportsMicrophone
-                ? settings.setMicrophoneEnabled
-                : null,
-          ),
+          enabled: settings.settings.microphoneEnabled,
+          onEnabledChanged: capabilities.supportsMicrophone
+              ? settings.setMicrophoneEnabled
+              : null,
         ),
         const SizedBox(height: 12),
-        LabelledControlRow(
+        InputSettingsRow(
+          kind: MediaDeviceKind.systemAudio,
           icon: AppIcons.systemAudio,
           label: 'System audio',
-          control: AppOnOffControl(
-            semanticLabel: 'System audio',
-            value: settings.settings.systemAudioEnabled,
-            onChanged: capabilities.supportsSystemAudio
-                ? settings.setSystemAudioEnabled
-                : null,
-          ),
+          // Where the platform captures the whole mix rather than one endpoint
+          // there is no device to enumerate, and the row still has to say what
+          // is being recorded (§33.8).
+          fixedDeviceLabel: 'System mix',
+          enabled: settings.settings.systemAudioEnabled,
+          onEnabledChanged: capabilities.supportsSystemAudio
+              ? settings.setSystemAudioEnabled
+              : null,
         ),
         const SizedBox(height: 12),
-        LabelledControlRow(
+        InputSettingsRow(
+          kind: MediaDeviceKind.camera,
           icon: AppIcons.camera,
           label: 'Camera',
-          control: AppOnOffControl(
-            semanticLabel: 'Camera',
-            value: settings.settings.cameraEnabled,
-            onChanged: capabilities.supportsCamera
-                ? settings.setCameraEnabled
-                : null,
-          ),
+          enabled: settings.settings.cameraEnabled,
+          onEnabledChanged: capabilities.supportsCamera
+              ? settings.setCameraEnabled
+              : null,
         ),
         const SizedBox(height: 12),
         _AdvancedSection(vm: vm, settings: settings),

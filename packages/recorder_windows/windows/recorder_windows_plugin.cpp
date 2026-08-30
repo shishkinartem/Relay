@@ -222,6 +222,27 @@ flutter::EncodableValue SourceToValue(const CaptureSourceInfo& source) {
   return flutter::EncodableValue(std::move(map));
 }
 
+flutter::EncodableValue DeviceToValue(const MediaDeviceInfo& device) {
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("id")] = flutter::EncodableValue(device.id);
+  map[flutter::EncodableValue("kind")] =
+      flutter::EncodableValue(MediaDeviceKindName(device.kind));
+  map[flutter::EncodableValue("label")] = flutter::EncodableValue(device.label);
+  map[flutter::EncodableValue("isSystemDefault")] =
+      flutter::EncodableValue(device.is_system_default);
+  map[flutter::EncodableValue("isAvailable")] =
+      flutter::EncodableValue(device.is_available);
+  return flutter::EncodableValue(std::move(map));
+}
+
+flutter::EncodableValue KindNamesToValue(const std::vector<std::string>& names) {
+  flutter::EncodableList list;
+  for (const std::string& name : names) {
+    list.push_back(flutter::EncodableValue(name));
+  }
+  return flutter::EncodableValue(std::move(list));
+}
+
 flutter::EncodableValue ResultToValue(const RecordingResult& result) {
   flutter::EncodableMap map;
   map[flutter::EncodableValue("path")] = flutter::EncodableValue(Narrow(result.path));
@@ -259,6 +280,11 @@ RecordingConfig ConfigFromMap(const flutter::EncodableMap& map) {
   config.microphone_enabled = BoolAt(map, "microphoneEnabled", true);
   config.system_audio_enabled = BoolAt(map, "systemAudioEnabled", true);
   config.show_cursor = BoolAt(map, "showCursor", true);
+  // Absent or null decodes to empty, which is the platform's own default: an
+  // unconfigured session opens exactly the devices it always opened (spec 33.2).
+  config.camera_device_id = StringAt(map, "cameraDeviceId");
+  config.microphone_device_id = StringAt(map, "microphoneDeviceId");
+  config.system_audio_device_id = StringAt(map, "systemAudioDeviceId");
 
   if (const flutter::EncodableMap* camera = MapAt(map, "cameraOverlay")) {
     config.camera.width_ratio = DoubleAt(*camera, "widthRatio", 0.16);
@@ -413,10 +439,25 @@ RecorderWindowsPlugin::RecorderWindowsPlugin(flutter::PluginRegistrarWindows* re
   overlays_.SetMainWindow(MainWindow());
   overlays_.SetCommandHandler(
       [this](const std::string& command) { EmitOverlayCommand(command); });
+
+  // Configured once, before anything can start metering. The meter is not
+  // running yet: nothing streams until Dart asks for a level (spec 33.2).
+  meter_.Configure(&microphone_level_,
+                   [this](MediaDeviceKind kind, const InputLevelSample& level) {
+                     EmitInputLevel(kind, level);
+                   });
 }
 
 RecorderWindowsPlugin::~RecorderWindowsPlugin() {
+  // The worker first: a queued getInputDevices starts the endpoint watcher, and
+  // stopping the watcher ahead of the queue that arms it would leave it
+  // registered with a callback into an object that no longer exists.
   worker_.Shutdown();
+  // Both hold a handler into this object — the meter on its own thread, the
+  // watcher on one of its own — and both drop it before returning, so neither
+  // can call back into anything torn down below.
+  meter_.StopAll();
+  device_watcher_.Stop();
   if (session_) {
     session_->Abort();
     session_.reset();
@@ -490,6 +531,37 @@ void RecorderWindowsPlugin::EmitOverlayCommand(const std::string& command) {
       overlay_sink_->Success(flutter::EncodableValue(command));
     }
   });
+}
+
+void RecorderWindowsPlugin::EmitInputLevel(MediaDeviceKind kind,
+                                           const InputLevelSample& level) {
+  flutter::EncodableMap event;
+  event[flutter::EncodableValue("type")] = flutter::EncodableValue("inputLevel");
+  event[flutter::EncodableValue("kind")] =
+      flutter::EncodableValue(MediaDeviceKindName(kind));
+  // Linear amplitude in [0, 1] — never decibels, and never a buffer: raw media
+  // stays native and only the measurement crosses the channel (spec 3, 33.2).
+  event[flutter::EncodableValue("peak")] = flutter::EncodableValue(level.peak);
+  event[flutter::EncodableValue("rms")] = flutter::EncodableValue(level.rms);
+  // Not EmitRecorderEvent: a level raised on the meter thread a moment before
+  // the stop that answers inline on this one would otherwise still reach the
+  // sink after that reply. Nothing is emitted when nothing is metering
+  // (spec 33.2).
+  RunOnPlatformThread([this, kind, event = std::move(event)]() {
+    if (!meter_.IsMetering(kind)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(sink_mutex_);
+    if (recorder_sink_) {
+      recorder_sink_->Success(flutter::EncodableValue(event));
+    }
+  });
+}
+
+void RecorderWindowsPlugin::EmitDevicesChanged() {
+  flutter::EncodableMap event;
+  event[flutter::EncodableValue("type")] = flutter::EncodableValue("devicesChanged");
+  EmitRecorderEvent(std::move(event));
 }
 
 void RecorderWindowsPlugin::WireSessionEvents() {
@@ -578,6 +650,14 @@ flutter::EncodableMap RecorderWindowsPlugin::Capabilities() const {
       flutter::EncodableValue(HasMicrophoneDevice());
   map[flutter::EncodableValue("supportsSystemAudio")] = flutter::EncodableValue(true);
   map[flutter::EncodableValue("supportsPause")] = flutter::EncodableValue(true);
+  // Which inputs offer a *choice* of device, and which can report a level. All
+  // three are selectable here: WASAPI loopback is per render endpoint, so
+  // "which output am I recording?" has a real answer on Windows that it does
+  // not have on macOS (spec 33.2).
+  map[flutter::EncodableValue("selectableDeviceKinds")] =
+      KindNamesToValue(SelectableDeviceKindNames());
+  map[flutter::EncodableValue("meterableDeviceKinds")] =
+      KindNamesToValue(MeterableDeviceKindNames());
   map[flutter::EncodableValue("supportsCursorCapture")] = flutter::EncodableValue(true);
   map[flutter::EncodableValue("supportsHardwareEncoding")] = flutter::EncodableValue(true);
   // Windows applies capture consent to the running process, so nothing has to
@@ -684,6 +764,74 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
     return;
   }
 
+  if (method == "getInputDevices") {
+    MediaDeviceKind kind = MediaDeviceKind::kMicrophone;
+    if (arguments == nullptr ||
+        !MediaDeviceKindFromName(StringAt(*arguments, "kind"), &kind)) {
+      reject(RecorderErrorCode::kUnknown, "An input device kind is required.");
+      return;
+    }
+    // Enumerating audio endpoints and camera sources is COM work: it belongs on
+    // the worker, which has an apartment. An empty list is a legitimate answer
+    // — no camera is attached — and is not an error (spec 33.2).
+    if (!worker_.Post([this, shared, kind]() {
+          if (disposed_.load()) {
+            // Queued before dispose and drained after it. Nothing may re-arm
+            // the watcher, or open a device, past dispose — and a channel call
+            // is still owed an answer.
+            RecorderError error;
+            error.code = RecorderErrorCode::kInvalidState;
+            error.message = "The recorder has been disposed.";
+            ReplyError(shared, error);
+            return;
+          }
+          // Watching begins with the first enumeration: nothing watches a list
+          // nobody has asked for.
+          device_watcher_.Start([this]() {
+            // The meter first: an endpoint change can have moved the default
+            // out from under the tap, and a bar reading the microphone that
+            // used to be the default is worse than one that skips a tick
+            // (spec 33.2).
+            meter_.NotifyDeviceListChanged();
+            EmitDevicesChanged();
+          });
+          flutter::EncodableList list;
+          for (const MediaDeviceInfo& device : EnumerateInputDevices(kind)) {
+            list.push_back(DeviceToValue(device));
+          }
+          ReplySuccess(shared, flutter::EncodableValue(std::move(list)));
+        })) {
+      busy();
+    }
+    return;
+  }
+
+  if (method == "startInputMetering" || method == "stopInputMetering") {
+    MediaDeviceKind kind = MediaDeviceKind::kMicrophone;
+    if (arguments == nullptr ||
+        !MediaDeviceKindFromName(StringAt(*arguments, "kind"), &kind)) {
+      reject(RecorderErrorCode::kUnknown, "An input device kind is required.");
+      return;
+    }
+    // Reference counted inside the meter, which also makes a start for a kind
+    // that reports no level a silent no-op and a stop with nothing running a
+    // no-op rather than an error. Both are cheap — no device is touched on this
+    // thread, and neither waits for the meter's own — so they answer inline
+    // (spec 33.2).
+    if (method == "startInputMetering") {
+      // The device the bar sits under. Absent or null is the platform default,
+      // the same meaning a null id has on the recording configuration; a start
+      // naming a different device re-points the tap rather than opening a
+      // second one.
+      meter_.Start(kind, arguments == nullptr ? std::string()
+                                              : StringAt(*arguments, "deviceId"));
+    } else {
+      meter_.Stop(kind);
+    }
+    shared->Success();
+    return;
+  }
+
   if (method == "checkPermissions") {
     if (!worker_.Post([this, shared]() {
           flutter::EncodableMap report;
@@ -757,6 +905,7 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
     // thread drawing the UI.
     const std::shared_ptr<RecordingSession> previous = std::move(session_);
     WireSessionEvents();
+    session_->SetMicrophoneLevelMeter(&microphone_level_);
     session_->SetExcludedWindows(overlays_.ExcludedWindows());
     const std::shared_ptr<RecordingSession> session = session_;
     if (!worker_.Post([this, shared, config, session, previous]() {
@@ -910,6 +1059,9 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
   }
   if (method == "dispose") {
     disposed_ = true;
+    // Nothing may keep a device open, or keep emitting, past dispose.
+    meter_.StopAll();
+    device_watcher_.Stop();
     if (session_) {
       session_->Abort();
       session_.reset();
@@ -963,6 +1115,24 @@ void RecorderWindowsPlugin::HandleOverlayMethod(
           session_ ? session_->camera_aspect_ratio() : 16.0 / 9.0);
     }
     result->Success();
+    return;
+  }
+  if (method == "controlStripPosition") {
+    std::string display_id;
+    double x = 0;
+    double y = 0;
+    if (!overlays_.ControlStripPosition(&display_id, &x, &y)) {
+      // Null, never a position of 0, 0: failing to read where the strip is is
+      // not the user having moved it back, and Dart keeps what it had stored.
+      result->Success();
+      return;
+    }
+    flutter::EncodableMap position;
+    position[flutter::EncodableValue("displayId")] =
+        flutter::EncodableValue(display_id);
+    position[flutter::EncodableValue("x")] = flutter::EncodableValue(x);
+    position[flutter::EncodableValue("y")] = flutter::EncodableValue(y);
+    result->Success(flutter::EncodableValue(std::move(position)));
     return;
   }
   if (method == "hideControlStrip") {

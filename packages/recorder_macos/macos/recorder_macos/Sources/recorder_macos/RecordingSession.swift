@@ -66,6 +66,11 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   /// Live camera frames for the preview texture.
   var cameraFrameProvider: CameraCapture { camera }
 
+  /// The microphone this session holds, for `InputMeter` to read levels off
+  /// while it is running. A recording already has the device open, and metering
+  /// must not open it a second time (§33.7).
+  var microphoneLevelProvider: MicrophoneCapture { microphone }
+
   init(emit: @escaping EventSink) {
     self.emit = emit
     super.init()
@@ -90,6 +95,23 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
   /// Set by the plugin to mark the preview texture dirty.
   var onCameraFrame: (() -> Void)?
+
+  /// Called once this session has let go of the camera and the microphone.
+  ///
+  /// It exists for the meter. Every teardown the plugin *drives* — `prepare`,
+  /// `stop`, `abort`, `releaseSession` — re-sources the meter as it returns,
+  /// but a session that dies on its own drives none of them: the platform stops
+  /// the stream, or the writer fails underneath the ticker, and the microphone
+  /// closes with nobody telling the plugin. A meter whose plan was
+  /// `.readLiveCapture` then stayed attached to a capture that had stopped
+  /// delivering buffers, emitting `peak: 0` at 20 Hz — and a run of zeroes is
+  /// exactly what Dart counts before it tells the user a working microphone is
+  /// hearing nothing (§33.7).
+  ///
+  /// Fired from every path that stops the inputs, not only the fatal ones. It
+  /// costs a reconcile the plugin was going to run anyway, and "which teardowns
+  /// happen to be plugin-driven" is not a list worth keeping in two places.
+  var onInputsReleased: (() -> Void)?
 
   private var state: PlatformRecorderState { stateBox.current }
 
@@ -138,7 +160,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     try makeStream(filter: filter, configuration: configuration)
 
     if inputs.cameraEnabled {
-      do { try camera.start() } catch {
+      do { try camera.start(device: resolvedDevice(.camera)) } catch {
         inputs.cameraEnabled = false
         emitError(error, fatal: false)
       }
@@ -324,8 +346,15 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     if let stream {
       await Deadline.run(seconds: 5) { try? await stream.stopCapture() }
     }
+    stopInputs()
+  }
+
+  /// Stops the camera and the microphone, and announces it. Every path that
+  /// closes them goes through here; see `onInputsReleased`.
+  private func stopInputs() {
     camera.stop()
     microphone.stop()
+    onInputsReleased?()
   }
 
   /// Aborts without finalizing. The `.part` artefact is left on disk (§18).
@@ -442,7 +471,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     guard inputs.cameraEnabled != enabled else { return }
     inputs.cameraEnabled = enabled
     if enabled {
-      do { try camera.start() } catch {
+      do { try camera.start(device: resolvedDevice(.camera)) } catch {
         inputs.cameraEnabled = false
         emitError(error, fatal: false)
       }
@@ -490,8 +519,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   private func failAfterTeardown(details: String) async {
     stopTicker()
     // The stream is already stopped — asking it again throws.
-    camera.stop()
-    microphone.stop()
+    stopInputs()
     if let tail = mixer.flush(), let audioInput, audioInput.isReadyForMoreMediaData {
       audioInput.append(tail)
     }
@@ -746,7 +774,48 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     microphone.onSampleBuffer = { [weak self] buffer in
       self?.handleMicrophone(buffer)
     }
-    try microphone.start()
+    try microphone.start(device: resolvedDevice(.microphone))
+  }
+
+  /// The device an input opens, degrading to this platform's own default
+  /// (§33.2).
+  ///
+  /// A configured id that no longer resolves — the microphone was unplugged
+  /// between the launch screen and Record — is reported and replaced, never
+  /// raised. It is the same degradation an input that fails to start takes, for
+  /// the same reason: a `prepare` that refused would turn a missing microphone
+  /// into no recording at all
+  /// (`docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md`).
+  ///
+  /// With no id configured this resolves to exactly the device the session
+  /// opened before any of this existed.
+  private func resolvedDevice(_ kind: MediaDeviceKind) -> AVCaptureDevice? {
+    let requestedId: String?
+    let code: RecorderErrorCode
+    let message: String
+    switch kind {
+    case .camera:
+      requestedId = configuration?.cameraDeviceId
+      code = .cameraUnavailable
+      message =
+        "The selected camera is no longer available; the default was used instead."
+    case .microphone:
+      requestedId = configuration?.microphoneDeviceId
+      code = .microphoneUnavailable
+      message =
+        "The selected microphone is no longer available; the default was used instead."
+    case .systemAudio:
+      // Not a device this session opens: system audio is the mix
+      // ScreenCaptureKit delivers, and it has no endpoint to choose (§33.8).
+      return nil
+    }
+
+    let resolution = InputDeviceEnumerator.resolve(
+      kind: kind, requestedId: requestedId)
+    if let missing = resolution.unresolvedId {
+      emitError(RecorderError(code, message, details: missing), fatal: false)
+    }
+    return resolution.device
   }
 
   // MARK: - events

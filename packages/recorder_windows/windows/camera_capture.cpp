@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace relay {
 
@@ -43,6 +44,10 @@ LONG DefaultStrideFor(uint32_t width) {
 
 CameraCapture::~CameraCapture() {
   Stop();
+}
+
+void CameraCapture::SetDeviceId(std::string id) {
+  device_id_ = std::move(id);
 }
 
 double CameraCapture::aspect_ratio() const {
@@ -134,8 +139,49 @@ bool CameraCapture::OpenReader(std::string* error) {
     return false;
   }
 
+  // The symbolic link of every enumerated source, in Media Foundation's own
+  // order, so a configured id picks the same entry `getInputDevices` reported
+  // and a `null` one still picks the first source — exactly what this capture
+  // opened before device selection existed (input_devices.cpp).
+  std::vector<MediaDeviceInfo> enumerated;
+  enumerated.reserve(count);
+  for (UINT32 i = 0; i < count; ++i) {
+    MediaDeviceInfo info;
+    info.kind = MediaDeviceKind::kCamera;
+    LPWSTR link = nullptr;
+    UINT32 link_length = 0;
+    if (SUCCEEDED(devices[i]->GetAllocatedString(
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &link,
+            &link_length)) &&
+        link != nullptr) {
+      info.id = Narrow(link);
+      ::CoTaskMemFree(link);
+    }
+    enumerated.push_back(std::move(info));
+  }
+  // The same filter the enumeration applies, and by the same rule: a source
+  // with no symbolic link has no id, so it is one `getInputDevices` cannot list
+  // and one this capture must not open behind the list's back. `sources` maps
+  // the selection back onto Media Foundation's own array.
+  std::vector<size_t> sources;
+  RetainSelectableCameras(&enumerated, &sources);
+  const size_t selected = SelectDeviceIndex(enumerated, device_id_);
+  if (selected == kNoDeviceIndex) {
+    for (UINT32 i = 0; i < count; ++i) {
+      devices[i]->Release();
+    }
+    ::CoTaskMemFree(devices);
+    *error = "No camera is available.";
+    return false;
+  }
+  const UINT32 index = static_cast<UINT32>(sources[selected]);
+  // A chosen camera that no longer resolves degrades to the default rather
+  // than failing prepare (spec 33.2). Reported once the stream is actually
+  // open, so a camera that then fails to open reports that instead.
+  const bool fell_back = !device_id_.empty() && enumerated[selected].id != device_id_;
+
   winrt::com_ptr<IMFMediaSource> source;
-  hr = devices[0]->ActivateObject(__uuidof(IMFMediaSource), source.put_void());
+  hr = devices[index]->ActivateObject(__uuidof(IMFMediaSource), source.put_void());
   for (UINT32 i = 0; i < count; ++i) {
     devices[i]->Release();
   }
@@ -187,6 +233,16 @@ bool CameraCapture::OpenReader(std::string* error) {
   }
   width_.store(width);
   height_.store(height);
+  if (fell_back && on_error_) {
+    RecorderError fallback;
+    fallback.code = RecorderErrorCode::kCameraUnavailable;
+    fallback.message =
+        "The chosen camera is no longer available. Recording the default camera "
+        "instead.";
+    fallback.details = device_id_;
+    fallback.fatal = false;
+    on_error_(fallback);
+  }
   return true;
 }
 

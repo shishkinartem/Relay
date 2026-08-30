@@ -28,6 +28,8 @@ list(APPEND PLUGIN_SOURCES
   "capture_engine.h"
   "capture_source_enumerator.cpp"
   "capture_source_enumerator.h"
+  "input_devices.cpp"
+  "input_devices.h"
   "media_writer.cpp"
   "media_writer.h"
   "overlay_windows.cpp"

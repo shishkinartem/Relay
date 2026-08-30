@@ -124,6 +124,12 @@ void main() {
         'microphoneEnabled': true,
         'systemAudioEnabled': false,
         'showCursor': true,
+        // Null on every one of the three: an unconfigured session must open
+        // exactly the devices the plugin opened before device selection
+        // existed (§33.2).
+        'cameraDeviceId': null,
+        'microphoneDeviceId': null,
+        'systemAudioDeviceId': null,
         'cameraOverlay': <String, Object?>{
           'widthRatio': 0.16,
           'aspectRatio': 16 / 9,
@@ -265,6 +271,108 @@ void main() {
     });
   });
 
+  group('relay/recorder input devices', () {
+    late Recorder recorder;
+
+    setUp(() {
+      recorder = RecorderWindows().recorder;
+    });
+
+    test('a chosen device rides along on prepare', () async {
+      await recorder.prepare(
+        const RecordingConfiguration(
+          source: source,
+          recordingId: '8f2a11',
+          outputDirectoryPath: r'C:\Users\ada\Videos\Relay',
+          cameraDeviceId: r'\\?\usb#vid_046d&pid_085e#mi_00',
+          microphoneDeviceId: '{0.0.1.00000000}.{7a2b}',
+          systemAudioDeviceId: '{0.0.0.00000000}.{1c4d}',
+        ),
+      );
+
+      final Map<Object?, Object?> arguments =
+          calls.single.arguments as Map<Object?, Object?>;
+      expect(arguments['cameraDeviceId'], r'\\?\usb#vid_046d&pid_085e#mi_00');
+      expect(arguments['microphoneDeviceId'], '{0.0.1.00000000}.{7a2b}');
+      expect(arguments['systemAudioDeviceId'], '{0.0.0.00000000}.{1c4d}');
+    });
+
+    test('getInputDevices names the kind and keeps the default first', () async {
+      // The native half orders the list; this asserts the package carries that
+      // order through rather than re-sorting it.
+      respond = (MethodCall call) => <Object?>[
+        <String, Object?>{
+          'id': '{0.0.1.00000000}.{7a2b}',
+          'kind': 'microphone',
+          'label': 'Microphone Array (Realtek)',
+          'isSystemDefault': true,
+          'isAvailable': true,
+        },
+        <String, Object?>{
+          'id': '{0.0.1.00000000}.{9f10}',
+          'kind': 'microphone',
+          'label': 'Shure MV7',
+          'isSystemDefault': false,
+          'isAvailable': true,
+        },
+      ];
+
+      final List<MediaDevice> devices = await recorder.getInputDevices(
+        MediaDeviceKind.microphone,
+      );
+
+      expect(calls.single.method, 'getInputDevices');
+      expect(calls.single.arguments, <String, Object?>{'kind': 'microphone'});
+      expect(devices.first.isSystemDefault, isTrue);
+      expect(devices.map((MediaDevice d) => d.label).toList(), <String>[
+        'Microphone Array (Realtek)',
+        'Shure MV7',
+      ]);
+    });
+
+    test('an empty list is an answer, not a failure', () async {
+      // No camera attached. The native half must not report this as
+      // unimplemented: Dart would surface that as RecorderErrorCode.unsupported.
+      respond = (MethodCall call) => <Object?>[];
+
+      expect(await recorder.getInputDevices(MediaDeviceKind.camera), isEmpty);
+      expect(calls.single.arguments, <String, Object?>{'kind': 'camera'});
+    });
+
+    test('metering names the device the bar sits under', () async {
+      // The native half opens the device it is given: a meter showing the
+      // system default while the user picks between two microphones answers a
+      // question nobody asked (§33.2).
+      await recorder.startInputMetering(
+        MediaDeviceKind.microphone,
+        deviceId: 'mic:mv7',
+      );
+      await recorder.stopInputMetering(MediaDeviceKind.microphone);
+
+      expect(calls.map((MethodCall c) => c.method).toList(), <String>[
+        'startInputMetering',
+        'stopInputMetering',
+      ]);
+      expect(calls[0].arguments, <String, Object?>{
+        'kind': 'microphone',
+        'deviceId': 'mic:mv7',
+      });
+      expect(calls[1].arguments, <String, Object?>{'kind': 'microphone'});
+    });
+
+    test('no device named is the platform default, spelled as null', () async {
+      // The plugin reads one shape: `deviceId` is always present, and an
+      // absent or null one means the endpoint Windows would pick itself —
+      // exactly what a null id means on the recording configuration.
+      await recorder.startInputMetering(MediaDeviceKind.microphone);
+
+      expect(calls.single.arguments, <String, Object?>{
+        'kind': 'microphone',
+        'deviceId': null,
+      });
+    });
+  });
+
   group('relay/overlay traffic', () {
     late OverlayWindowController overlays;
 
@@ -288,6 +396,65 @@ void main() {
         'anchor': 'bottomCenter',
         'margin': 24.0,
       });
+    });
+
+    test('a remembered position rides along on showControlStrip', () async {
+      // What the native half has to decode to put the strip back where the user
+      // left it (§33.3): a fraction of the display's usable area, plus the
+      // display it was measured on. The anchor still travels with it, because
+      // that is the fallback when the display is gone.
+      await overlays.showControlStrip(
+        const OverlayPlacement.fractional(
+          size: Size(360, 46),
+          position: OverlayStripPosition(
+            displayId: 'display:65537',
+            x: 0.31,
+            y: 0.44,
+          ),
+          margin: 6,
+        ),
+      );
+
+      expect(calls.single.method, 'showControlStrip');
+      expect(calls.single.arguments, <String, Object?>{
+        'width': 360.0,
+        'height': 46.0,
+        'anchor': 'topCenter',
+        'margin': 6.0,
+        'position': <String, Object?>{
+          'displayId': 'display:65537',
+          'x': 0.31,
+          'y': 0.44,
+        },
+      });
+    });
+
+    test('controlStripPosition decodes where the strip ended up', () async {
+      // The display id is spelled the way the native half spells every other
+      // display id — `display:<HMONITOR>` — and is opaque here.
+      respond = (MethodCall call) => <String, Object?>{
+        'displayId': 'display:65537',
+        'x': 0.62,
+        'y': 0.08,
+      };
+
+      final OverlayStripPosition? position = await overlays
+          .controlStripPosition();
+
+      expect(calls.single.method, 'controlStripPosition');
+      expect(calls.single.arguments, isNull);
+      expect(position?.displayId, 'display:65537');
+      expect(position?.x, closeTo(0.62, 1e-9));
+      expect(position?.y, closeTo(0.08, 1e-9));
+    });
+
+    test('a strip the host cannot locate is null, not the origin', () async {
+      // No strip on screen, or a display the host cannot name. Dart then keeps
+      // whatever it had stored: failing to read a position is not the user
+      // having moved the strip back.
+      respond = (MethodCall call) => null;
+
+      expect(await overlays.controlStripPosition(), isNull);
     });
 
     test('setMainWindowVisible hides the main panel for the session', () async {
@@ -345,9 +512,21 @@ void main() {
         'message': 'The default render endpoint disappeared.',
         'fatal': false,
       });
+      // Linear amplitude in [0, 1], never decibels and never a buffer: §3 keeps
+      // raw media native.
+      sink!.success(<String, Object?>{
+        'type': 'inputLevel',
+        'kind': 'microphone',
+        'peak': 0.62,
+        'rms': 0.41,
+      });
+      // The Windows half names no kind: what it watches is an audio endpoint
+      // change, and "re-read everything" is the only instruction that is also
+      // true of the camera list.
+      sink!.success(<String, Object?>{'type': 'devicesChanged'});
       await pumpEventQueue();
 
-      expect(seen, hasLength(4));
+      expect(seen, hasLength(6));
       expect(
         (seen[0] as RecorderStateEvent).state,
         PlatformRecorderState.recording,
@@ -363,6 +542,15 @@ void main() {
         RecorderErrorCode.systemAudioUnavailable,
       );
       expect((seen[3] as RecorderErrorEvent).fatal, isFalse);
+      expect(
+        (seen[4] as RecorderInputLevelEvent).kind,
+        MediaDeviceKind.microphone,
+      );
+      expect(
+        (seen[4] as RecorderInputLevelEvent).level.peak,
+        closeTo(0.62, 1e-9),
+      );
+      expect((seen[5] as RecorderDevicesChangedEvent).kind, isNull);
     });
   });
 }

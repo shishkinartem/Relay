@@ -71,6 +71,46 @@ final class RecordingConfigurationTests: XCTestCase {
     XCTAssertEqual(configuration.aspectRatioPolicy, "stretchToPreset")
   }
 
+  func testAnUnconfiguredSessionAsksForNoParticularDevice() throws {
+    // Null on all three is what every recording made before devices could be
+    // chosen sends, and it has to keep opening exactly the devices it opened
+    // then (§33.2).
+    let configuration = try RecordingConfiguration(map: map())
+
+    XCTAssertNil(configuration.cameraDeviceId)
+    XCTAssertNil(configuration.microphoneDeviceId)
+    XCTAssertNil(configuration.systemAudioDeviceId)
+  }
+
+  func testAChosenDeviceSurvivesDecodingUnparsed() throws {
+    // The id is opaque on both sides. Nothing here may read a meaning out of
+    // its shape.
+    let configuration = try RecordingConfiguration(
+      map: map([
+        "cameraDeviceId": "camera:3F45E80A-0176",
+        "microphoneDeviceId": "microphone:BuiltInMicrophoneDevice",
+        "systemAudioDeviceId": "systemAudio:0",
+      ]))
+
+    XCTAssertEqual(configuration.cameraDeviceId, "camera:3F45E80A-0176")
+    XCTAssertEqual(
+      configuration.microphoneDeviceId, "microphone:BuiltInMicrophoneDevice")
+    XCTAssertEqual(configuration.systemAudioDeviceId, "systemAudio:0")
+  }
+
+  func testAnEmptyDeviceIdIsNoDeviceIdAtAll() throws {
+    // An empty string would match no device and be reported to the user as a
+    // device that went missing — a fallback they never asked for.
+    let configuration = try RecordingConfiguration(
+      map: map([
+        "cameraDeviceId": "",
+        "microphoneDeviceId": 7,
+      ]))
+
+    XCTAssertNil(configuration.cameraDeviceId)
+    XCTAssertNil(configuration.microphoneDeviceId)
+  }
+
   func testTheCanvasIsAlwaysEven() throws {
     // H.264 4:2:0 requires even dimensions. An odd canvas is not a slightly
     // wrong file, it is an encoder that refuses to start.

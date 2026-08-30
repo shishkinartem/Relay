@@ -136,4 +136,81 @@ void main() {
       expect(const AppSettings().copyWith(frameRate: 30), const AppSettings());
     });
   });
+
+  group('input devices and disclosure state (§33.2)', () {
+    test('choices and open sections round-trip', () {
+      const AppSettings settings = AppSettings(
+        inputDevices: <MediaDeviceKind, InputDeviceChoice>{
+          MediaDeviceKind.microphone: InputDeviceChoice(
+            id: 'mic:mv7',
+            label: 'Shure MV7',
+          ),
+        },
+        expandedInputs: <MediaDeviceKind>{MediaDeviceKind.microphone},
+      );
+
+      final AppSettings restored = AppSettings.fromJson(settings.toJson());
+
+      expect(restored, settings);
+      expect(restored.hashCode, settings.hashCode);
+      expect(
+        restored.inputDevices[MediaDeviceKind.microphone]?.label,
+        'Shure MV7',
+      );
+      expect(restored.expandedInputs, <MediaDeviceKind>{
+        MediaDeviceKind.microphone,
+      });
+    });
+
+    test('defaults are no choice made and every section closed', () {
+      const AppSettings settings = AppSettings();
+
+      expect(settings.inputDevices, isEmpty);
+      expect(settings.expandedInputs, isEmpty);
+    });
+
+    test('a stored kind this build does not know is dropped', () {
+      // Defaulting it would file a choice under the wrong input.
+      final AppSettings settings = AppSettings.fromJson(<String, Object?>{
+        AppSettings.keyInputDevices: <String, Object?>{
+          'telepathy': <String, Object?>{'id': 'x', 'label': 'Mind'},
+          'microphone': <String, Object?>{'id': 'mic:1', 'label': 'Mic'},
+        },
+        AppSettings.keyExpandedInputs: <Object?>['telepathy', 'camera'],
+      });
+
+      expect(settings.inputDevices.keys, <MediaDeviceKind>[
+        MediaDeviceKind.microphone,
+      ]);
+      expect(settings.expandedInputs, <MediaDeviceKind>{
+        MediaDeviceKind.camera,
+      });
+    });
+
+    test('a stored choice with no id is not a choice', () {
+      final AppSettings settings = AppSettings.fromJson(<String, Object?>{
+        AppSettings.keyInputDevices: <String, Object?>{
+          'microphone': <String, Object?>{'label': 'Ghost'},
+        },
+      });
+
+      expect(settings.inputDevices, isEmpty);
+    });
+
+    test(
+      'a choice with no label degrades to its id rather than to nothing',
+      () {
+        final AppSettings settings = AppSettings.fromJson(<String, Object?>{
+          AppSettings.keyInputDevices: <String, Object?>{
+            'microphone': <String, Object?>{'id': 'mic:1'},
+          },
+        });
+
+        expect(
+          settings.inputDevices[MediaDeviceKind.microphone]?.label,
+          'mic:1',
+        );
+      },
+    );
+  });
 }

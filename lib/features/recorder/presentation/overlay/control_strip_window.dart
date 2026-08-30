@@ -125,6 +125,9 @@ class _ControlStripWindowState extends State<ControlStripWindow>
             cameraAvailable: _state.cameraAvailable,
             systemAudioAvailable: _state.systemAudioAvailable,
             isStopping: _state.isStopping,
+            // The gesture reaches the host as one call and the operating
+            // system's own drag loop takes it from there (§33.3).
+            onMoveRequested: _client.beginMove,
             onToggleMicrophone: () =>
                 _client.send(OverlayCommand.toggleMicrophone),
             onToggleCamera: () => _client.send(OverlayCommand.toggleCamera),

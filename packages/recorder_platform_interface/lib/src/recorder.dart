@@ -1,5 +1,6 @@
 import 'models/camera_overlay_configuration.dart';
 import 'models/capture_source.dart';
+import 'models/media_device.dart';
 import 'models/overlay.dart';
 import 'models/permissions.dart';
 import 'models/recorder_capabilities.dart';
@@ -22,12 +23,56 @@ abstract interface class CaptureSourceProvider {
   });
 }
 
+/// Enumerates and meters the inputs a recording can use (§33.2).
+///
+/// Separate from [Recorder] for the same reason [CaptureSourceProvider] is: a
+/// platform that can enumerate devices but not record still satisfies it, and
+/// the launch screen depends on this half alone.
+abstract interface class MediaDeviceProvider {
+  /// Every device of [kind] the platform can see, system default first.
+  ///
+  /// Ordering is part of the contract: **the system default first, then the
+  /// rest in the platform's own order**, so the two platforms present the same
+  /// list. An empty list is a legitimate answer — no camera is attached — and
+  /// is not an error.
+  ///
+  /// Called for a kind outside `RecorderCapabilities.selectableDeviceKinds` it
+  /// returns the single device that kind will use, so a caller can name it
+  /// without offering a choice.
+  Future<List<MediaDevice>> getInputDevices(MediaDeviceKind kind);
+
+  /// Starts reporting [RecorderInputLevelEvent] for [kind].
+  ///
+  /// [deviceId] is the device to listen to, and null means the platform
+  /// default — the same meaning it has on `RecordingConfiguration`. It is here
+  /// because a meter that showed the system default while the user was
+  /// choosing a different microphone would answer a question nobody asked: the
+  /// bar under a device row has to be *that* device, or picking between two
+  /// microphones by speaking does not work at all.
+  ///
+  /// Nested starts are counted, not stacked: two meters on screen make one tap,
+  /// and the tap closes when the last one stops. Starting again with a
+  /// different [deviceId] re-points the tap rather than opening a second one.
+  /// Metering never opens a device that a recording already holds — during a
+  /// session the levels come off the live capture.
+  ///
+  /// A kind outside `RecorderCapabilities.meterableDeviceKinds` is a no-op
+  /// rather than an error, so a caller that asks anyway gets silence instead of
+  /// a failure.
+  Future<void> startInputMetering(MediaDeviceKind kind, {String? deviceId});
+
+  /// Stops what [startInputMetering] began. Idempotent, and a no-op when
+  /// nothing is metering.
+  Future<void> stopInputMetering(MediaDeviceKind kind);
+}
+
 /// The recorder contract (§20).
 ///
 /// Lifecycle: `prepare → start → (pause ⇄ resume)* → stop`. Every lifecycle
 /// call is idempotent or explicitly guarded, so double clicks and repeated
 /// callbacks cannot corrupt the output (`docs/architecture/recording.md`).
-abstract interface class Recorder implements CaptureSourceProvider {
+abstract interface class Recorder
+    implements CaptureSourceProvider, MediaDeviceProvider {
   Future<RecorderCapabilities> getCapabilities();
 
   /// The display holding the main application window (§5). Overlay placement
@@ -122,6 +167,21 @@ abstract interface class OverlayWindowController {
   Future<void> showControlStrip(OverlayPlacement placement);
 
   Future<void> hideControlStrip();
+
+  /// Where the control strip is now, as a fraction of its display's usable
+  /// area (§33.3).
+  ///
+  /// Pulled rather than pushed. The application asks once, when the session
+  /// that owns the strip is ending, and persists the answer — so a position is
+  /// remembered exactly when §33.7 says it should be ("the strip returns where
+  /// the user left it") without a stream of events for a window that may be
+  /// dragged for a second and a half.
+  ///
+  /// Null when there is no strip on screen, or when the host cannot name the
+  /// display it is on. A caller keeps the previous stored position rather than
+  /// clearing it: failing to read a position is not the user having moved the
+  /// strip back.
+  Future<OverlayStripPosition?> controlStripPosition();
 
   /// Shows the camera preview at [placement].
   ///

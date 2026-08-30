@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'models/camera_overlay_configuration.dart';
 import 'models/capture_source.dart';
+import 'models/media_device.dart';
 import 'models/overlay.dart';
 import 'models/permissions.dart';
 import 'models/recorder_capabilities.dart';
@@ -57,6 +58,22 @@ class _UnsupportedRecorder implements Recorder {
   Future<List<CaptureSource>> getAvailableSources({
     bool refreshThumbnails = true,
   }) async => const <CaptureSource>[];
+
+  // Nothing to enumerate and nothing to meter, so these answer emptily rather
+  // than throwing: a launch screen that cannot record must still draw, and
+  // `getCapabilities` is what tells it recording is unavailable.
+  @override
+  Future<List<MediaDevice>> getInputDevices(MediaDeviceKind kind) async =>
+      const <MediaDevice>[];
+
+  @override
+  Future<void> startInputMetering(
+    MediaDeviceKind kind, {
+    String? deviceId,
+  }) async {}
+
+  @override
+  Future<void> stopInputMetering(MediaDeviceKind kind) async {}
 
   @override
   Future<RecorderCapabilities> getCapabilities() async =>
@@ -134,6 +151,9 @@ class _UnsupportedOverlays implements OverlayWindowController {
 
   @override
   Future<void> hideControlStrip() async {}
+
+  @override
+  Future<OverlayStripPosition?> controlStripPosition() async => null;
 
   @override
   Future<void> showCameraPreview(

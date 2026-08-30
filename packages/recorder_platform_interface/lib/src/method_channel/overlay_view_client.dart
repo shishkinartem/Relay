@@ -32,6 +32,16 @@ class OverlayViewClient {
     <String, Object?>{'command': command.name},
   );
 
+  /// Asks the host to run its own window drag, from the pointer that is
+  /// currently down (§33.3).
+  ///
+  /// One call, not a stream of deltas: the operating system already has a drag
+  /// loop that tracks the pointer at the display's refresh rate and stops on
+  /// mouse-up, and handing the gesture to it is both smoother and quieter than
+  /// sending a message per pointer move over a channel meant for commands (§3).
+  /// The host clamps the result to the display's usable area.
+  Future<void> beginMove() => _channel.invokeMethod<void>('beginMove');
+
   /// Tells the host the overlay content measured this size, so the window can
   /// be resized to fit exactly.
   Future<void> reportContentSize(double width, double height) =>

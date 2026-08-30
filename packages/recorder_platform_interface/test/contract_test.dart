@@ -368,6 +368,24 @@ void main() {
                     'thumbnail': Uint8List.fromList(<int>[1, 2, 3]),
                   },
                 ];
+              case 'getInputDevices':
+                return <Object?>[
+                  <Object?, Object?>{
+                    'id': 'mic:default',
+                    'kind': 'microphone',
+                    'label': 'Shure MV7',
+                    'isSystemDefault': true,
+                    'isAvailable': true,
+                  },
+                  <Object?, Object?>{
+                    'id': 'mic:builtin',
+                    'kind': 'microphone',
+                    'label': 'MacBook Pro Microphone',
+                  },
+                  // Neither of these is a device: no kind, and no id.
+                  <Object?, Object?>{'id': 'x', 'kind': 'telepathy'},
+                  <Object?, Object?>{'kind': 'microphone', 'label': 'Ghost'},
+                ];
               case 'stop':
                 return <Object?, Object?>{
                   'path': '/tmp/relay/recording-1.mp4',
@@ -572,11 +590,243 @@ void main() {
     });
   });
 
+  group('input devices (§33.2)', () {
+    const MethodChannel channel = MethodChannel('relay/recorder');
+    final List<MethodCall> calls = <MethodCall>[];
+    late MethodChannelRecorder recorder;
+
+    setUp(() {
+      calls.clear();
+      recorder = MethodChannelRecorder();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            calls.add(call);
+            if (call.method == 'getInputDevices') {
+              return <Object?>[
+                <Object?, Object?>{
+                  'id': 'mic:default',
+                  'kind': 'microphone',
+                  'label': 'Shure MV7',
+                  'isSystemDefault': true,
+                  'isAvailable': true,
+                },
+                <Object?, Object?>{
+                  'id': 'mic:busy',
+                  'kind': 'microphone',
+                  'label': '',
+                  'isAvailable': false,
+                },
+                <Object?, Object?>{'id': 'x', 'kind': 'telepathy'},
+                <Object?, Object?>{'kind': 'microphone', 'label': 'Ghost'},
+              ];
+            }
+            return null;
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    test('the kind is named on the wire', () async {
+      await recorder.getInputDevices(MediaDeviceKind.camera);
+      expect(calls.single.method, 'getInputDevices');
+      expect(calls.single.arguments, <String, Object?>{'kind': 'camera'});
+    });
+
+    test('an entry that is not a device is dropped, not defaulted', () async {
+      // Two of the four rows are malformed. Defaulting them would put a
+      // selectable ghost in the list; dropping them costs the user nothing.
+      final List<MediaDevice> devices = await recorder.getInputDevices(
+        MediaDeviceKind.microphone,
+      );
+      expect(devices.map((MediaDevice d) => d.id), <String>[
+        'mic:default',
+        'mic:busy',
+      ]);
+    });
+
+    test('a device with no name is still nameable', () async {
+      final List<MediaDevice> devices = await recorder.getInputDevices(
+        MediaDeviceKind.microphone,
+      );
+      expect(devices[1].label, 'Microphone');
+      expect(devices[1].isAvailable, isFalse);
+      expect(devices[1].isSystemDefault, isFalse);
+    });
+
+    test('identity is the id and the kind, not the availability', () {
+      const MediaDevice before = MediaDevice(
+        id: 'mic:1',
+        kind: MediaDeviceKind.microphone,
+        label: 'Shure MV7',
+      );
+      const MediaDevice after = MediaDevice(
+        id: 'mic:1',
+        kind: MediaDeviceKind.microphone,
+        label: 'Shure MV7 (2)',
+        isAvailable: false,
+      );
+      expect(before, after);
+      expect(<MediaDevice>{before, after}, hasLength(1));
+    });
+
+    test('metering names the device it is metering', () async {
+      // A meter showing the system default while the user picks between two
+      // microphones answers a question nobody asked (§33.2).
+      await recorder.startInputMetering(
+        MediaDeviceKind.microphone,
+        deviceId: 'mic:mv7',
+      );
+      await recorder.stopInputMetering(MediaDeviceKind.microphone);
+
+      expect(calls.map((MethodCall c) => c.method), <String>[
+        'startInputMetering',
+        'stopInputMetering',
+      ]);
+      expect(calls.first.arguments, <String, Object?>{
+        'kind': 'microphone',
+        'deviceId': 'mic:mv7',
+      });
+      expect(calls.last.arguments, <String, Object?>{'kind': 'microphone'});
+    });
+
+    test('no device named is the platform default, spelled as null', () async {
+      await recorder.startInputMetering(MediaDeviceKind.microphone);
+
+      expect(calls.single.arguments, <String, Object?>{
+        'kind': 'microphone',
+        'deviceId': null,
+      });
+    });
+
+    test('an unknown kind name resolves to nothing, never to a member', () {
+      expect(
+        MediaDeviceKind.fromName('microphone'),
+        MediaDeviceKind.microphone,
+      );
+      expect(MediaDeviceKind.fromName('gramophone'), isNull);
+      expect(MediaDeviceKind.fromName(null), isNull);
+    });
+
+    test('a level above full scale is clipping, not an overflowing bar', () {
+      final InputLevel level = InputLevel.fromMap(<String, Object?>{
+        'peak': 1.4,
+        'rms': -0.2,
+      });
+      expect(level.peak, 1.0);
+      expect(level.rms, 0.0);
+      expect(level.isSilent, isFalse, reason: 'clipping is not silence');
+    });
+
+    test('silence is what a flat bar is made of', () {
+      expect(InputLevel.silent.isSilent, isTrue);
+      expect(
+        InputLevel.fromMap(const <String, Object?>{}).isSilent,
+        isTrue,
+        reason: 'a reply with no level is silence, not a crash',
+      );
+    });
+
+    test('capabilities carry which kinds can be chosen and metered', () {
+      final RecorderCapabilities capabilities = RecorderCapabilities.fromMap(
+        <String, Object?>{
+          'selectableDeviceKinds': <Object?>['camera', 'microphone', 'aura'],
+          'meterableDeviceKinds': <Object?>['microphone'],
+        },
+      );
+      expect(capabilities.selectableDeviceKinds, <MediaDeviceKind>{
+        MediaDeviceKind.camera,
+        MediaDeviceKind.microphone,
+      });
+      expect(capabilities.meterableDeviceKinds, <MediaDeviceKind>{
+        MediaDeviceKind.microphone,
+      });
+    });
+
+    test('a platform that says nothing offers no choice', () {
+      final RecorderCapabilities capabilities = RecorderCapabilities.fromMap(
+        const <String, Object?>{},
+      );
+      expect(capabilities.selectableDeviceKinds, isEmpty);
+      expect(capabilities.meterableDeviceKinds, isEmpty);
+    });
+
+    test('a level event reaches the right meter', () {
+      final RecorderEvent event = RecorderEvent.fromMap(<String, Object?>{
+        'type': 'inputLevel',
+        'kind': 'microphone',
+        'peak': 0.62,
+        'rms': 0.41,
+      });
+      expect(
+        event,
+        isA<RecorderInputLevelEvent>()
+            .having(
+              (RecorderInputLevelEvent e) => e.kind,
+              'kind',
+              MediaDeviceKind.microphone,
+            )
+            .having(
+              (RecorderInputLevelEvent e) => e.level.peak,
+              'peak',
+              closeTo(0.62, 1e-9),
+            ),
+      );
+    });
+
+    test('a level for an unknown input is not attributed to a known one', () {
+      final RecorderEvent event = RecorderEvent.fromMap(<String, Object?>{
+        'type': 'inputLevel',
+        'kind': 'aura',
+        'peak': 1.0,
+      });
+      expect(
+        event,
+        isA<RecorderErrorEvent>().having(
+          (RecorderErrorEvent e) => e.fatal,
+          'fatal',
+          isFalse,
+        ),
+      );
+    });
+
+    test('a device-list change can decline to name a kind', () {
+      expect(
+        RecorderEvent.fromMap(<String, Object?>{'type': 'devicesChanged'}),
+        isA<RecorderDevicesChangedEvent>().having(
+          (RecorderDevicesChangedEvent e) => e.kind,
+          'kind',
+          isNull,
+        ),
+      );
+      expect(
+        RecorderEvent.fromMap(<String, Object?>{
+          'type': 'devicesChanged',
+          'kind': 'camera',
+        }),
+        isA<RecorderDevicesChangedEvent>().having(
+          (RecorderDevicesChangedEvent e) => e.kind,
+          'kind',
+          MediaDeviceKind.camera,
+        ),
+      );
+    });
+  });
+
   group('the unsupported platform', () {
     test('fails loudly rather than pretending to record', () async {
       final RecorderPlatform platform = UnsupportedRecorderPlatform();
       expect((await platform.recorder.getCapabilities()).isSupported, isFalse);
       expect(await platform.recorder.getAvailableSources(), isEmpty);
+      expect(
+        await platform.recorder.getInputDevices(MediaDeviceKind.microphone),
+        isEmpty,
+      );
+      // Metering must stay safe with no plugin: a launch screen still draws.
+      await platform.recorder.startInputMetering(MediaDeviceKind.microphone);
+      await platform.recorder.stopInputMetering(MediaDeviceKind.microphone);
       await expectLater(
         platform.recorder.start(),
         throwsA(isA<RecorderException>()),

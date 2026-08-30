@@ -11,9 +11,14 @@ import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 abstract interface class SessionOverlays {
   Stream<OverlayCommand> get commands;
 
-  Future<void> showControlStrip();
+  /// Shows the strip where the user left it, or at its default dock when
+  /// [position] is null or its display is gone (§33.3).
+  Future<void> showControlStrip({OverlayStripPosition? position});
 
   Future<void> hideControlStrip();
+
+  /// Where the strip is now, for persisting. Null when it cannot be read.
+  Future<OverlayStripPosition?> controlStripPosition();
 
   /// Pushes a snapshot for the strip to draw.
   Future<void> push(RecordingOverlayState state);
@@ -62,14 +67,32 @@ class OverlayPresenter implements SessionOverlays {
   @override
   Stream<OverlayCommand> get commands => _overlays.commands;
 
+  /// The default dock is unchanged — top centre, 6 points down — and it is what
+  /// a session with no remembered position still gets (§6).
+  ///
+  /// A remembered position travels as a *fraction*, and the host is what
+  /// resolves and clamps it: only the host knows the display's usable area, and
+  /// resolving here would put the strip over a menu bar the moment a display
+  /// changed shape between two sessions.
   @override
-  Future<void> showControlStrip() => _overlays.showControlStrip(
-    OverlayPlacement.anchored(
-      size: controlStripSize,
-      anchor: OverlayAnchor.topCenter,
-      margin: 6,
-    ),
-  );
+  Future<void> showControlStrip({OverlayStripPosition? position}) =>
+      _overlays.showControlStrip(
+        position == null
+            ? OverlayPlacement.anchored(
+                size: controlStripSize,
+                anchor: OverlayAnchor.topCenter,
+                margin: 6,
+              )
+            : OverlayPlacement.fractional(
+                size: controlStripSize,
+                position: position,
+                margin: 6,
+              ),
+      );
+
+  @override
+  Future<OverlayStripPosition?> controlStripPosition() =>
+      _overlays.controlStripPosition();
 
   @override
   Future<void> hideControlStrip() {

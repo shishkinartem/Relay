@@ -9,6 +9,7 @@
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -18,6 +19,7 @@
 #include <thread>
 
 #include "capture_source_enumerator.h"
+#include "input_devices.h"
 #include "overlay_windows.h"
 #include "recorder_types.h"
 #include "recording_session.h"
@@ -73,6 +75,11 @@ class RecorderWindowsPlugin : public flutter::Plugin {
 
   void EmitRecorderEvent(flutter::EncodableMap event);
   void EmitOverlayCommand(const std::string& command);
+  void EmitInputLevel(MediaDeviceKind kind, const InputLevelSample& level);
+  // Named no kind: what Windows reports is an audio endpoint change, and
+  // "re-read everything" is the only instruction that is also true of the
+  // camera list (input_devices.h).
+  void EmitDevicesChanged();
   void WireSessionEvents();
 
   // Re-resolves an absolute preview frame against the camera's real shape, so
@@ -103,12 +110,19 @@ class RecorderWindowsPlugin : public flutter::Plugin {
 
   CaptureSourceEnumerator enumerator_;
   OverlayWindows overlays_;
+  // Declared ahead of the meter and the session because both point at it: a
+  // member is destroyed after everything declared below it.
+  LevelAccumulator microphone_level_;
+  InputMeter meter_;
+  AudioEndpointWatcher device_watcher_;
   // Shared rather than unique: a worker-thread prepare/stop holds a reference
   // for the duration of the call, so disposing on the platform thread cannot
   // pull the session out from under it.
   std::shared_ptr<RecordingSession> session_;
   RecordingConfig last_config_;
-  bool disposed_ = false;
+  // Written on the platform thread and read on the serial worker: a task
+  // queued before dispose and drained after it must not re-arm anything.
+  std::atomic<bool> disposed_{false};
 };
 
 }  // namespace relay

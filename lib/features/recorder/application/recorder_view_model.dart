@@ -17,6 +17,8 @@ import '../domain/session_machine.dart';
 import '../domain/session_state.dart';
 import '../domain/upload_translation.dart';
 import 'artifact_recovery.dart';
+import 'device_catalog.dart';
+import 'input_meter.dart';
 import 'overlay_presenter.dart';
 import 'permission_coordinator.dart';
 import 'source_catalog.dart';
@@ -47,6 +49,8 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     this._machine = const SessionMachine(),
     SessionPermissions? permissionCoordinator,
     SourceCatalog? sourceCatalog,
+    DeviceCatalog? deviceCatalog,
+    InputMeter? inputMeter,
     ArtifactRecovery? artifactRecovery,
   }) : _recorder = recorder,
        _clock = clock ?? DateTime.now,
@@ -70,6 +74,16 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
              logger: _logger,
              timeout: platformCallTimeout,
            ),
+       _devices =
+           deviceCatalog ??
+           PlatformDeviceCatalog(
+             provider: recorder,
+             logger: _logger,
+             timeout: platformCallTimeout,
+           ),
+       _meter =
+           inputMeter ??
+           PlatformInputMeter(provider: recorder, logger: _logger),
        _recovery =
            artifactRecovery ??
            PlatformArtifactRecovery(
@@ -81,6 +95,8 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   final Recorder _recorder;
   final SessionPermissions _permissions;
   final SourceCatalog _catalog;
+  final DeviceCatalog _devices;
+  final InputMeter _meter;
   final ArtifactRecovery _recovery;
   final SessionOverlays _overlays;
   final RecordingStore _store;
@@ -115,12 +131,49 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   final Set<StripControl> _inFlight = <StripControl>{};
   bool _initialized = false;
   bool _refreshingPermissions = false;
+  bool _disposed = false;
 
   SessionState get state => _state;
   RecorderCapabilities get capabilities => _capabilities;
   DisplayGeometry? get currentDisplay => _currentDisplay;
   List<CaptureSource> get sources => _catalog.sources;
   CaptureSource? get selectedSource => _catalog.selected;
+
+  // ── inputs: which device, and is it hearing anything (§33.2) ─────────────
+
+  /// Every device of [kind], system default first.
+  List<MediaDevice> devicesFor(MediaDeviceKind kind) =>
+      _devices.devicesFor(kind);
+
+  /// The explicit choice, or null for "whatever the system defaults to".
+  MediaDevice? deviceSelectionFor(MediaDeviceKind kind) =>
+      _devices.selectionFor(kind);
+
+  /// The device that will actually be opened — what the screen names.
+  MediaDevice? effectiveDeviceFor(MediaDeviceKind kind) =>
+      _devices.effectiveDeviceFor(kind);
+
+  /// Kinds whose remembered device was not found, and the name it had.
+  Map<MediaDeviceKind, String> get unresolvedDevices => _devices.unresolved;
+
+  bool get isDiscoveringDevices => _devices.isLoading;
+
+  RecorderErrorCode? get deviceLoadFailure => _devices.lastFailure;
+
+  bool canChooseDevice(MediaDeviceKind kind) =>
+      _capabilities.selectableDeviceKinds.contains(kind);
+
+  bool canMeter(MediaDeviceKind kind) => _meter.canMeter(kind);
+
+  InputLevel levelFor(MediaDeviceKind kind) => _meter.levelFor(kind);
+
+  bool isMeterRunningFor(MediaDeviceKind kind) => _meter.isRunningFor(kind);
+
+  bool isInputSilent(MediaDeviceKind kind) => _meter.isSilentFor(kind);
+
+  /// Whether [kind]'s detail section is open on the launch screen.
+  bool isInputExpanded(MediaDeviceKind kind) =>
+      settings.expandedInputs.contains(kind);
   List<IncompleteRecordingArtifact> get pendingArtifacts => _recovery.pending;
   PermissionReport get permissionReport => _permissions.report;
   bool get isBusy => _busy;
@@ -184,10 +237,18 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       );
     }
 
+    _meter.meterableKinds = _capabilities.meterableDeviceKinds;
+    // Restored before the first enumeration, so a remembered id is resolved by
+    // the same pass that reads the list rather than by a second one.
+    _devices.restore(settings.inputDevices);
+
     await _recovery.scan();
 
     await _permissions.refresh();
     await _loadSources(refreshThumbnails: false, silent: true);
+    // Every kind, not only the selectable ones: the launch screen names the
+    // device even where it cannot offer a choice.
+    await _devices.load(MediaDeviceKind.values.toSet());
     _presentBlockingPermissionIfNeeded();
     _initialized = true;
     notifyListeners();
@@ -285,6 +346,116 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   void closeSourcePicker() => _dispatch(const SourcePickerDismissed());
 
   Future<void> refreshSources() => _loadSources(refreshThumbnails: true);
+
+  /// The kinds this platform lets the user choose between.
+  ///
+  /// Read from capabilities, never from an operating-system name (§28).
+  Set<MediaDeviceKind> get _selectableKinds =>
+      _capabilities.selectableDeviceKinds;
+
+  /// Re-reads the device lists.
+  ///
+  /// Defaults to every selectable kind. A kind the platform cannot choose
+  /// between is still enumerated on demand — the launch screen names the one
+  /// device it will use — but it is not refreshed on every change event.
+  Future<void> loadInputDevices({Set<MediaDeviceKind>? kinds}) async {
+    final Set<MediaDeviceKind> targets = kinds ?? _selectableKinds;
+    if (targets.isEmpty) {
+      return;
+    }
+    notifyListeners();
+    await _devices.load(targets);
+    notifyListeners();
+  }
+
+  /// Chooses the device an input will open. Null means the system default.
+  ///
+  /// Persisted immediately: the choice outlives the session, and a user who
+  /// picks a microphone and then quits without recording still expects it to be
+  /// there next time.
+  Future<void> selectInputDevice(
+    MediaDeviceKind kind,
+    MediaDevice? device,
+  ) async {
+    _devices.select(kind, device);
+    // What was heard from the previous device says nothing about this one.
+    _meter.reset(kind);
+    notifyListeners();
+    if (_meter.isRunningFor(kind)) {
+      // The bar has to move to the device the user just chose, or picking
+      // between two microphones by speaking does not work.
+      await startMetering(kind);
+    }
+    await _persistDeviceChoices();
+  }
+
+  /// Opens or closes an input's detail section, and remembers which.
+  Future<void> setInputExpanded(MediaDeviceKind kind, bool expanded) async {
+    final Set<MediaDeviceKind> next = <MediaDeviceKind>{
+      ...settings.expandedInputs,
+    };
+    if (expanded) {
+      next.add(kind);
+    } else {
+      next.remove(kind);
+    }
+    await _settings.update(settings.copyWith(expandedInputs: next));
+    // A closed section has no meter to feed.
+    if (!expanded) {
+      await stopMetering(kind);
+    }
+    notifyListeners();
+  }
+
+  /// Starts the level meter for [kind], if the platform can meter it.
+  ///
+  /// Always on the device that input is set to, so the bar under a device row
+  /// is that device. A meter showing the system default while the user picks
+  /// between two microphones answers a question nobody asked.
+  Future<void> startMetering(MediaDeviceKind kind) async {
+    await _meter.start(kind, deviceId: _devices.deviceIdFor(kind));
+    _notifyIfAlive();
+  }
+
+  Future<void> stopMetering(MediaDeviceKind kind) async {
+    await _meter.stop(kind);
+    _notifyIfAlive();
+  }
+
+  /// Closes every meter. Called when the screen holding them goes away, so no
+  /// device is left open for a bar nobody is looking at (§33.7).
+  Future<void> stopAllMetering() async {
+    await _meter.stopAll();
+    _notifyIfAlive();
+  }
+
+  /// Notifies unless this object is already gone.
+  ///
+  /// Only the metering calls need it, and they need it because of the order a
+  /// teardown happens in: the widget that opened a tap closes it from its own
+  /// `dispose`, that call crosses the platform boundary, and by the time it
+  /// returns this view model may have been disposed too. Notifying a disposed
+  /// [ChangeNotifier] throws, and the throw would land in a teardown where
+  /// nothing can act on it — while the thing that mattered, closing the tap,
+  /// has already happened.
+  void _notifyIfAlive() {
+    if (_disposed) {
+      return;
+    }
+    notifyListeners();
+  }
+
+  Future<void> _persistDeviceChoices() async {
+    final Map<MediaDeviceKind, InputDeviceChoice> choices =
+        <MediaDeviceKind, InputDeviceChoice>{};
+    for (final MediaDeviceKind kind in MediaDeviceKind.values) {
+      final MediaDevice? device = _devices.selectionFor(kind);
+      if (device != null) {
+        choices[kind] = InputDeviceChoice.of(device);
+      }
+    }
+    await _settings.update(settings.copyWith(inputDevices: choices));
+  }
 
   void selectSource(CaptureSource source) {
     _catalog.select(source);
@@ -555,11 +726,23 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
               microphoneEnabled: microphone,
               systemAudioEnabled: systemAudio,
               showCursor: s.showCursor,
+              // Null for any input the user never chose, which is the platform
+              // default and exactly what this application recorded before
+              // devices could be chosen at all (§33.2).
+              cameraDeviceId: _devices.deviceIdFor(MediaDeviceKind.camera),
+              microphoneDeviceId: _devices.deviceIdFor(
+                MediaDeviceKind.microphone,
+              ),
+              systemAudioDeviceId: _devices.deviceIdFor(
+                MediaDeviceKind.systemAudio,
+              ),
             ),
           )
           .timeout(platformCallTimeout);
 
-      await _overlays.showControlStrip().timeout(platformCallTimeout);
+      await _overlays
+          .showControlStrip(position: settings.stripPosition)
+          .timeout(platformCallTimeout);
       if (camera) {
         await _showCameraPreview();
       }
@@ -794,6 +977,29 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Persists where the user left the strip, so the next session opens it
+  /// there (§33.7).
+  ///
+  /// Best-effort and never fatal: this runs on the teardown path, including the
+  /// failure one, and a position that could not be read is not worth a second
+  /// exception on top of whatever ended the session.
+  Future<void> _rememberStripPosition() async {
+    try {
+      final OverlayStripPosition? position = await _overlays
+          .controlStripPosition()
+          .timeout(platformCallTimeout);
+      if (position == null || position == settings.stripPosition) {
+        return;
+      }
+      await _settings.update(settings.copyWith(stripPosition: position));
+    } on Object catch (e) {
+      _logger.warn(
+        'strip_position_not_read',
+        fields: <String, Object?>{'error': e.runtimeType.toString()},
+      );
+    }
+  }
+
   /// Moves the finalized `recording-<id>.mp4` onto its user-facing name.
   Future<void> _adoptFinalizedName() async {
     final SessionState current = _state;
@@ -817,6 +1023,10 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// Restores the panel and removes the overlays. Every step is independent so
   /// one failure cannot leave the window hidden.
   Future<void> _teardownOverlays() async {
+    // Read before the strip is hidden, because a hidden window has no position
+    // to report. Failing to read one keeps whatever was stored: not being able
+    // to ask is not the user having dragged it back (§33.3).
+    await _rememberStripPosition();
     for (final Future<void> Function() step in <Future<void> Function()>[
       _overlays.hideCameraPreview,
       _overlays.hideControlStrip,
@@ -1119,6 +1329,25 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           _dispatch(InputBecameUnavailable(code));
           unawaited(_pushOverlayState());
         }
+      case RecorderInputLevelEvent(
+        :final MediaDeviceKind kind,
+        :final InputLevel level,
+      ):
+        _meter.accept(kind, level);
+        // Twenty of these arrive a second. Notifying on each is what makes the
+        // bar move, and it is cheap because only the meter widget rebuilds —
+        // but nothing else in this class may start doing work per sample.
+        notifyListeners();
+      case RecorderDevicesChangedEvent(:final MediaDeviceKind? kind):
+        // Something was plugged in or pulled out. Re-reading is the only way to
+        // find out what, and a null kind means the platform could not say.
+        unawaited(
+          loadInputDevices(
+            kinds: kind == null
+                ? _selectableKinds
+                : <MediaDeviceKind>{kind}.intersection(_selectableKinds),
+          ),
+        );
       case RecorderStatsEvent():
         _logger.debug(
           'recorder_stats',
@@ -1238,10 +1467,13 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_recorderEvents?.cancel());
     unawaited(_overlayCommands?.cancel());
     unawaited(_uploadEvents?.cancel());
+    // A metering tap outlives this object too, and it holds a real device.
+    unawaited(_meter.stopAll());
     // The platform session outlives this object unless it is told not to.
     // Cancelling the event subscriptions above only stops us hearing from a
     // capture that is still running.

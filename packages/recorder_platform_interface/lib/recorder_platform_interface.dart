@@ -10,6 +10,7 @@ export 'src/method_channel/method_channel_recorder.dart';
 export 'src/method_channel/overlay_view_client.dart';
 export 'src/models/camera_overlay_configuration.dart';
 export 'src/models/capture_source.dart';
+export 'src/models/media_device.dart';
 export 'src/models/overlay.dart';
 export 'src/models/permissions.dart';
 export 'src/models/recorder_capabilities.dart';

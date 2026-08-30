@@ -32,6 +32,18 @@ struct OverlayPlacement {
   double margin = 8;
   Anchor anchor = Anchor::kTopCenter;
 
+  // The spot the user last left the strip at (spec 33.3). False when the strip
+  // has never been moved, and the anchor above is the placement.
+  //
+  // position_x / position_y are the top-left as a fraction of the *usable* area
+  // of the display named by position_display_id, which is spelled the way
+  // capture_source_enumerator spells a display id. A fraction resolves against
+  // any resolution; a point survives none of them.
+  bool has_position = false;
+  std::string position_display_id;
+  double position_x = 0;
+  double position_y = 0;
+
   static OverlayPlacement FromMap(const flutter::EncodableMap& map);
 };
 
@@ -59,6 +71,15 @@ class OverlayWindows {
   bool ShowCameraPreview(const OverlayPlacement& placement, std::string* error);
   void HideCameraPreview();
 
+  // Where the control strip is now: the display holding its centre, and its
+  // top-left as a fraction of that display's usable area (spec 33.3).
+  //
+  // False when no strip is on screen or its display cannot be named, which the
+  // contract spells as a null reply. Deliberately not a zero position: failing
+  // to read where the strip is is not the user having moved it back, and Dart
+  // keeps whatever it had stored.
+  bool ControlStripPosition(std::string* display_id, double* x, double* y) const;
+
   void UpdateControlStrip(const flutter::EncodableMap& state);
   void UpdateCameraPreview(bool mirrored, bool matches_composited_pip,
                            double aspect_ratio);
@@ -82,7 +103,13 @@ class OverlayWindows {
   // secondary Flutter engine parented into it.
   class OverlayWindow {
    public:
-    OverlayWindow(std::string entrypoint, std::string channel_owner);
+    // `movable` is the control strip and nothing else: it is the only overlay
+    // the user drags (spec 33.3), and the only one that re-clamps itself when
+    // the usable area changes underneath it. The camera preview's frame is the
+    // composited picture-in-picture's and is set by the compositor, so moving
+    // or clamping it would break design `1p`'s promise that they are one
+    // object.
+    OverlayWindow(std::string entrypoint, std::string channel_owner, bool movable);
     ~OverlayWindow();
 
     bool Create(const RECT& frame, CommandHandler on_command,
@@ -90,6 +117,21 @@ class OverlayWindows {
                 std::string* error);
     void Destroy();
     void SetFrame(const RECT& frame);
+    // Records where the strip is now as the spot to re-resolve it to when the
+    // ground moves under it, as a fraction of the usable area (spec 33.3).
+    //
+    // Called only for something the *user* did — a drag ending, or the
+    // placement a show was asked for. Deliberately not from a clamp or a
+    // re-resolve: a usable area that shrinks and grows back again would
+    // otherwise ratchet the strip a little further towards the near edge on
+    // every taskbar change, and the fraction the session persists with it.
+    void RememberPosition();
+    // The same, for the fraction Dart restored: adopted verbatim rather than
+    // re-derived from the pixels it landed on, because resolving a fraction
+    // clamps it into the usable area and storing that back is the same ratchet.
+    void RememberRestoredPosition(double x, double y);
+    // The remembered fraction, or false when nothing has established one.
+    bool RememberedPosition(double* x, double* y) const;
     void Invoke(const std::string& method, const flutter::EncodableValue& arguments);
     HWND window() const { return window_; }
     int64_t texture_id() const { return texture_id_; }
@@ -100,11 +142,28 @@ class OverlayWindows {
                                        LPARAM lparam);
     LRESULT HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
     void ApplyPendingContentSize();
+    // Hands the gesture to the operating system's own window-drag loop and
+    // snaps when it ends (spec 33.3).
+    void BeginMove();
+    // The drag is over, however it ended: snap, clamp, remember.
+    void FinishMove();
+    // The usable area moved under a strip that has no fraction to re-resolve.
+    // Keeps the position, changes only what it is measured against — and never
+    // the remembered fraction, which a clamp does not get to decide.
+    void ClampIntoWorkArea();
+    // The ground moved under a placed strip: a display added, removed or
+    // reshaped, or a taskbar shown, hidden or moved. The remembered fraction is
+    // resolved again, so the strip stays proportionally where the user put it
+    // and comes back to where it was when the usable area does (spec 33.7,
+    // "Resolution or scale factor changes", "Dock or taskbar shown, hidden or
+    // moved").
+    void ReresolveRememberedFraction();
     void HandleCall(const flutter::MethodCall<flutter::EncodableValue>& call,
                     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
     const std::string entrypoint_;
     const std::string channel_owner_;
+    const bool movable_;
     HWND window_ = nullptr;
     std::unique_ptr<flutter::FlutterViewController> controller_;
     std::unique_ptr<flutter::PluginRegistrar> registrar_;
@@ -121,6 +180,34 @@ class OverlayWindows {
     double pending_width_ = 0;
     double pending_height_ = 0;
 
+    // A drag this window started and has not closed out yet. Set before the
+    // move loop is entered and cleared by whichever of WM_EXITSIZEMOVE and the
+    // move loop's return gets there first, so the snap happens exactly once.
+    // Platform thread only, like the pending size above.
+    bool move_pending_ = false;
+
+    // False once this window has been destroyed, in a control block that
+    // outlives the window itself.
+    //
+    // The move loop the drag hands the gesture to is modal: it pumps the
+    // platform thread's message queue, which is exactly how Dart's calls to
+    // this plugin are delivered. hideControlStrip — a fatal capture error, a
+    // stop, a quit — or dispose can therefore run while that loop is on the
+    // stack and free this object underneath it. The drag holds its own copy of
+    // this flag, so the check after the loop reads memory its stack frame owns
+    // rather than a member of a window that is no longer there.
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+
+    // The spot the user left the strip at, as a fraction of the usable area,
+    // kept so a display change can re-resolve it — and re-resolve it again the
+    // next time, from the same number rather than from the last clamp's answer.
+    // Meaningless until something has established one: a window whose usable
+    // area had no extent has no fraction, and re-resolving from a fabricated
+    // 0, 0 would move the strip to the corner.
+    bool has_ratio_ = false;
+    double ratio_x_ = 0;
+    double ratio_y_ = 0;
+
     // Single-slot preview buffer. The engine holds it between the copy callback
     // and the release callback, so the mutex spans exactly that window.
     std::mutex frame_mutex_;
@@ -130,7 +217,18 @@ class OverlayWindows {
     uint32_t frame_height_ = 0;
   };
 
-  RECT ResolveFrame(const OverlayPlacement& placement) const;
+  // `from_remembered_position`, when given, reports whether the frame came from
+  // the placement's remembered fraction on the display it names, rather than
+  // from the anchor on the current one. The caller needs it to seed the strip's
+  // fraction from the number the user established instead of from the pixels
+  // the clamp left it at.
+  RECT ResolveFrame(const OverlayPlacement& placement,
+                    bool* from_remembered_position = nullptr) const;
+
+  // Seeds the strip's remembered fraction from the placement a show resolved.
+  // Call with `mutex_` held, as both callers already do.
+  void RememberStripPlacement(const OverlayPlacement& placement,
+                              bool from_remembered_position);
 
   HWND main_window_ = nullptr;
   bool main_window_hidden_ = false;

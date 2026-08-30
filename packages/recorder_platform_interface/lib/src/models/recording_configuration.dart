@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import 'camera_overlay_configuration.dart';
 import 'capture_source.dart';
+import 'media_device.dart';
 import 'recording_quality.dart';
 import 'video_composition_configuration.dart';
 
@@ -18,6 +19,9 @@ class RecordingConfiguration {
     this.microphoneEnabled = true,
     this.systemAudioEnabled = true,
     this.showCursor = true,
+    this.cameraDeviceId,
+    this.microphoneDeviceId,
+    this.systemAudioDeviceId,
     this.cameraOverlay = const CameraOverlayConfiguration(),
     this.composition = const VideoCompositionConfiguration(),
   });
@@ -44,6 +48,21 @@ class RecordingConfiguration {
   /// The cursor is part of the recording (§4.3).
   final bool showCursor;
 
+  /// Which device each input opens, or null for the platform's own default
+  /// (§33.2).
+  ///
+  /// Null is the shipped behaviour: an unconfigured session records exactly
+  /// what it recorded before devices could be chosen. An id the platform can no
+  /// longer resolve falls back to the default rather than failing the
+  /// preparation — a wrong microphone is a degraded recording, a refused
+  /// `prepare` is none at all.
+  final String? cameraDeviceId;
+  final String? microphoneDeviceId;
+
+  /// Ignored where [MediaDeviceKind.systemAudio] is not in
+  /// `RecorderCapabilities.selectableDeviceKinds`.
+  final String? systemAudioDeviceId;
+
   final CameraOverlayConfiguration cameraOverlay;
   final VideoCompositionConfiguration composition;
 
@@ -57,6 +76,9 @@ class RecordingConfiguration {
     bool? microphoneEnabled,
     bool? systemAudioEnabled,
     bool? showCursor,
+    Object? cameraDeviceId = _unset,
+    Object? microphoneDeviceId = _unset,
+    Object? systemAudioDeviceId = _unset,
     CameraOverlayConfiguration? cameraOverlay,
     VideoCompositionConfiguration? composition,
   }) => RecordingConfiguration(
@@ -69,6 +91,15 @@ class RecordingConfiguration {
     microphoneEnabled: microphoneEnabled ?? this.microphoneEnabled,
     systemAudioEnabled: systemAudioEnabled ?? this.systemAudioEnabled,
     showCursor: showCursor ?? this.showCursor,
+    cameraDeviceId: identical(cameraDeviceId, _unset)
+        ? this.cameraDeviceId
+        : cameraDeviceId as String?,
+    microphoneDeviceId: identical(microphoneDeviceId, _unset)
+        ? this.microphoneDeviceId
+        : microphoneDeviceId as String?,
+    systemAudioDeviceId: identical(systemAudioDeviceId, _unset)
+        ? this.systemAudioDeviceId
+        : systemAudioDeviceId as String?,
     cameraOverlay: cameraOverlay ?? this.cameraOverlay,
     composition: composition ?? this.composition,
   );
@@ -87,7 +118,16 @@ class RecordingConfiguration {
     'microphoneEnabled': microphoneEnabled,
     'systemAudioEnabled': systemAudioEnabled,
     'showCursor': showCursor,
+    // Always present, null included: the configuration map is documented key by
+    // key, and a key that disappears makes the documented example a lie.
+    'cameraDeviceId': cameraDeviceId,
+    'microphoneDeviceId': microphoneDeviceId,
+    'systemAudioDeviceId': systemAudioDeviceId,
     'cameraOverlay': cameraOverlay.toMap(),
     'composition': composition.toMap(),
   };
 }
+
+/// Sentinel for [RecordingConfiguration.copyWith], so a nullable device id can
+/// be cleared back to "the platform default" rather than only overwritten.
+const Object _unset = Object();

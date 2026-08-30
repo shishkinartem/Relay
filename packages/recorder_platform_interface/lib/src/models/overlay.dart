@@ -163,6 +163,86 @@ class CameraPreviewOverlayState {
       );
 }
 
+/// Where the control strip sits, as the user last left it (§33.3).
+///
+/// A **fraction of the display's usable area**, not a point. A point survives
+/// nothing: a resolution change, an undocked monitor or a different machine put
+/// the strip somewhere that no longer exists, and the only recovery is a reset
+/// the user has to discover. A fraction reproduces the same relative spot on
+/// any of them.
+///
+/// [displayId] is the display holding the strip's centre when the drag ended —
+/// deliberately not §5's *current* display, because overriding that placement is
+/// the whole point of being able to drag it.
+@immutable
+class OverlayStripPosition {
+  const OverlayStripPosition({
+    required this.displayId,
+    required this.x,
+    required this.y,
+  });
+
+  final String displayId;
+
+  /// Top-left as a fraction of the usable area, each in `[0, 1]`.
+  final double x;
+  final double y;
+
+  /// Null for anything that cannot name a spot on a display.
+  ///
+  /// A stored position is only useful if it can be resolved; one that cannot is
+  /// dropped so the strip returns to its default anchor rather than to a
+  /// rectangle nobody can point at.
+  static OverlayStripPosition? tryFrom({
+    required String? displayId,
+    required num? x,
+    required num? y,
+  }) {
+    if (displayId == null || displayId.isEmpty || x == null || y == null) {
+      return null;
+    }
+    final double dx = x.toDouble();
+    final double dy = y.toDouble();
+    if (!dx.isFinite || !dy.isFinite) {
+      return null;
+    }
+    return OverlayStripPosition(
+      displayId: displayId,
+      // Clamped rather than rejected: a fraction slightly outside the unit
+      // square is a rounding artefact of a resolution change, not a lost spot.
+      x: dx.clamp(0.0, 1.0),
+      y: dy.clamp(0.0, 1.0),
+    );
+  }
+
+  static OverlayStripPosition? tryFromMap(Map<String, Object?> map) => tryFrom(
+    displayId: map['displayId'] as String?,
+    x: map['x'] as num?,
+    y: map['y'] as num?,
+  );
+
+  Map<String, Object?> toMap() => <String, Object?>{
+    'displayId': displayId,
+    'x': x,
+    'y': y,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is OverlayStripPosition &&
+      other.displayId == displayId &&
+      other.x == x &&
+      other.y == y;
+
+  @override
+  int get hashCode => Object.hash(displayId, x, y);
+
+  @override
+  String toString() =>
+      'OverlayStripPosition($displayId, ${x.toStringAsFixed(3)}, '
+      '${y.toStringAsFixed(3)})';
+}
+
 /// Placement request for an overlay window, in logical display points.
 @immutable
 class OverlayPlacement {
@@ -170,12 +250,27 @@ class OverlayPlacement {
     required this.size,
     required this.anchor,
     this.margin = 8,
+  }) : frame = null,
+       position = null;
+
+  /// The strip where the user put it (§33.3).
+  ///
+  /// The host resolves the fraction against the display's **usable** area and
+  /// clamps the result, which is what keeps the menu bar, the notch and the
+  /// taskbar uncovered however the fraction was arrived at. A [position] whose
+  /// display is gone falls back to [anchor], so the placement always resolves.
+  const OverlayPlacement.fractional({
+    required this.size,
+    required OverlayStripPosition this.position,
+    this.anchor = OverlayAnchor.topCenter,
+    this.margin = 8,
   }) : frame = null;
 
   const OverlayPlacement.absolute(Rect this.frame)
     : size = null,
       anchor = null,
-      margin = 0;
+      margin = 0,
+      position = null;
 
   /// Size for an anchored overlay; null when [frame] is given.
   final Size? size;
@@ -185,11 +280,15 @@ class OverlayPlacement {
   /// Exact frame on the current display; null when anchored.
   final Rect? frame;
 
+  /// The remembered spot, when there is one. Null means "use [anchor]".
+  final OverlayStripPosition? position;
+
   Map<String, Object?> toMap() => <String, Object?>{
     if (size != null) 'width': size!.width,
     if (size != null) 'height': size!.height,
     if (anchor != null) 'anchor': anchor!.name,
     'margin': margin,
+    if (position != null) 'position': position!.toMap(),
     if (frame != null)
       'frame': <String, Object?>{
         'x': frame!.left,

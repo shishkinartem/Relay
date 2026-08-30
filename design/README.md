@@ -87,6 +87,19 @@ product decision, record it in `../TECHNICAL_SPEC.md` and an ADR under
 | `1m` | Settings — destination and storage | §15 |
 | `1n` | Startup recovery | §18 |
 
+## Proposed v0.5 screens live outside this directory, for now
+
+The screens proposed on 2026-08-30 — the fixed source picker, the movable
+control strip with device sheets, the adjustable camera picture-in-picture and
+the wide breakpoint — were drafted as a separate review canvas rather than
+pushed into the Claude Design project, because they are a **proposal**: they
+correspond to `TECHNICAL_SPEC.md` §33 and four ADRs that are all still
+`Proposed`.
+
+Nothing in this directory has changed. On acceptance the screens are added to
+the Claude Design project, this directory is re-pulled, and `preview.html` is
+regenerated — the one-way rule below is unaffected.
+
 ## Design decisions adopted into the spec
 
 Three screens proposed resolutions to open spec decisions. All three were accepted

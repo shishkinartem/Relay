@@ -13,10 +13,40 @@ abstract final class AppSpacing {
   /// `.pad` — the panel's content inset.
   static const double panelPadding = 14.0;
 
-  /// The main window is a fixed-width utility panel (design `00`).
+  /// The reference width every screen is drawn at (design `00`), and the
+  /// narrowest the window may be.
   static const double panelWidth = 420.0;
   static const double panelMaxHeight = 560.0;
   static const double panelMinHeight = 460.0;
+
+  /// The panel has a width *range*, not a width (§33.6).
+  ///
+  /// Past 960 a utility panel is a window pretending to be an application: the
+  /// content is a column of controls in an ocean, and every extra pixel makes
+  /// it worse rather than better.
+  static const double panelMaxWidth = 960.0;
+
+  /// Breakpoints, in logical pixels of available width.
+  ///
+  /// Resolved against the layout's own constraints, never against a device or a
+  /// platform name (§28). Below [wide] every screen is the reference layout,
+  /// exactly as drawn.
+  static const double wide = 560.0;
+  static const double wider = 768.0;
+
+  /// How many columns a grid of source cards takes at [width].
+  ///
+  /// Here rather than in the picker because it is the one place the breakpoints
+  /// turn into a number, and a second grid must not be free to disagree.
+  static int gridColumns(double width) {
+    if (width >= wider) {
+      return 4;
+    }
+    if (width >= wide) {
+      return 3;
+    }
+    return 2;
+  }
 
   /// `.tb` — window header height. Tall enough to host the system window
   /// buttons, which the transparent title bar overlays onto it.

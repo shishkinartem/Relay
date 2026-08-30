@@ -85,15 +85,13 @@ final class CaptureSourceEnumerator {
     }
 
     let ownPID = ProcessInfo.processInfo.processIdentifier
+    // `CapturableWindowRule` is the rule itself, in RecorderCore, under test,
+    // and deliberately the same rule Windows applies in `IsCapturableWindow`.
+    // Everything here is the mapping into it.
     let windows = content.windows.filter { window in
-      guard let app = window.owningApplication else { return false }
-      // Our own overlays and panel are never offered as a capture target.
-      if app.processID == ownPID { return false }
-      if excludedWindowIDs.contains(window.windowID) { return false }
-      guard window.isOnScreen else { return false }
-      guard window.frame.width >= 96, window.frame.height >= 96 else { return false }
-      let title = window.title ?? ""
-      return !title.isEmpty || !app.applicationName.isEmpty
+      CapturableWindowRule.isCapturable(
+        window.capturableAttributes(
+          ownProcessIdentifier: ownPID, excludedWindowIDs: excludedWindowIDs))
     }
     .sorted { lhs, rhs in
       let l = lhs.owningApplication?.applicationName ?? ""
@@ -277,5 +275,31 @@ extension NSError {
   /// `NSError` in the `SCStreamErrorDomain`.
   var isScreenCaptureUserDeclined: Bool {
     domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && code == -3801
+  }
+}
+
+extension SCWindow {
+  /// This window, as the picker's rule sees it (§4.1).
+  ///
+  /// `windowLayer` is the value the rule leans on hardest: a menu-bar status
+  /// item, a notification banner and another application's floating palette are
+  /// all titled, on screen and large enough, and only their level says they are
+  /// not documents.
+  func capturableAttributes(
+    ownProcessIdentifier: pid_t,
+    excludedWindowIDs: Set<CGWindowID>
+  ) -> CapturableWindowAttributes {
+    CapturableWindowAttributes(
+      title: title ?? "",
+      applicationName: owningApplication?.applicationName ?? "",
+      width: frame.width,
+      height: frame.height,
+      layer: windowLayer,
+      isOnScreen: isOnScreen,
+      // A window with no owning application cannot be attributed to this
+      // process, but it is not a capture target either — the rule drops it on
+      // the empty application name.
+      belongsToThisApplication: owningApplication?.processID == ownProcessIdentifier,
+      isExplicitlyExcluded: excludedWindowIDs.contains(windowID))
   }
 }

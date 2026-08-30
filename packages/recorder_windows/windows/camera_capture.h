@@ -48,6 +48,13 @@ class CameraCapture {
   // Idempotent.
   void Stop();
 
+  // The camera to open, or empty for the first source Media Foundation
+  // enumerates — which is exactly what this capture opened before device
+  // selection existed. Set before Start; an id that no longer resolves falls
+  // back to that first source and reports a non-fatal error rather than
+  // failing the recording (spec 33.2).
+  void SetDeviceId(std::string id);
+
   bool running() const { return running_.load(); }
   uint32_t width() const { return width_.load(); }
   uint32_t height() const { return height_.load(); }
@@ -65,6 +72,7 @@ class CameraCapture {
   winrt::com_ptr<ID3D11DeviceContext> context_;
   winrt::com_ptr<IMFSourceReader> reader_;
   VideoCompositor* compositor_ = nullptr;
+  std::string device_id_;
   PreviewHandler on_preview_;
   ErrorHandler on_error_;
 

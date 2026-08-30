@@ -1,6 +1,7 @@
 #include "recorder_types.h"
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 
 namespace relay {
@@ -10,10 +11,63 @@ namespace {
 constexpr UINT kRunWorkMessage = WM_APP + 0x41;
 constexpr wchar_t kDispatcherClassName[] = L"RelayRecorderDispatcherWindow";
 
+// Every member of MediaDeviceKind, in declaration order. The capability lists
+// and the name lookup share it, so a new kind cannot be added to one and
+// forgotten in the other.
+constexpr MediaDeviceKind kAllMediaDeviceKinds[kMediaDeviceKindCount] = {
+    MediaDeviceKind::kCamera,
+    MediaDeviceKind::kMicrophone,
+    MediaDeviceKind::kSystemAudio,
+};
+static_assert(static_cast<size_t>(MediaDeviceKind::kSystemAudio) + 1 ==
+                  kMediaDeviceKindCount,
+              "MeteringSubscriptions indexes its counters by MediaDeviceKind");
+
 uint32_t EvenAtLeast2(double value) {
   const int rounded = static_cast<int>(value + 0.5);
   const int clamped = (std::max)(2, rounded);
   return static_cast<uint32_t>((clamped % 2 == 0) ? clamped : clamped - 1);
+}
+
+LONG RectWidth(const RECT& rect) {
+  return rect.right - rect.left;
+}
+
+LONG RectHeight(const RECT& rect) {
+  return rect.bottom - rect.top;
+}
+
+// `fraction` of `extent`, with the fraction clamped to [0, 1]. Written as a
+// failed `> 0` rather than a `< 0`, so a NaN from a malformed stored position
+// reads as the near edge instead of propagating into a window rectangle.
+LONG ScaleFraction(double fraction, LONG extent) {
+  if (!(fraction > 0) || extent <= 0) {
+    return 0;
+  }
+  const double clamped = fraction > 1 ? 1 : fraction;
+  return static_cast<LONG>(clamped * static_cast<double>(extent) + 0.5);
+}
+
+// The candidate nearest `value` within `snap`, or `value` when none is. Ties go
+// to the earlier candidate, so the answer does not depend on the order two
+// equidistant edges happen to be listed in.
+LONG NearestWithin(LONG value, const LONG* candidates, size_t count, LONG snap) {
+  LONG best = value;
+  LONG best_distance = 0;
+  bool found = false;
+  for (size_t i = 0; i < count; ++i) {
+    const LONG delta = candidates[i] - value;
+    const LONG distance = delta < 0 ? -delta : delta;
+    if (distance > snap) {
+      continue;
+    }
+    if (!found || distance < best_distance) {
+      found = true;
+      best = candidates[i];
+      best_distance = distance;
+    }
+  }
+  return best;
 }
 
 }  // namespace
@@ -85,6 +139,309 @@ PipCorner PipCornerFromName(const std::string& name) {
     return PipCorner::kBottomLeft;
   }
   return PipCorner::kBottomRight;
+}
+
+const char* MediaDeviceKindName(MediaDeviceKind kind) {
+  switch (kind) {
+    case MediaDeviceKind::kCamera:
+      return "camera";
+    case MediaDeviceKind::kSystemAudio:
+      return "systemAudio";
+    case MediaDeviceKind::kMicrophone:
+      break;
+  }
+  return "microphone";
+}
+
+bool MediaDeviceKindFromName(const std::string& name, MediaDeviceKind* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  for (const MediaDeviceKind kind : kAllMediaDeviceKinds) {
+    if (name == MediaDeviceKindName(kind)) {
+      *out = kind;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsSelectableDeviceKind(MediaDeviceKind kind) {
+  // All three, and each for its own reason: the microphone is one capture
+  // endpoint among several, the camera one Media Foundation source among
+  // several, and system audio is a loopback on one render endpoint rather than
+  // a single system mix. Written out rather than returning true, so a fourth
+  // kind is unselectable until someone decides otherwise.
+  switch (kind) {
+    case MediaDeviceKind::kCamera:
+    case MediaDeviceKind::kMicrophone:
+    case MediaDeviceKind::kSystemAudio:
+      return true;
+  }
+  return false;
+}
+
+bool IsMeterableDeviceKind(MediaDeviceKind kind) {
+  // Only the microphone, on either platform: a camera has no level, and what
+  // the machine is playing is not something the user can act on from inside
+  // this application.
+  return kind == MediaDeviceKind::kMicrophone;
+}
+
+std::vector<std::string> SelectableDeviceKindNames() {
+  std::vector<std::string> names;
+  for (const MediaDeviceKind kind : kAllMediaDeviceKinds) {
+    if (IsSelectableDeviceKind(kind)) {
+      names.emplace_back(MediaDeviceKindName(kind));
+    }
+  }
+  return names;
+}
+
+std::vector<std::string> MeterableDeviceKindNames() {
+  std::vector<std::string> names;
+  for (const MediaDeviceKind kind : kAllMediaDeviceKinds) {
+    if (IsMeterableDeviceKind(kind)) {
+      names.emplace_back(MediaDeviceKindName(kind));
+    }
+  }
+  return names;
+}
+
+void OrderDevicesDefaultFirst(std::vector<MediaDeviceInfo>* devices) {
+  if (devices == nullptr || devices->empty()) {
+    return;
+  }
+  const auto first_default = std::find_if(
+      devices->begin(), devices->end(),
+      [](const MediaDeviceInfo& device) { return device.is_system_default; });
+  if (first_default == devices->end() || first_default == devices->begin()) {
+    return;
+  }
+  std::rotate(devices->begin(), first_default, first_default + 1);
+}
+
+void RetainSelectableCameras(std::vector<MediaDeviceInfo>* devices,
+                             std::vector<size_t>* source_indices) {
+  if (source_indices != nullptr) {
+    source_indices->clear();
+  }
+  if (devices == nullptr) {
+    return;
+  }
+  std::vector<MediaDeviceInfo> selectable;
+  selectable.reserve(devices->size());
+  for (size_t i = 0; i < devices->size(); ++i) {
+    MediaDeviceInfo& device = (*devices)[i];
+    if (device.id.empty()) {
+      // Without an id a source can be neither selected nor persisted, so it is
+      // not one the caller can be offered — and not one a capture may open
+      // behind the list's back either.
+      continue;
+    }
+    device.is_system_default = selectable.empty();
+    if (source_indices != nullptr) {
+      source_indices->push_back(i);
+    }
+    selectable.push_back(std::move(device));
+  }
+  *devices = std::move(selectable);
+}
+
+size_t SelectDeviceIndex(const std::vector<MediaDeviceInfo>& devices,
+                         const std::string& requested_id) {
+  if (devices.empty()) {
+    return kNoDeviceIndex;
+  }
+  if (!requested_id.empty()) {
+    for (size_t i = 0; i < devices.size(); ++i) {
+      if (devices[i].id == requested_id) {
+        return i;
+      }
+    }
+  }
+  for (size_t i = 0; i < devices.size(); ++i) {
+    if (devices[i].is_system_default) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+double ClampUnitLevel(double value) {
+  // Written as a failed `> 0` rather than a `< 0`, so a NaN from a broken
+  // device reads as silence instead of propagating into the bar.
+  if (!(value > 0)) {
+    return 0;
+  }
+  return value > 1 ? 1 : value;
+}
+
+void LevelAccumulator::SetEnabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (enabled_ == enabled) {
+    return;
+  }
+  enabled_ = enabled;
+  peak_ = 0;
+  square_sum_ = 0;
+  samples_ = 0;
+}
+
+bool LevelAccumulator::enabled() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return enabled_;
+}
+
+void LevelAccumulator::SetLive(bool live) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (live_ == live) {
+    return;
+  }
+  live_ = live;
+  peak_ = 0;
+  square_sum_ = 0;
+  samples_ = 0;
+}
+
+bool LevelAccumulator::live() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return live_;
+}
+
+void LevelAccumulator::Add(const float* samples, size_t count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!enabled_ || count == 0) {
+    return;
+  }
+  if (samples == nullptr) {
+    samples_ += count;
+    return;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    const double value = static_cast<double>(samples[i]);
+    const double magnitude = value < 0 ? -value : value;
+    if (magnitude > peak_) {
+      peak_ = magnitude;
+    }
+    square_sum_ += value * value;
+  }
+  samples_ += count;
+}
+
+InputLevelSample LevelAccumulator::Take() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  InputLevelSample sample;
+  if (samples_ > 0) {
+    sample.peak = ClampUnitLevel(peak_);
+    sample.rms =
+        ClampUnitLevel(std::sqrt(square_sum_ / static_cast<double>(samples_)));
+  }
+  peak_ = 0;
+  square_sum_ = 0;
+  samples_ = 0;
+  return sample;
+}
+
+bool MeteringSubscriptions::Retain(MediaDeviceKind kind) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return ++counts_[static_cast<size_t>(kind)] == 1;
+}
+
+bool MeteringSubscriptions::Release(MediaDeviceKind kind) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  int& count = counts_[static_cast<size_t>(kind)];
+  if (count == 0) {
+    return false;
+  }
+  return --count == 0;
+}
+
+bool MeteringSubscriptions::IsActive(MediaDeviceKind kind) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return counts_[static_cast<size_t>(kind)] > 0;
+}
+
+bool MeteringSubscriptions::AnyActive() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const int count : counts_) {
+    if (count > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MeteringSubscriptions::Clear() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool any = false;
+  for (int& count : counts_) {
+    any = any || count > 0;
+    count = 0;
+  }
+  return any;
+}
+
+bool MeterTarget::Point(const std::string& device_id) {
+  if (device_id == device_id_) {
+    // Already pointed here: a second meter on the same microphone shares the
+    // tap the first one opened, and one still waiting to open goes on waiting.
+    return false;
+  }
+  device_id_ = device_id;
+  // A tap open on the device this call pointed away from has to go; one that
+  // had not opened yet simply opens on the new device instead.
+  open_ = false;
+  return true;
+}
+
+void MeterTarget::Reopen() {
+  open_ = false;
+}
+
+RetryBackoff::RetryBackoff(std::chrono::milliseconds first,
+                           std::chrono::milliseconds ceiling)
+    : first_(first), ceiling_(ceiling), current_(first) {}
+
+std::chrono::milliseconds RetryBackoff::Next() {
+  const std::chrono::milliseconds delay = current_;
+  current_ = (std::min)(current_ * 2, ceiling_);
+  return delay;
+}
+
+void RetryBackoff::Reset() {
+  current_ = first_;
+}
+
+ChangeCoalescer::ChangeCoalescer(int64_t window_ms, int64_t ceiling_ms)
+    : window_ms_(window_ms), ceiling_ms_(ceiling_ms) {}
+
+void ChangeCoalescer::Note(int64_t now_ms) {
+  if (!pending_) {
+    pending_ = true;
+    first_ms_ = now_ms;
+  }
+  last_ms_ = now_ms;
+}
+
+int64_t ChangeCoalescer::WaitMs(int64_t now_ms) const {
+  if (!pending_) {
+    return 0;
+  }
+  // The quiet window, or whatever is left of the ceiling — whichever expires
+  // first, so a device that never settles still reports.
+  const int64_t quiet = window_ms_ - (now_ms - last_ms_);
+  const int64_t capped = ceiling_ms_ - (now_ms - first_ms_);
+  const int64_t remaining = (std::min)(quiet, capped);
+  return remaining > 0 ? remaining : 0;
+}
+
+bool ChangeCoalescer::Take(int64_t now_ms) {
+  if (!pending_ || WaitMs(now_ms) > 0) {
+    return false;
+  }
+  pending_ = false;
+  return true;
 }
 
 std::wstring RecordingConfig::PartPath() const {
@@ -166,6 +523,100 @@ void ResolveCanvasSize(const CompositionConfig& composition, uint32_t source_wid
   const double applied = (std::min)(scale, 1.0);
   *out_width = EvenAtLeast2(source_width * applied);
   *out_height = EvenAtLeast2(source_height * applied);
+}
+
+LONG StripSnapPixels(double scale) {
+  // A failed `> 0` again: a monitor that reports no usable scale, or a NaN,
+  // snaps at the unscaled distance rather than not at all.
+  const double factor = scale > 0 ? scale : 1.0;
+  return static_cast<LONG>(kStripSnapPoints * factor + 0.5);
+}
+
+bool IsUsableWorkArea(const RECT& work_area) {
+  return RectWidth(work_area) > 0 && RectHeight(work_area) > 0;
+}
+
+bool ShouldBeginStripMove(bool movable, bool move_in_flight, bool button_down) {
+  // Three separate refusals, and each of them is a drag that must not start:
+  // the camera preview is not draggable at all (spec 33.5), a second request
+  // inside the loop the first one started would nest two move loops behind one
+  // finger, and a request whose button is already up would start a drag nobody
+  // is holding.
+  return movable && !move_in_flight && button_down;
+}
+
+RECT ClampToWorkArea(const RECT& work_area, const RECT& frame) {
+  const LONG width = (std::max)(0L, RectWidth(frame));
+  const LONG height = (std::max)(0L, RectHeight(frame));
+  RECT clamped{};
+  // The far edge first and the near edge second, so that for a strip larger
+  // than the usable area — a 360-point strip on a 200-point-wide work area, or
+  // a work area of no width at all — the near edge is the bound that survives.
+  clamped.left = (std::max)((std::min)(frame.left, work_area.right - width),
+                            work_area.left);
+  clamped.top =
+      (std::max)((std::min)(frame.top, work_area.bottom - height), work_area.top);
+  clamped.right = clamped.left + width;
+  clamped.bottom = clamped.top + height;
+  return clamped;
+}
+
+RECT FractionalStripFrame(const RECT& work_area, double x, double y, LONG width,
+                          LONG height) {
+  RECT frame{};
+  frame.left = work_area.left + ScaleFraction(x, RectWidth(work_area));
+  frame.top = work_area.top + ScaleFraction(y, RectHeight(work_area));
+  frame.right = frame.left + (std::max)(0L, width);
+  frame.bottom = frame.top + (std::max)(0L, height);
+  return ClampToWorkArea(work_area, frame);
+}
+
+bool StripPositionRatio(const RECT& work_area, const RECT& frame, double* out_x,
+                        double* out_y) {
+  if (out_x == nullptr || out_y == nullptr) {
+    return false;
+  }
+  const LONG work_width = RectWidth(work_area);
+  const LONG work_height = RectHeight(work_area);
+  if (work_width <= 0 || work_height <= 0) {
+    return false;
+  }
+  const double x =
+      static_cast<double>(frame.left - work_area.left) / static_cast<double>(work_width);
+  const double y =
+      static_cast<double>(frame.top - work_area.top) / static_cast<double>(work_height);
+  // Clamped because the caller may ask about a frame that has not been clamped
+  // yet — a window Windows moved when a display was unplugged, say — and a
+  // fraction outside the unit square is not one Dart will store.
+  *out_x = x < 0 ? 0 : (x > 1 ? 1 : x);
+  *out_y = y < 0 ? 0 : (y > 1 ? 1 : y);
+  return true;
+}
+
+RECT SnapStripFrame(const RECT& work_area, const RECT& frame, LONG snap) {
+  const LONG width = (std::max)(0L, RectWidth(frame));
+  const LONG height = (std::max)(0L, RectHeight(frame));
+  RECT snapped = frame;
+  if (snap > 0) {
+    // Left edge, right edge, horizontal centre. Measuring the distance between
+    // the two left edges is the same measurement as between the two centres,
+    // because the width is the strip's either way.
+    const LONG lefts[] = {
+        work_area.left,
+        work_area.right - width,
+        work_area.left + (RectWidth(work_area) - width) / 2,
+    };
+    // Top and bottom only: 33.3 snaps to an edge or to the *horizontal* centre.
+    const LONG tops[] = {work_area.top, work_area.bottom - height};
+    snapped.left = NearestWithin(frame.left, lefts, sizeof(lefts) / sizeof(lefts[0]), snap);
+    snapped.top = NearestWithin(frame.top, tops, sizeof(tops) / sizeof(tops[0]), snap);
+  }
+  snapped.right = snapped.left + width;
+  snapped.bottom = snapped.top + height;
+  // After the snap, never before it: on a usable area narrower than the strip
+  // the right-edge candidate sits left of the work area, and the clamp is what
+  // puts it back.
+  return ClampToWorkArea(work_area, snapped);
 }
 
 std::wstring Widen(const std::string& utf8) {

@@ -130,6 +130,24 @@ public struct RecordingConfiguration {
   public let microphoneEnabled: Bool
   public let systemAudioEnabled: Bool
   public let showCursor: Bool
+
+  /// The device each input opens, or nil for this platform's own default
+  /// (§33.2).
+  ///
+  /// Null is today's behaviour exactly: a `prepare` carrying no ids opens the
+  /// same camera and the same microphone it opened before a device could be
+  /// chosen. An id that no longer resolves falls back to the default and
+  /// reports a non-fatal error — a wrong microphone is a degraded recording,
+  /// where a refused `prepare` is no recording at all
+  /// (`docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md`).
+  public let cameraDeviceId: String?
+  public let microphoneDeviceId: String?
+
+  /// Decoded and unused on macOS, where system audio is the mix ScreenCaptureKit
+  /// delivers and there is no endpoint to choose (§33.8). It is decoded anyway
+  /// so the configuration map is one shape on both platforms.
+  public let systemAudioDeviceId: String?
+
   public let cameraOverlay: CameraOverlayConfiguration
   public let aspectRatioPolicy: String
 
@@ -153,11 +171,25 @@ public struct RecordingConfiguration {
     self.microphoneEnabled = map["microphoneEnabled"] as? Bool ?? true
     self.systemAudioEnabled = map["systemAudioEnabled"] as? Bool ?? true
     self.showCursor = map["showCursor"] as? Bool ?? true
+    self.cameraDeviceId = RecordingConfiguration.deviceId(map["cameraDeviceId"])
+    self.microphoneDeviceId = RecordingConfiguration.deviceId(map["microphoneDeviceId"])
+    self.systemAudioDeviceId = RecordingConfiguration.deviceId(map["systemAudioDeviceId"])
     self.cameraOverlay = CameraOverlayConfiguration(
       map: map["cameraOverlay"] as? [String: Any] ?? [:])
     self.aspectRatioPolicy =
       (map["composition"] as? [String: Any])?["aspectRatioPolicy"] as? String
       ?? "containWithinPreset"
+  }
+
+  /// An empty id is not an id.
+  ///
+  /// Dart sends null or a real id, and the standard codec's null arrives here
+  /// as a failed cast. An empty string would arrive as a String, match no
+  /// device, and be reported to the user as a device that went missing — a
+  /// fallback they never asked for.
+  private static func deviceId(_ value: Any?) -> String? {
+    guard let id = value as? String, !id.isEmpty else { return nil }
+    return id
   }
 
   /// The encoded canvas, matching `VideoCompositionConfiguration` in Dart.

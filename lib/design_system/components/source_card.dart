@@ -76,7 +76,14 @@ class _SourceCardState extends State<SourceCard> {
               children: <Widget>[
                 SizedBox(
                   height: widget.thumbnailHeight,
-                  child: DuotoneFilter(
+                  // Deliberately *not* wrapped in `DuotoneFilter`. The design
+                  // system washes photography in the accent, but these are not
+                  // photographs: they are how a user tells one of fifteen
+                  // windows from another. A blue-washed screenshot of a code
+                  // editor and a blue-washed screenshot of a browser look like
+                  // the same object. The clip stays — `BoxFit.cover` paints
+                  // outside the box without it.
+                  child: ClipRect(
                     child: (widget.thumbnail?.isEmpty ?? true)
                         ? HatchedSurface(stripe: wide ? 7 : 6)
                         : Image.memory(
