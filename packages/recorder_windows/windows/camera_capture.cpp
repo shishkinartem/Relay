@@ -76,9 +76,16 @@ bool CameraCapture::Start(ID3D11Device* device, VideoCompositor* compositor,
   // camera toggled back on after a failure would take the process down.
   if (thread_.joinable()) {
     thread_.join();
-    textures_.clear();
-    next_texture_ = 0;
   }
+  // A self-exit also leaves the device, its immediate context and the texture
+  // pool held. Only Stop() releases them, and a camera toggled off after a
+  // failure never reaches it: SetCameraEnabled(false) skips Stop() because
+  // running() is already false. So release before re-acquiring — com_ptr::put()
+  // asserts that it is writing into a null pointer, and a release build, where
+  // that assert compiles out, would instead overwrite the raw pointer and leak
+  // one reference on the immediate context — and through it the device and its
+  // textures — on every retry.
+  ReleaseResources();
   device_.copy_from(device);
   device_->GetImmediateContext(context_.put());
   compositor_ = compositor;
@@ -99,7 +106,18 @@ void CameraCapture::Stop() {
   if (thread_.joinable()) {
     thread_.join();
   }
+  ReleaseResources();
+}
+
+// Drops everything one run acquired, so the next Start() begins from the same
+// state a fresh object would. The capture thread must already be joined.
+void CameraCapture::ReleaseResources() {
   textures_.clear();
+  next_texture_ = 0;
+  // Already null whenever the capture thread ran to its end: it releases the
+  // reader on its own thread, before MFShutdown. Cleared here too so no path
+  // out of the thread can leave the camera device open.
+  reader_ = nullptr;
   context_ = nullptr;
   device_ = nullptr;
   compositor_ = nullptr;

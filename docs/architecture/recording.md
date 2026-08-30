@@ -126,6 +126,25 @@ Operations such as these must be idempotent or explicitly guarded:
 
 Double-clicks, retries, cancellation races, or repeated callbacks must not corrupt the output or create contradictory states.
 
+Idempotence alone is not enough for the teardown pair. `abort` and `dispose` must
+also **never overtake an in-flight `stop`**, and that is a separate property from
+being safe to call twice. Both arrive while a stop is still writing the file out
+— closing the window during finalization is an ordinary user action, and
+`RecorderViewModel.dispose` fires without awaiting the outstanding stop — and a
+teardown that reaches the writer first strands a finished recording as a `.part`
+needing §18 recovery.
+
+The two platforms hold the line differently, and both are deliberate:
+
+- **macOS refuses.** `RecordingSession.abort()` claims `.stopping` only from
+  states a stop has not already claimed, and `release()` returns outright on
+  `.stopping`/`.finalizing` rather than tearing down under one.
+- **Windows waits.** `RecordingSession::teardown_mutex_` spans the `MediaWriter`
+  call as well as the thread joins, so an abort blocks until the finalize is
+  done and then lands as a no-op on a file already renamed. The plugin runs
+  `abort` and `dispose` on its serial worker so that wait is off the platform
+  thread — and, because the worker is FIFO, so that the ordering holds at all.
+
 ## TBDs inherited from product spec
 
 Do not silently resolve:

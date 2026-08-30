@@ -139,10 +139,23 @@ on the default 16:9.
 NOT RUN: Windows native build (packages/recorder_windows/windows/CMakeLists.txt)
 Reason: no MSVC toolchain, no Windows SDK and no cmake on the development host (macOS).
 
-NOT RUN: Windows native unit tests (packages/recorder_windows/windows/test)
-Reason: same. The suite is written and its assertions were checked line by line
-against recorder_types.cpp, but a test that was not run is not a test that
-passed.
+RED IN CI: Windows native unit tests (packages/recorder_windows/windows/test)
+Reason: not the development host's gap. CI's `native-windows` job configures and
+builds this suite successfully under MSVC on windows-2022 — so it is compiled,
+just not here — and then `ctest` fails. It has failed on all five CI runs to
+date, including HEAD `fe023e7`. The job is not `continue-on-error` and the
+workflow is not path-filtered: the red was visible all along and was read as the
+known "Windows is written but not built" gap rather than as a real failure.
+
+One cause is identified and fixed: `SessionClock.PausedIntervalsAreSubtracted`
+asserted 5 s where `capture - start - paused_total` gives 6 s (10 s of wall time,
+4 s of it paused). The expectation was wrong, not the clock — §9 and every
+sibling case in the suite subtract the pause, as does the macOS SessionClock.
+Reproduced on macOS 2026-08-30 by extracting `SessionClock` verbatim from
+recorder_types.{h,cpp} into a standalone TU; the other eleven SessionClock cases
+pass before and after. Whether it was the *only* failure is unknown from here,
+and the suite has since grown the strip-geometry and device cases, which have
+never been compiled at all. The next CI run is the verdict.
 
 NOT RUN: fragmented MP4 output on Windows
 Reason: same. docs/adr/2026-08-23-fragmented-mp4-on-both-platforms.md changes
@@ -155,8 +168,16 @@ been through a compiler on this host, so the endpoint enumeration, the camera
 enumeration through Media Foundation, the default-first ordering, the
 reference-counted meter, the IMMNotificationClient watcher and every divergence
 listed under *Where the two halves actually diverge* are read off the source and
-not measured. The 68 cases in windows/test/recorder_types_test.cpp cover the pure
-half only, and they have not been compiled either.
+not measured. The 104 cases in windows/test/recorder_types_test.cpp cover the pure
+half only, and they have not been compiled here.
+
+NOT RUN: Windows stop/abort teardown ordering
+Reason: same. `RecordingSession::teardown_mutex_` now spans the MediaWriter call as well
+as the thread joins, and the plugin's `abort` and `dispose` queue their teardown on the
+serial worker, so an abort can no longer overtake an in-flight `Finalize()` and strand a
+finished recording as a `.part` (spec 18). Verified by reading only — the race needs a
+Windows host to reproduce: start a long recording, press Stop, then close the window
+while it is finalizing, and confirm `recording-<id>.mp4` exists and no `.part` is left.
 
 NOT RUN: Windows integration tests
 Reason: same.

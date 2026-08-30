@@ -5,6 +5,7 @@
 #include <winrt/base.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -122,6 +123,7 @@ class RecordingSession {
   void DrainAudio(bool flush);
   void StopInputs();
   void HoldSystemAwake(bool hold);
+  void SystemAwakeLoop();
   void EmitInputs();
   SessionStats CollectStats() const;
 
@@ -129,8 +131,12 @@ class RecordingSession {
   RecordingConfig config_;
 
   mutable std::mutex mutex_;
-  // Serializes the stop/abort teardown sequence: both can arrive from different
-  // threads, and joining one std::thread twice is undefined.
+  // Serializes the whole stop/abort teardown sequence — the thread joins *and*
+  // the MediaWriter call that follows them. Both can arrive from different
+  // threads: joining one std::thread twice is undefined, and an abort that
+  // reached `writer_.Abort()` while a stop was inside `writer_.Finalize()`
+  // would close the sink writer under a finish that has not renamed
+  // `recording-<id>.part` yet, stranding the recording (spec 18).
   std::mutex teardown_mutex_;
   SessionState state_ = SessionState::kIdle;
   RecordingResult result_;
@@ -167,6 +173,19 @@ class RecordingSession {
   std::thread timer_thread_;
   std::atomic<bool> encoding_{false};
   std::atomic<bool> timers_{false};
+
+  // The idle-sleep hold, on a thread of its own because the state it sets is
+  // per-thread and the callers are not one thread (HoldSystemAwake).
+  // `awake_held_` is what the session wants and `awake_taken_` is what that
+  // thread has done about it; `awake_thread_` is joinable exactly while
+  // `awake_held_` is true. All three are read and written only under
+  // `awake_mutex_`.
+  std::mutex awake_mutex_;
+  std::condition_variable awake_cv_;
+  std::thread awake_thread_;
+  bool awake_held_ = false;
+  bool awake_taken_ = false;
+
   std::atomic<bool> aborted_{false};
   std::atomic<bool> fatal_error_{false};
   std::atomic<uint64_t> composition_failures_{0};

@@ -67,6 +67,7 @@ class CameraCapture {
   void PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t height,
                     int32_t stride);
   void ReportFailure(const std::string& message, HRESULT hr);
+  void ReleaseResources();
 
   winrt::com_ptr<ID3D11Device> device_;
   winrt::com_ptr<ID3D11DeviceContext> context_;

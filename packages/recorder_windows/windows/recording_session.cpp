@@ -46,6 +46,10 @@ RecordingSession::RecordingSession(SessionEvents events) : events_(std::move(eve
 
 RecordingSession::~RecordingSession() {
   Abort();
+  // Abort() releases the hold, but it returns early when it has already run
+  // once, and a Start() that raced it could have taken one after that. A
+  // std::thread still joinable here terminates the process.
+  HoldSystemAwake(false);
 }
 
 void RecordingSession::SetExcludedWindows(std::vector<HWND> windows) {
@@ -547,11 +551,59 @@ SessionStats RecordingSession::CollectStats() const {
 // back. macOS makes the same choice for the same reason.
 //
 // The state is per *thread*, not per process, and it is dropped when that
-// thread exits. Start, Stop and Abort all arrive on the platform thread that
-// serves the method channel, so the hold and its release are on the same one.
+// thread exits — so the hold gets a thread of its own, which does nothing but
+// take it, wait, and drop it.
+//
+// The callers are not one thread and cannot be made into one: `start` runs
+// `Start()` inline on the Flutter platform thread, while `stop` and the
+// teardown behind `prepare`/`releaseSession` post `Stop()`/`Abort()` to the
+// plugin's serial worker (recorder_windows_plugin.cpp). Setting the state on
+// whichever thread happens to call would clear a hold the worker never had and
+// leave the platform thread — which lives as long as the app — holding
+// ES_SYSTEM_REQUIRED for the rest of the session, silently overriding the
+// user's power policy long after the recording ended.
+//
+// Idempotent in both directions: every session exit runs through Stop or
+// Abort, and a hold that was never taken must not be released.
 void RecordingSession::HoldSystemAwake(bool hold) {
-  ::SetThreadExecutionState(hold ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
-                                 : ES_CONTINUOUS);
+  std::unique_lock<std::mutex> lock(awake_mutex_);
+  if (hold == awake_held_) {
+    return;
+  }
+  if (hold) {
+    awake_held_ = true;
+    awake_taken_ = false;
+    awake_thread_ = std::thread(&RecordingSession::SystemAwakeLoop, this);
+    // Returns with the hold in effect rather than merely requested, so that
+    // Start() cannot report a running recording the machine is still free to
+    // suspend. The release is synchronous for the same reason: it joins.
+    awake_cv_.wait(lock, [this] { return awake_taken_; });
+    return;
+  }
+  awake_held_ = false;
+  awake_cv_.notify_all();
+  // Moved out under the lock and joined outside it: the hold thread needs the
+  // same mutex to observe the release, and a second releaser must find nothing
+  // left to join rather than join it twice.
+  std::thread released = std::move(awake_thread_);
+  lock.unlock();
+  if (released.joinable()) {
+    released.join();
+  }
+}
+
+void RecordingSession::SystemAwakeLoop() {
+  ::SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+  {
+    std::unique_lock<std::mutex> lock(awake_mutex_);
+    awake_taken_ = true;
+    awake_cv_.notify_all();
+    awake_cv_.wait(lock, [this] { return !awake_held_; });
+  }
+  // Windows would drop the state when this thread exits in a moment anyway;
+  // clearing it explicitly is what makes the release observable to a caller
+  // that joins.
+  ::SetThreadExecutionState(ES_CONTINUOUS);
 }
 
 void RecordingSession::StopInputs() {
@@ -592,20 +644,24 @@ bool RecordingSession::Stop(RecordingResult* result, RecorderError* error) {
     events_.on_state(SessionState::kStopping);
   }
 
-  {
-    std::lock_guard<std::mutex> teardown(teardown_mutex_);
-    clock_.Stop(Now100ns());
-    StopInputs();
-    encoding_.store(false);
-    if (encode_thread_.joinable()) {
-      encode_thread_.join();
-    }
-    timers_.store(false);
-    if (timer_thread_.joinable()) {
-      timer_thread_.join();
-    }
-    video_queue_.Close();
+  // Held to the end of the call, not just around the joins. `Abort()` takes the
+  // same lock, and it is `writer_.Abort()` — not the joins — that this has to
+  // exclude: it closes the sink writer and shuts Media Foundation down, so an
+  // abort that overtook the `Finalize()` below would leave a finished recording
+  // stranded as `recording-<id>.part` (spec 18). Nothing under this lock blocks
+  // on the platform thread: the state callbacks only post to it.
+  std::lock_guard<std::mutex> teardown(teardown_mutex_);
+  clock_.Stop(Now100ns());
+  StopInputs();
+  encoding_.store(false);
+  if (encode_thread_.joinable()) {
+    encode_thread_.join();
   }
+  timers_.store(false);
+  if (timer_thread_.joinable()) {
+    timer_thread_.join();
+  }
+  video_queue_.Close();
 
   SetState(SessionState::kFinalizing);
   if (!writer_.Finalize(error)) {
@@ -642,23 +698,28 @@ void RecordingSession::Abort() {
   if (aborted_.exchange(true)) {
     return;  // idempotent
   }
-  {
-    std::lock_guard<std::mutex> teardown(teardown_mutex_);
-    clock_.Stop(Now100ns());
-    StopInputs();
-    encoding_.store(false);
-    if (encode_thread_.joinable()) {
-      encode_thread_.join();
-    }
-    timers_.store(false);
-    if (timer_thread_.joinable()) {
-      timer_thread_.join();
-    }
-    video_queue_.Close();
-    video_queue_.Clear();
+  // The other half of Stop()'s lock, and the reason that one reaches past the
+  // joins: an abort arriving mid-stop — the window closing while a long
+  // recording is still being written out — waits for the finalize here instead
+  // of racing it to `MediaWriter::mutex_`. Whoever calls this is blocked for
+  // the duration, which is why the plugin runs it on the serial worker rather
+  // than on the platform thread.
+  std::lock_guard<std::mutex> teardown(teardown_mutex_);
+  clock_.Stop(Now100ns());
+  StopInputs();
+  encoding_.store(false);
+  if (encode_thread_.joinable()) {
+    encode_thread_.join();
   }
+  timers_.store(false);
+  if (timer_thread_.joinable()) {
+    timer_thread_.join();
+  }
+  video_queue_.Close();
+  video_queue_.Clear();
   // No Finalize and no delete: the `.part` artefact stays on disk for startup
-  // recovery (spec 18).
+  // recovery (spec 18). After a stop that already finalized, `writer_` is
+  // closed and the file renamed, so this lands as a no-op rather than an undo.
   writer_.Abort();
   compositor_.Shutdown();
   HoldSystemAwake(false);

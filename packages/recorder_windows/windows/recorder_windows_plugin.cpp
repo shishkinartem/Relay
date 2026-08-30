@@ -994,10 +994,24 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
     return;
   }
   if (method == "abort") {
-    if (session_) {
-      session_->Abort();
+    if (!session_) {
+      shared->Success();
+      return;
     }
-    shared->Success();
+    // On the worker, and not only because `Abort()` joins the capture, encode
+    // and timer threads while the platform thread is the one drawing the UI.
+    // The worker is serial, so posting the abort is what *orders* it: an abort
+    // raised while a `stop` is still finalizing runs after that stop rather
+    // than closing the writer out from under it and stranding the finished
+    // recording as a `.part` (spec 18). The session is kept — dropping it is
+    // `releaseSession`.
+    const std::shared_ptr<RecordingSession> session = session_;
+    if (!worker_.Post([this, shared, session]() {
+          session->Abort();
+          ReplySuccess(shared, flutter::EncodableValue());
+        })) {
+      busy();
+    }
     return;
   }
   if (method == "setMicrophoneEnabled" || method == "setCameraEnabled" ||
@@ -1035,11 +1049,12 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
       shared->Success();
       return;
     }
-    // A live or still-finalizing session is never released from under the
-    // worker that owns its teardown: `Stop()` holds `teardown_mutex_` for its
-    // own thread joins, and `writer_.Abort()` outside that mutex can win
-    // `MediaWriter::mutex_` ahead of `Finalize()` and strand a finished
-    // recording as a `.part`.
+    // A live or still-finalizing session is not a recording the user has moved
+    // on from, so this is refused rather than honoured: releasing one would
+    // abort a capture that is still running — or one whose file is still being
+    // written out — and orphan its `.part`. Ordering is no longer the reason;
+    // `RecordingSession::teardown_mutex_` now covers the writer call too, so
+    // an abort cannot overtake a finalize whichever thread raises it.
     if (IsSessionLive(session_->state())) {
       reject(RecorderErrorCode::kInvalidState,
              "A recording is still in progress.");
@@ -1059,15 +1074,40 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
   }
   if (method == "dispose") {
     disposed_ = true;
-    // Nothing may keep a device open, or keep emitting, past dispose.
+    // Nothing may keep a device open, or keep emitting, past dispose. Both are
+    // platform-thread objects and both are closed here rather than queued:
+    // the metering tap holds a real microphone, and the watcher would keep
+    // posting `devicesChanged` at a Dart side that is going away.
     meter_.StopAll();
     device_watcher_.Stop();
-    if (session_) {
-      session_->Abort();
-      session_.reset();
-    }
+    const std::shared_ptr<RecordingSession> session = std::move(session_);
+    // The overlays are platform-thread objects (HWNDs), so they come down here
+    // rather than on the worker — and immediately, so the control strip does
+    // not float over the desktop for the length of a finalize the closing
+    // window is still waiting on. Nothing the queued teardown does needs them:
+    // `Abort()` never reads the exclusion set, and a camera-preview frame that
+    // beats it out of the pipeline finds `camera_preview_` already null under
+    // `OverlayWindows`' own lock.
     overlays_.DisposeAll();
-    shared->Success();
+    if (!session) {
+      shared->Success();
+      return;
+    }
+    // Same worker, same reason as `abort`, and this is the path that actually
+    // bites: `RecorderViewModel.dispose` fires this without awaiting an
+    // outstanding stop, so closing the window during finalization is an
+    // ordinary user action rather than a race they have to provoke.
+    if (!worker_.Post([this, shared, session]() {
+          session->Abort();
+          ReplySuccess(shared, flutter::EncodableValue());
+        })) {
+      // A full queue answers every other call with an error, but dispose is
+      // the platform going away and cannot be refused. Tearing down here still
+      // waits for an in-flight finalize — `teardown_mutex_` holds that line —
+      // at the cost of blocking this thread until it is done.
+      session->Abort();
+      shared->Success();
+    }
     return;
   }
 
