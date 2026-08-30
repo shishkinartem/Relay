@@ -138,6 +138,14 @@ on the default 16:9.
 ```text
 NOT RUN: Windows native build (packages/recorder_windows/windows/CMakeLists.txt)
 Reason: no MSVC toolchain, no Windows SDK and no cmake on the development host (macOS).
+That is no longer the whole reason. `.github/workflows/ci.yml` already carries the two
+jobs that would compile all of this on a real Windows host — `native-windows` runs the
+cmake/ctest suite and `build-windows` runs `flutter build windows`, both on
+`windows-2022`. Neither has ever seen this work: checked 2026-08-30, the branch carrying
+it has never been pushed and the commit is not on `main`, so no CI run exists for it.
+The compile half is therefore a push away rather than a hardware problem. The DPI
+question under *The movable control strip* is the part that genuinely still needs a
+physical two-monitor machine, which CI's single virtual display cannot provide.
 
 NOT RUN: Windows native unit tests (packages/recorder_windows/windows/test)
 Reason: same. The suite is written and its assertions were checked line by line
@@ -155,7 +163,7 @@ been through a compiler on this host, so the endpoint enumeration, the camera
 enumeration through Media Foundation, the default-first ordering, the
 reference-counted meter, the IMMNotificationClient watcher and every divergence
 listed under *Where the two halves actually diverge* are read off the source and
-not measured. The 68 cases in windows/test/recorder_types_test.cpp cover the pure
+not measured. The 104 cases in windows/test/recorder_types_test.cpp cover the pure
 half only, and they have not been compiled either.
 
 NOT RUN: Windows integration tests
@@ -208,6 +216,23 @@ the fix is to re-apply the frame at `last measured logical size × new scale`;
 if it does not, that same resize makes it strictly worse. Whoever has a Windows
 machine should drag the strip across a scale boundary, log the view's device
 pixel ratio and the host window's DPI on each side, and only then choose.
+
+Two halves of that question are already settled by reading the sources, and do
+not need the machine (checked 2026-08-30):
+
+- the process really is `PerMonitorV2`. `windows/runner/runner.exe.manifest`
+  declares it, so Windows does notify the whole window tree and the host window
+  does receive `WM_DPICHANGED`.
+- the host already hands that message to the engine. `OverlayWindow::HandleMessage`
+  forwards **every** message to `controller_->HandleTopLevelWindowProc` before its
+  own switch, `WM_DPICHANGED` included, so "forward the DPI change to the view
+  controller" is not the missing piece of the second remedy — only the forced
+  re-measure after it would be.
+
+What is still unknown, and is exactly what the two-monitor run has to answer, is
+whether the Flutter embedder acts on that message for a view parented in with
+`SetParent` — that is, whether the view's device pixel ratio actually changes.
+Nothing in the sources decides it.
 
 Keyboard movement and the strip's own `Reset position` are not implemented on
 either platform — see §33.3, which records why they wait for the action sheet.
