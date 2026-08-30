@@ -254,6 +254,27 @@ application is in front. Claiming a global hotkey would be worse than the limit:
 a recorder that swallows the arrow keys of every application it records is a
 bug. `Reset position` is raised by a click and needs no focus at all.
 
+## Overlay window transparency
+
+The display-mode camera preview is the composited picture-in-picture, so its
+window has to be transparent everywhere the tile is not. Three things must all
+hold, and only the first two are testable here:
+
+| | Where | Covered by |
+|---|---|---|
+| The Dart tree paints no ground | `RelayTheme(ground: null)` in `camera_preview_window.dart` | `test/features/recorder/presentation/camera_preview_window_test.dart` |
+| The tile fills its box in every preset | `camera_preview_surface.dart` | `test/design_system/design_system_test.dart` — mounted inside a `Stack` on purpose, because a loose parent is what collapsed it |
+| The hosted Flutter view is not opaque | `controller.backgroundColor = .clear` in `OverlayWindows.makePanel` | **nothing.** `makePanel` is private and AppKit-bound, and the only Swift suite that runs is the pure `RecorderCore` package |
+
+A `FlutterView` defaults to opaque black, so the third is what decides whether a
+transparent Dart tree shows the desktop or a black square. It is confirmed by
+eye on macOS only. Windows is a different mechanism entirely — its overlay
+windows are deliberately **not** `WS_EX_LAYERED` (`overlay_windows.cpp`, with a
+comment explaining that a layered window breaks the hosted child-HWND ANGLE
+surface), and the circular tile is masked with `SetWindowRgn` instead, so the
+corners are outside the window rather than transparent within it. That has never
+been run.
+
 ## Known gaps
 
 - **Windows is written but not built.** No MSVC toolchain on the development

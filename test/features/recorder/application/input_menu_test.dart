@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 
@@ -416,6 +418,131 @@ void main() {
 
       expect(harness.settings.settings.cameraPipPosition, isNull);
       expect(harness.recorder.cameraOverlays.single.position, isNull);
+    });
+  });
+
+  group('the level reaches the sheet', () {
+    // The defect this group locks out: the sheet renders in its own engine and
+    // holds no state, so `notifyListeners()` — which is what makes the launch
+    // screen's bar move — reaches nothing there. Without a pushed snapshot the
+    // bar stayed at the value it had when the sheet opened, which is silence,
+    // and a working microphone read permanently as "TEST — NO SOUND".
+    //
+    // Every assertion here is on what CROSSED the engine boundary
+    // (`overlays.menuStates`), never on `menuStateFor` — the factory was
+    // correct all along, which is exactly why the existing test above passed
+    // while the bug was live.
+    Future<void> emit(TestHarness harness, InputLevel level) async {
+      harness.recorder.emit(
+        RecorderInputLevelEvent(MediaDeviceKind.microphone, level),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    test('a sample pushes a new snapshot to the open sheet', () async {
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      final int before = harness.overlays.menuStates.length;
+
+      await emit(harness, const InputLevel(peak: 0.4, rms: 0.3));
+      await emit(harness, const InputLevel(peak: 0.9, rms: 0.7));
+
+      expect(harness.overlays.menuStates.length, greaterThan(before));
+      expect(harness.overlays.menuStates.last.level?.peak, 0.9);
+      expect(
+        harness.overlays.menuStates.last.level?.isSilent,
+        isFalse,
+        reason:
+            'a bar that says "no sound" while someone is speaking is the '
+            'more misleading half of the symptom',
+      );
+    });
+
+    test('a sample for a kind whose sheet is closed pushes nothing', () async {
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.camera);
+      final int before = harness.overlays.menuStates.length;
+
+      await emit(harness, const InputLevel(peak: 0.6, rms: 0.5));
+
+      expect(
+        harness.overlays.menuStates.length,
+        before,
+        reason: 'twenty pushes a second for a sheet nobody opened',
+      );
+    });
+
+    test('no sheet at all, no push', () async {
+      final TestHarness harness = await recording();
+
+      await emit(harness, const InputLevel(peak: 0.6, rms: 0.5));
+
+      expect(harness.overlays.menuStates, isEmpty);
+    });
+
+    test('an unchanged level is not pushed twice', () async {
+      // Silence is twenty identical samples a second, forever.
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      const InputLevel same = InputLevel(peak: 0.2, rms: 0.1);
+      await emit(harness, same);
+      final int after = harness.overlays.menuStates.length;
+
+      await emit(harness, same);
+      await emit(harness, same);
+
+      expect(harness.overlays.menuStates.length, after);
+    });
+
+    test('pushes never overlap, and settle on the newest sample', () async {
+      // `updateInputMenu` is an awaited round trip. Firing one every 50 ms
+      // unawaited lets two land out of order, and a bar that settles on a stale
+      // sample is worse than one that skips a frame.
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      harness.overlays.peakMenuUpdatesInFlight = 0;
+      final Completer<void> gate = Completer<void>();
+      harness.overlays.holdMenuUpdate = gate;
+
+      await emit(harness, const InputLevel(peak: 0.1, rms: 0.1));
+      await emit(harness, const InputLevel(peak: 0.5, rms: 0.4));
+      await emit(harness, const InputLevel(peak: 0.8, rms: 0.6));
+
+      expect(
+        harness.overlays.peakMenuUpdatesInFlight,
+        1,
+        reason: 'two pushes in flight can land in either order',
+      );
+
+      harness.overlays.holdMenuUpdate = null;
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        harness.overlays.menuStates.last.level?.peak,
+        0.8,
+        reason: 'the trailing edge is the newest sample, not the next one',
+      );
+    });
+
+    test('reopening the sheet pushes the level again', () async {
+      // The dedupe must not survive the sheet it belongs to, or a reopened
+      // sheet would sit on its opening snapshot until the level happened to
+      // change.
+      final TestHarness harness = await recording();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      const InputLevel level = InputLevel(peak: 0.4, rms: 0.3);
+      await emit(harness, level);
+      await harness.viewModel.closeInputMenu();
+      await harness.viewModel.openInputMenu(MediaDeviceKind.microphone);
+      final int before = harness.overlays.menuStates.length;
+
+      await emit(harness, level);
+
+      expect(harness.overlays.menuStates.length, greaterThan(before));
+      expect(harness.overlays.menuStates.last.level?.peak, 0.4);
     });
   });
 

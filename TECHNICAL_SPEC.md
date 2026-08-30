@@ -1776,7 +1776,7 @@ a labelled device list, the pattern a Zoom user already knows.
 | Placement | below the strip when there is room, above it otherwise; aligned to the chevron; clamped to the usable area |
 | Focus | non-activating: opening it must not take key focus from the application being recorded |
 | Contents | `System default`, then devices, current one checked, then `Off` — which is the existing toggle |
-| Microphone sheet | carries the level meter for the selected device, under the list |
+| Microphone sheet | carries the level meter for the selected device, under the list, **fed live** — the sheet renders in its own engine and holds no state, so a level that is not pushed to it is a bar that never moves |
 | System-audio sheet | list only, no meter |
 | Camera sheet | carries the three shape presets (§33.5) instead of a meter — the preview window already is one — plus `Reset position` once the tile has been dragged, and in **window mode** the four named corners |
 | One at a time | a second chevron replaces the first sheet |
@@ -1901,6 +1901,7 @@ revisited, it needs a new decision, not a quiet change.
 | Case | Required behaviour |
 |---|---|
 | Selection changes | the meter follows the newly selected device immediately |
+| The meter is in an overlay window | every sample is pushed to it, deduplicated against the last one pushed and never two pushes at once. A snapshot is the only thing that reaches another engine; rebuilding the application's own widget tree reaches nothing there |
 | Permission not granted | the bar is drawn dead and says why; the session may still start, with a silent track |
 | Device busy or held exclusively by another application | the meter says so rather than reading zero |
 | Flat for 3 s on an enabled input | reported as a finding — "nothing has reached this microphone" — not left as a blank control |
@@ -1926,6 +1927,8 @@ revisited, it needs a new decision, not a quiet change.
 | Source window resized mid-session | ratios are relative to the canvas, so the tile follows whatever §30.3 resolves — **this scope does not resolve §30.3** |
 | Crash mid-session | neither the position nor the preset is persisted; the next session starts from the previous default |
 | Preview and output disagree about the crop | a defect, not a tolerance: design `1p` promises they are the same object |
+| Anything drawn in the preview window that the compositor does not draw | the same defect. In display mode the window paints the camera and nothing else — no frame, no registration marks, no ground, and no background around the tile. A border on screen that is absent from the file is a disagreement about the object, not a decoration |
+| The tile's own window is opaque | it must not be. The compositor leaves every pixel outside the tile untouched, so an opaque window puts a square on the user's screen around a circular tile |
 
 #### Responsive panel
 

@@ -953,6 +953,15 @@ final class OverlayWindowController {
     // this file exists to remove, with the worse of the two sizes being the
     // degenerate one a drawable cannot be created for.
     controller.view.frame = NSRect(origin: .zero, size: contentRect.size)
+    // The panel below is `isOpaque = false` with a clear background, but that
+    // only makes the *window* transparent: a `FlutterView` defaults to opaque
+    // black, so a Dart tree that paints nothing behind its content would show
+    // black rather than the screen. All three overlays paint their own ground
+    // where they want one — the strip and the input menu fill themselves, and
+    // the display-mode camera preview deliberately does not, because it is the
+    // composited tile and the compositor leaves everything outside the tile
+    // untouched (§33.5, design `1p`).
+    controller.backgroundColor = .clear
     let panel = NSPanel(
       contentRect: contentRect,
       styleMask: [.borderless, .nonactivatingPanel],

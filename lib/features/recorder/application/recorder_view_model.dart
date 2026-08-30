@@ -549,6 +549,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     _openMenu = kind;
+    _pushedLevel = null;
     notifyListeners();
     await _overlays.showInputMenu(kind, menuStateFor(kind));
     // Enumerating can take a moment, and the menu is already on screen saying
@@ -568,7 +569,57 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     if (kind == null) {
       return;
     }
-    await _overlays.updateInputMenu(menuStateFor(kind));
+    final InputMenuOverlayState state = menuStateFor(kind);
+    _pushedLevel = state.level;
+    await _overlays.updateInputMenu(state);
+  }
+
+  /// The level in the snapshot the sheet is currently drawing.
+  ///
+  /// Silence is twenty identical samples a second, forever; without this the
+  /// sheet would be re-rendered twenty times to say the same thing.
+  InputLevel? _pushedLevel;
+
+  /// Whether a snapshot is crossing the channel, and whether a newer sample
+  /// arrived while it was.
+  bool _menuPushInFlight = false;
+  bool _menuPushPending = false;
+
+  /// Sends the open sheet the level that is on screen now (§33.4).
+  ///
+  /// The sheet renders in its own engine and holds no state, so
+  /// `notifyListeners` — which is what makes the launch screen's bar move —
+  /// reaches nothing there. Only a pushed snapshot moves this one. Without this
+  /// the bar stayed at whatever it was when the sheet opened, and that is
+  /// silence, because metering resets as it starts: a working microphone read
+  /// permanently as "no sound".
+  ///
+  /// One push at a time, newest sample winning. `updateInputMenu` is an awaited
+  /// round trip; firing one every 50 ms unawaited lets two overlap and land out
+  /// of order, and a bar that settles on a stale sample is worse than one that
+  /// skips a frame.
+  Future<void> _pushMenuLevel(MediaDeviceKind kind) async {
+    if (_menuPushInFlight) {
+      _menuPushPending = true;
+      return;
+    }
+    _menuPushInFlight = true;
+    try {
+      do {
+        _menuPushPending = false;
+        if (_openMenu != kind) {
+          return;
+        }
+        final InputMenuOverlayState state = menuStateFor(kind);
+        if (state.level == _pushedLevel) {
+          continue;
+        }
+        _pushedLevel = state.level;
+        await _overlays.updateInputMenu(state);
+      } while (_menuPushPending);
+    } finally {
+      _menuPushInFlight = false;
+    }
   }
 
   /// Drops the application's belief in a menu the host has already closed.
@@ -580,6 +631,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     _openMenu = null;
+    _pushedLevel = null;
     notifyListeners();
     await stopMetering(kind);
   }
@@ -590,6 +642,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     _openMenu = null;
+    _pushedLevel = null;
     notifyListeners();
     // The meter the menu opened closes with it, unless a launch-screen section
     // is still showing one — `stop` is reference-free here, so this is the one
@@ -1639,9 +1692,17 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       ):
         _meter.accept(kind, level);
         // Twenty of these arrive a second. Notifying on each is what makes the
-        // bar move, and it is cheap because only the meter widget rebuilds —
-        // but nothing else in this class may start doing work per sample.
+        // bar in the main window move, and it is cheap because only the meter
+        // widget rebuilds — but nothing else in this class may start doing work
+        // per sample.
         notifyListeners();
+        // The bar on the control strip's sheet is in another engine, which
+        // `notifyListeners` cannot reach. One comparison in every state except
+        // "a sheet for this exact kind is open"; the push itself is guarded,
+        // deduped and never overlapping.
+        if (_openMenu == kind) {
+          unawaited(_pushMenuLevel(kind));
+        }
       case RecorderDevicesChangedEvent(:final MediaDeviceKind? kind):
         // Something was plugged in or pulled out. Re-reading is the only way to
         // find out what, and a null kind means the platform could not say.

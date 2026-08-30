@@ -56,10 +56,15 @@ class _CameraPreviewWindowState extends State<CameraPreviewWindow> {
       // Window mode: the preview is a captioned object placed where the user
       // can see it, deliberately *not* where the tile lands (design `1e`).
       // Dragging it would move a thing that is not the picture-in-picture, so
-      // it does not drag at all (§33.5).
+      // it does not drag at all (§33.5). It keeps its ground because it is a
+      // panel in its own right rather than a stand-in for something in the file.
       return RelayTheme(child: surface);
     }
+    // Display mode: no ground. This window is the composited tile, and the
+    // compositor leaves everything outside the tile untouched — so a ground
+    // here paints a square over the user's screen around a circular tile.
     return RelayTheme(
+      ground: null,
       child: _Draggable(onMove: _client.beginMove, child: surface),
     );
   }

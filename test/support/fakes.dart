@@ -512,10 +512,29 @@ class FakeOverlayWindowController implements OverlayWindowController {
     menuStates.add(state);
   }
 
+  /// Held open by a test to keep a push "in flight" while more samples arrive.
+  ///
+  /// The real call is a round trip to another Flutter engine; without a way to
+  /// stall one, nothing can assert that two never overlap.
+  Completer<void>? holdMenuUpdate;
+
+  /// How many pushes are inside `updateInputMenu` right now.
+  int menuUpdatesInFlight = 0;
+  int peakMenuUpdatesInFlight = 0;
+
   @override
   Future<void> updateInputMenu(InputMenuOverlayState state) async {
     calls.add('updateInputMenu(${state.kind.name})');
     menuStates.add(state);
+    menuUpdatesInFlight++;
+    peakMenuUpdatesInFlight = menuUpdatesInFlight > peakMenuUpdatesInFlight
+        ? menuUpdatesInFlight
+        : peakMenuUpdatesInFlight;
+    try {
+      await holdMenuUpdate?.future;
+    } finally {
+      menuUpdatesInFlight--;
+    }
   }
 
   @override

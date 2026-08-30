@@ -78,20 +78,36 @@ class CameraPreviewSurface extends StatelessWidget {
     );
 
     if (matchesCompositedPip) {
-      final Widget tile = DuotoneFilter(enabled: feed == null, child: image);
+      // Display mode: this window *is* the composited picture-in-picture
+      // (design `1p`, §33.5), so it draws exactly what the compositor draws and
+      // nothing else — no frame, no registration marks, no ground behind the
+      // camera. The compositor writes the camera's pixels into the tile and
+      // leaves everything outside it untouched; anything this window adds is a
+      // mark on the user's screen that is absent from the file, which is the
+      // one disagreement `1p` exists to forbid. It is also why the window
+      // itself carries no background (`RelayTheme(ground: null)`).
+      //
+      // `SizedBox.expand` rather than trusting the constraints that arrive: a
+      // `cover` fit sizes itself to its child when its minimums are zero, and
+      // its child is the camera's aspect ratio measured in *logical pixels*.
+      // Any parent that loosens — a `Stack`, an `Align`, anything that
+      // shrink-wraps — collapsed the tile to under two pixels in the corner of
+      // an otherwise empty window. That is what the square preset drew.
+      final Widget tile = SizedBox.expand(
+        child: DuotoneFilter(enabled: feed == null, child: image),
+      );
       if (cornerRadiusRatio <= 0) {
-        return BlueprintFrame(background: AppColors.neutral400, child: tile);
+        return tile;
       }
-      // A rounded tile is not a blueprint object: the frame's registration
-      // marks are drawn on a square, and the mask is the shape the compositor
-      // draws. Clipping here rather than decorating keeps the two the same.
+      // The mask is the shape the compositor draws, resolved against the tile's
+      // own width so the circle is a circle at every canvas size.
       return LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) =>
             ClipRRect(
               borderRadius: BorderRadius.circular(
                 cornerRadiusRatio * constraints.maxWidth,
               ),
-              child: ColoredBox(color: AppColors.neutral400, child: tile),
+              child: tile,
             ),
       );
     }

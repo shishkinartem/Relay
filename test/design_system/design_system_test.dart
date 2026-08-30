@@ -393,6 +393,59 @@ void main() {
     });
   });
 
+  group('RelayTheme (§33.5)', () {
+    testWidgets('a null ground paints nothing behind its child', (
+      WidgetTester tester,
+    ) async {
+      // The display-mode camera preview asks for this. Its window is the
+      // composited tile, and the compositor leaves every pixel outside the tile
+      // untouched — so a ground here is a square of #F2F2F3 on the user's own
+      // screen around a circular tile, which is what was photographed.
+      for (final (Color? ground, int expected) in <(Color?, int)>[
+        (AppColors.background, 1),
+        (null, 0),
+      ]) {
+        await tester.pumpWidget(
+          RelayTheme(
+            ground: ground,
+            child: const SizedBox(width: 40, height: 40),
+          ),
+        );
+        expect(
+          find.descendant(
+            of: find.byType(RelayTheme),
+            matching: find.byWidgetPredicate(
+              (Widget w) => w is ColoredBox && w.color == AppColors.background,
+            ),
+          ),
+          findsExactly(expected),
+        );
+      }
+    });
+
+    testWidgets('a null ground still supplies direction and a text style', (
+      WidgetTester tester,
+    ) async {
+      // There is no `WidgetsApp` above an overlay engine, so this is the only
+      // provider of either. Dropping the ground must not drop them with it.
+      await tester.pumpWidget(
+        const RelayTheme(ground: null, child: Text('overlay')),
+      );
+
+      expect(tester.widget<Text>(find.text('overlay')), isNotNull);
+      expect(
+        Directionality.of(tester.element(find.text('overlay'))),
+        TextDirection.ltr,
+      );
+      expect(
+        DefaultTextStyle.of(tester.element(find.text('overlay')))
+            .style
+            .fontFamily,
+        AppTypography.body.fontFamily,
+      );
+    });
+  });
+
   group('CameraPreviewSurface', () {
     testWidgets('carries no capture-exclusion labels in either mode', (
       WidgetTester tester,
@@ -422,6 +475,158 @@ void main() {
         ),
       );
       expect(find.byType(Text), findsNothing);
+    });
+
+    testWidgets('the composited tile fills its box in every preset', (
+      WidgetTester tester,
+    ) async {
+      // The bug this locks out: the square preset drew a 1.8 x 1.0 speck in the
+      // corner of an otherwise empty window, so the user saw a plain white
+      // block with no camera in it. The load-bearing property is *geometry* —
+      // that the feed is not degenerate — not which widgets wrap it, because a
+      // structural assertion is one a future wrapper can satisfy while
+      // reintroducing the collapse.
+      //
+      // Mounted inside a `Stack`, which is what broke it: a `Stack` loosens the
+      // constraints it hands its children, and a `cover` fit sizes itself to
+      // its child when the minimums are zero.
+      const Key feedKey = Key('feed');
+      const Size box = Size(126, 126);
+
+      for (final (String name, CameraPipFit fit, double radius, Widget? feed)
+          in <(String, CameraPipFit, double, Widget?)>[
+            ('camera', CameraPipFit.contain, 0, null),
+            ('square', CameraPipFit.cover, 0, null),
+            ('circle', CameraPipFit.cover, 0.5, null),
+            (
+              'camera · live',
+              CameraPipFit.contain,
+              0,
+              const ColoredBox(key: feedKey, color: Color(0xFF102030)),
+            ),
+            (
+              'square · live',
+              CameraPipFit.cover,
+              0,
+              const ColoredBox(key: feedKey, color: Color(0xFF102030)),
+            ),
+            (
+              'circle · live',
+              CameraPipFit.cover,
+              0.5,
+              const ColoredBox(key: feedKey, color: Color(0xFF102030)),
+            ),
+          ]) {
+        await tester.pumpWidget(
+          host(
+            Center(
+              child: SizedBox.fromSize(
+                size: box,
+                // The surface is a *non-positioned* child of a `Stack`, so it
+                // is handed loosened constraints — 0..126, not 126x126. That is
+                // the exact shape that broke it: the frame it used to draw was
+                // itself a `Stack`, so the tile inside shrank to the camera's
+                // aspect ratio measured in logical pixels and the window was
+                // left showing its own background.
+                child: Stack(
+                  children: <Widget>[
+                    CameraPreviewSurface(
+                      matchesCompositedPip: true,
+                      aspectRatio: 16 / 9,
+                      fit: fit,
+                      cornerRadiusRatio: radius,
+                      feed: feed,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // The *painted* rect, not the laid-out size: a `cover` fit lays its
+        // child out unconstrained at the camera's aspect ratio and then scales
+        // it with a transform, so `getSize` reports 1.8 x 1.0 whether the tile
+        // is filled or collapsed. `getRect` walks the transform and is
+        // therefore the only measurement that can tell the two apart.
+        final Size drawn = tester
+            .getRect(
+              feed == null ? find.byType(HatchedSurface) : find.byKey(feedKey),
+            )
+            .size;
+        if (fit == CameraPipFit.cover) {
+          // `cover` crops: the frame is at least the tile in both axes.
+          expect(
+            drawn.width,
+            greaterThanOrEqualTo(box.width - 0.01),
+            reason: '$name is $drawn in a $box tile',
+          );
+          expect(
+            drawn.height,
+            greaterThanOrEqualTo(box.height - 0.01),
+            reason: '$name is $drawn in a $box tile',
+          );
+        } else {
+          // `contain` letterboxes: exactly one axis matches the tile, and the
+          // other is the camera's own shape.
+          expect(drawn.width, closeTo(box.width, 0.01), reason: name);
+          expect(
+            drawn.width / drawn.height,
+            closeTo(16 / 9, 0.01),
+            reason: '$name must not be distorted',
+          );
+        }
+      }
+    });
+
+    testWidgets('the composited tile is only the tile — no frame, no ground', (
+      WidgetTester tester,
+    ) async {
+      // Design `1p`: this window *is* the picture-in-picture. The compositor
+      // draws no border, no registration marks and nothing behind the camera,
+      // so anything drawn here that is not the camera is a mark on the user's
+      // screen that never reaches the file.
+      await tester.pumpWidget(
+        host(
+          const SizedBox(
+            width: 126,
+            height: 126,
+            child: CameraPreviewSurface(
+              matchesCompositedPip: true,
+              fit: CameraPipFit.cover,
+              feed: ColoredBox(color: Color(0xFF102030)),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.descendant(
+          of: find.byType(CameraPreviewSurface),
+          matching: find.byType(BlueprintFrame),
+        ),
+        findsNothing,
+      );
+      // Window mode keeps its frame: there it is a captioned object in its own
+      // right, not a stand-in for something in the file (design `1e`).
+      await tester.pumpWidget(
+        host(
+          const SizedBox(
+            width: 200,
+            height: 140,
+            child: CameraPreviewSurface(
+              feed: ColoredBox(color: Color(0xFF102030)),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.descendant(
+          of: find.byType(CameraPreviewSurface),
+          matching: find.byType(BlueprintFrame),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the preview is mirrored and the flag flips it', (

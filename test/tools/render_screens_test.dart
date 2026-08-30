@@ -444,19 +444,60 @@ void main() {
       ),
       size: const Size(260, 200),
     );
+    // §33.5. Three tiles over a stand-in desktop, because the thing worth
+    // reviewing here is what the window does NOT paint: this preview *is* the
+    // composited picture-in-picture, so every pixel outside the tile has to be
+    // the user's own screen. Rendered on a light ground with a light preview,
+    // the previous version of this shot could not show the difference between
+    // a transparent corner and a near-white one — which is how a white square
+    // over the desktop passed design review.
     await capture(
       tester,
       '1p_camera_preview_display_mode',
-      const RelayTheme(
-        child: Center(
-          child: SizedBox(
-            width: 168,
-            height: 94,
-            child: CameraPreviewSurface(matchesCompositedPip: true),
-          ),
+      const _Desktop(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: <Widget>[
+            SizedBox(
+              width: 128,
+              height: 72,
+              child: RelayTheme(
+                ground: null,
+                child: CameraPreviewSurface(
+                  matchesCompositedPip: true,
+                  feed: _CameraStandIn(),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 96,
+              height: 96,
+              child: RelayTheme(
+                ground: null,
+                child: CameraPreviewSurface(
+                  matchesCompositedPip: true,
+                  fit: CameraPipFit.cover,
+                  feed: _CameraStandIn(),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 96,
+              height: 96,
+              child: RelayTheme(
+                ground: null,
+                child: CameraPreviewSurface(
+                  matchesCompositedPip: true,
+                  fit: CameraPipFit.cover,
+                  cornerRadiusRatio: 0.5,
+                  feed: _CameraStandIn(),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
-      size: const Size(220, 160),
+      size: const Size(420, 150),
     );
   });
 
@@ -616,4 +657,66 @@ void main() {
       harness.wrap(const LaunchScreen()),
     );
   });
+}
+
+/// A stand-in for whatever the user is recording, so an opaque overlay is
+/// visible as one. A uniform ground would hide exactly the defect this shot
+/// exists to catch.
+class _Desktop extends StatelessWidget {
+  const _Desktop({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => RelayTheme(
+    child: CustomPaint(
+      painter: _DesktopPainter(),
+      child: Center(child: child),
+    ),
+  );
+}
+
+class _DesktopPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()..color = const Color(0xFF1B2733),
+    );
+    final Paint line = Paint()
+      ..color = const Color(0x33FFFFFF)
+      ..strokeWidth = 1;
+    for (double x = -size.height; x < size.width; x += 16) {
+      canvas.drawLine(Offset(x, size.height), Offset(x + size.height, 0), line);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DesktopPainter oldDelegate) => false;
+}
+
+/// A camera frame with a recognisable shape, so a crop reads as a crop.
+class _CameraStandIn extends StatelessWidget {
+  const _CameraStandIn();
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: const BoxDecoration(
+      gradient: LinearGradient(
+        colors: <Color>[Color(0xFFE8C39E), Color(0xFF7A5C46)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+    ),
+    child: Center(
+      child: Container(
+        width: 22,
+        height: 22,
+        decoration: const BoxDecoration(
+          color: Color(0xFF2E3A46),
+          shape: BoxShape.circle,
+        ),
+      ),
+    ),
+  );
 }
