@@ -81,8 +81,8 @@ class RecorderWindowsPlugin : public flutter::Plugin {
   // choice — so nothing here may turn a command into a map (spec 33.4).
   //
   // `choice` is the menu engine's own arguments map, forwarded as it arrived: a
-  // device row, a shape preset, a corner or `Reset position`, which differ only
-  // in which keys they carry. The one field the host owns is `dismissed`, which
+  // device row, a shape preset or a corner, which differ only in which keys
+  // they carry. The one field the host owns is `dismissed`, which
   // a choice never is.
   void EmitMenuChoice(flutter::EncodableMap choice);
   // The host closed the menu behind the application's back — a click outside,

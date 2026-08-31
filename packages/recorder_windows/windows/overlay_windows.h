@@ -91,9 +91,9 @@ class OverlayWindows {
   //
   // Forwarded whole rather than unpacked, because none of what a choice *means*
   // is this layer's business. The shapes it arrives in — a device row, a shape
-  // preset, a corner, `Reset position` — differ only in which keys they carry,
-  // and passing the map through is what let the camera sheet's three extra
-  // answers reach the application without the host learning a single field.
+  // preset, a corner — differ only in which keys they carry, and passing the
+  // map through is what let the camera sheet's extra answers reach the
+  // application without the host learning a single field.
   using MenuSelectionHandler =
       std::function<void(const flutter::EncodableMap& choice)>;
   // The menu asked to be closed — Esc, a click outside, the strip moving, a

@@ -447,13 +447,13 @@ bool IsUsableWorkArea(const RECT& work_area);
 // Whether a choice made in the input menu closes the sheet (spec 33.4).
 //
 // A device row does, the `Off` row included: the choice is made and the window
-// has done its job. The camera sheet's three extra answers do not — a shape
-// preset, a corner and `Reset position` all change the tile on screen
-// *underneath* the sheet, and comparing them should not cost a reopen each
-// time — so the host forwards them and leaves the window exactly where it is. A
-// close that did not happen also raises no dismissal: there is nothing for the
-// application to stop believing.
-bool MenuChoiceClosesMenu(bool has_preset, bool has_corner, bool resets_position);
+// has done its job. The camera sheet's two extra answers do not — a shape
+// preset and a corner both change the tile on screen *underneath* the sheet,
+// and comparing them should not cost a reopen each time — so the host forwards
+// them and leaves the window exactly where it is. A close that did not happen
+// also raises no dismissal: there is nothing for the application to stop
+// believing.
+bool MenuChoiceClosesMenu(bool has_preset, bool has_corner);
 
 // How far the input menu sits from the strip it hangs off, in logical points.
 inline constexpr double kInputMenuGapPoints = 6.0;

@@ -550,33 +550,30 @@ final class OverlayPlacementGeometryTests: XCTestCase {
   func testTheKeyChangesWithEverySectionThatChangesTheHeight() {
     let base = OverlayPlacementGeometry.menuContentKey(
       kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
-      hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false)
+      hasNotice: false, presetCount: 0, cornerCount: 0)
 
     let variants: [String] = [
       OverlayPlacementGeometry.menuContentKey(
         kind: "camera", rowCount: 4, loading: false, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 5, loading: false, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: true, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: false, hasLevel: true,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
-        hasNotice: true, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: true, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
-        hasNotice: false, presetCount: 3, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 3, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 4, canResetPosition: false),
-      OverlayPlacementGeometry.menuContentKey(
-        kind: "microphone", rowCount: 4, loading: false, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: true),
+        hasNotice: false, presetCount: 0, cornerCount: 4),
     ]
 
     for variant in variants {
@@ -592,10 +589,10 @@ final class OverlayPlacementGeometryTests: XCTestCase {
     XCTAssertEqual(
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: false, hasLevel: true,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 4, loading: false, hasLevel: true,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false))
+        hasNotice: false, presetCount: 0, cornerCount: 0))
   }
 
   /// A loading sheet is one row whatever the list will hold, so it must not
@@ -605,10 +602,10 @@ final class OverlayPlacementGeometryTests: XCTestCase {
     XCTAssertNotEqual(
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 0, loading: true, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false),
+        hasNotice: false, presetCount: 0, cornerCount: 0),
       OverlayPlacementGeometry.menuContentKey(
         kind: "microphone", rowCount: 0, loading: false, hasLevel: false,
-        hasNotice: false, presetCount: 0, cornerCount: 0, canResetPosition: false))
+        hasNotice: false, presetCount: 0, cornerCount: 0))
   }
 
   /// The executable form of "a panel is never driven back to a size it left":

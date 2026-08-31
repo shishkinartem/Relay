@@ -156,8 +156,6 @@ class _InputMenuWindowState extends State<InputMenuWindow>
                         _client.chooseCameraPreset(_state.kind, preset),
                     onChooseCorner: (CameraOverlayCorner corner) =>
                         _client.chooseCameraCorner(_state.kind, corner),
-                    onResetPosition: () =>
-                        _client.resetCameraPipPosition(_state.kind),
                   ),
                 ),
               ),

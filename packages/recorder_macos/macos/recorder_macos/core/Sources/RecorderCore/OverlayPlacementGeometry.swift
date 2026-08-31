@@ -58,8 +58,7 @@ public enum OverlayPlacementGeometry {
     hasLevel: Bool,
     hasNotice: Bool,
     presetCount: Int,
-    cornerCount: Int,
-    canResetPosition: Bool
+    cornerCount: Int
   ) -> String {
     // The row *count* rather than the rows: two microphones and two cameras
     // lay out to the same height, and a device renamed does not resize a sheet.
@@ -72,7 +71,6 @@ public enum OverlayPlacementGeometry {
       hasNotice ? "notice" : "-",
       "presets:\(presetCount)",
       "corners:\(cornerCount)",
-      canResetPosition ? "reset" : "-",
     ].joined(separator: "/")
   }
 

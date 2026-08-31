@@ -863,8 +863,7 @@ final class OverlayWindowController {
       hasLevel: state["level"] != nil && !(state["level"] is NSNull),
       hasNotice: state["notice"] != nil && !(state["notice"] is NSNull),
       presetCount: (state["presets"] as? [Any])?.count ?? 0,
-      cornerCount: (state["corners"] as? [Any])?.count ?? 0,
-      canResetPosition: state["canResetPosition"] as? Bool ?? false)
+      cornerCount: (state["corners"] as? [Any])?.count ?? 0)
   }
 
   /// Closes the menu because the application asked it to. Idempotent.
@@ -1123,7 +1122,7 @@ final class OverlayWindowController {
       result(nil)
     case "chooseInputDevice":
       // Every choice the sheet raises, on one call: a device row, and the
-      // camera sheet's shape presets and `Reset position`. The choice reaches
+      // camera sheet's shape presets and corners. The choice reaches
       // the application on the events channel as a map — beside the bare
       // command names that channel already emits, which is how Dart tells the
       // two apart (§33.4).
@@ -1134,14 +1133,13 @@ final class OverlayWindowController {
         let deviceId = arguments["deviceId"] as? String
         let preset = arguments["preset"] as? String
         let corner = arguments["corner"] as? String
-        let resetPosition = arguments["resetPosition"] as? Bool ?? false
-        // A shape preset, a corner and `Reset position` leave the sheet where
-        // it is: the tile changes on screen underneath it, and comparing the
-        // choices should not cost a reopen each time (§33.5). Only a device row
-        // — `off` included — closes it, and that close is not a dismissal: the
-        // map below is the report the application gets, so a `dismissed` beside
-        // it would be the same event told twice.
-        if preset == nil, corner == nil, !resetPosition {
+        // A shape preset and a corner leave the sheet where it is: the tile
+        // changes on screen underneath it, and comparing the choices should not
+        // cost a reopen each time (§33.5). Only a device row — `off` included —
+        // closes it, and that close is not a dismissal: the map below is the
+        // report the application gets, so a `dismissed` beside it would be the
+        // same event told twice.
+        if preset == nil, corner == nil {
           hideInputMenu()
         }
         // Read through rather than rebuilt from the fields this build happens
@@ -1155,7 +1153,6 @@ final class OverlayWindowController {
           "dismissed": false,
           "preset": preset as Any,
           "corner": corner as Any,
-          "resetPosition": resetPosition,
         ])
       }
     case "dismissInputMenu":

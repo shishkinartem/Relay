@@ -711,9 +711,8 @@ void RecorderWindowsPlugin::EmitOverlayCommand(const std::string& command) {
 
 void RecorderWindowsPlugin::EmitMenuChoice(flutter::EncodableMap choice) {
   // Forwarded as the menu engine sent it. A device row carries `deviceId` and
-  // `off`, a shape preset carries `preset`, a placement row carries `corner`
-  // and `Reset position` carries `resetPosition` — and which of them this is
-  // belongs to the application (spec 33.5). Unpacking them here would mean
+  // `off`, a shape preset carries `preset` and a placement row carries `corner`
+  // — and which of them this is belongs to the application (spec 33.5). Unpacking them here would mean
   // teaching the host a field every time the camera sheet grows one; Dart
   // defaults every key it does not find.
   //

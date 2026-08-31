@@ -198,11 +198,8 @@ void main() {
                         ],
                         presets: CameraPipPreset.values,
                         selectedPreset: CameraPipPreset.circle,
-                        canResetPosition: true,
                       ),
-                      // Window mode: four named corners instead of the drag,
-                      // and no `Reset position` — a corner is not something to
-                      // undo.
+                      // Window mode: four named corners instead of the drag.
                       const InputMenuOverlayState(
                         kind: MediaDeviceKind.camera,
                         title: 'Camera',
@@ -225,7 +222,6 @@ void main() {
                     onChoose: (_) {},
                     onChoosePreset: (_) {},
                     onChooseCorner: (_) {},
-                    onResetPosition: () {},
                   ),
                   const SizedBox(width: 24),
                 ],

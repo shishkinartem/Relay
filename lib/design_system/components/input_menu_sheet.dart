@@ -26,7 +26,6 @@ class InputMenuSheet extends StatelessWidget {
     required this.onChoose,
     this.onChoosePreset,
     this.onChooseCorner,
-    this.onResetPosition,
   });
 
   final InputMenuOverlayState state;
@@ -36,7 +35,6 @@ class InputMenuSheet extends StatelessWidget {
   /// cannot apply one, which draws no presets rather than dead ones.
   final ValueChanged<CameraPipPreset>? onChoosePreset;
   final ValueChanged<CameraOverlayCorner>? onChooseCorner;
-  final VoidCallback? onResetPosition;
 
   /// The design's sheet width.
   static const double width = 268;
@@ -65,13 +63,6 @@ class InputMenuSheet extends StatelessWidget {
           if (state.level != null) _meter(),
           if (state.presets.isNotEmpty && onChoosePreset != null) _shapes(),
           if (state.corners.isNotEmpty && onChooseCorner != null) _corners(),
-          if (state.canResetPosition && onResetPosition != null)
-            AppOptionTile(
-              label: 'Reset position',
-              meta: 'lower right',
-              selected: false,
-              onPressed: onResetPosition!,
-            ),
           if (state.notice != null)
             Container(
               padding: const EdgeInsets.fromLTRB(10, 8, 10, 9),

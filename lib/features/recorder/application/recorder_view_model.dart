@@ -185,13 +185,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// as chosen while no free position is stored (§33.5).
   CameraOverlayCorner get cameraCorner => settings.cameraPipCorner;
 
-  /// Whether there is a free position to undo.
+  /// Whether the tile is at a position it was dragged to rather than on one of
+  /// the four corners (§33.5).
   ///
-  /// False on a tile that is on its corner, where `Reset position` would put it
-  /// where it already is. True during a session in which it was dragged, and
-  /// true before one when a previous session stored a drag — which is the only
-  /// way a free position is ever written.
-  bool get canResetCameraPipPosition => _cameraPipPosition != null;
+  /// A placement control draws no corner as chosen while this is true: the tile
+  /// is in none of them, and marking one would say it is. Choosing any corner
+  /// is what puts it back — there is no separate `Reset position`, because with
+  /// the four corners on screen that would be a fifth way to say "lower right".
+  bool get hasFreeCameraPipPosition => _cameraPipPosition != null;
 
   /// Where the tile was dragged to during *this* session (§33.5).
   ///
@@ -229,17 +230,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// compositor itself, because the gesture ran inside the platform's own drag
   /// loop and a preview that has moved while the file has not is the
   /// disagreement design `1p` forbids. This only records it, so the next preset
-  /// change is applied around the tile's real place and `Reset position` starts
-  /// being offered.
+  /// change is applied around the tile's real place rather than around where
+  /// the session started.
   void _onCameraPreviewMoved(CameraPreviewMove move) {
     if (move.position == _livePipPosition) {
       return;
     }
     _livePipPosition = move.position;
     notifyListeners();
-    // The sheet may well be open — a drag with the camera sheet up is ordinary
-    // — and `Reset position` has just become offerable.
-    unawaited(refreshInputMenu());
   }
 
   /// Chooses the tile's shape and size. Applied to a live recording between
@@ -331,17 +329,6 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     await _pushCameraOverlay();
   }
 
-  /// Puts the tile back in its corner (§33.5).
-  Future<void> resetCameraPipPosition() async {
-    if (_cameraPipPosition == null) {
-      return;
-    }
-    _livePipPosition = null;
-    await _settings.update(settings.copyWith(cameraPipPosition: null));
-    notifyListeners();
-    await _pushCameraOverlay();
-  }
-
   /// Best-effort: a tile that could not be re-pointed keeps drawing where it
   /// was, which is wrong but harmless, and is not worth ending a recording for.
   Future<void> _pushCameraOverlay() async {
@@ -371,9 +358,9 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// question: the window is at the tile's rectangle whether the user dragged
   /// it or the corner rule put it there, so the first session with the camera
   /// on stored the corner's own spot as a *free* position. From then on
-  /// `resolveRect` never took its corner branch again, `cameraPipCorner` was
-  /// dead in display mode, and `Reset position` was offered to someone who had
-  /// never moved anything. A corner is a live rule and must stay one.
+  /// `resolveRect` never took its corner branch again and `cameraPipCorner` was
+  /// dead in display mode, so a corner chosen before the next recording did
+  /// nothing at all. A corner is a live rule and must stay one.
   ///
   /// Nothing to do in window mode, where the preview is not the tile (design
   /// `1e`) and no drag is ever reported.
@@ -815,14 +802,10 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           ? CameraPipPreset.values
           : const <CameraPipPreset>[],
       selectedPreset: kind == MediaDeviceKind.camera ? cameraPreset : null,
-      // Offered only once there is something to undo. The tile starts in its
-      // corner, so before a drag this row would put it where it already is.
-      canResetPosition:
-          kind == MediaDeviceKind.camera && canResetCameraPipPosition,
       // Window mode only: with a display source the tile is dragged, and the
       // preview *is* the tile, so a corner list would be a second, worse answer
       // to a question already answered better (design `1e` vs `1p`, §33.5).
-      corners: kind == MediaDeviceKind.camera && !_tileIsDraggable
+      corners: kind == MediaDeviceKind.camera && !cameraTileIsDraggable
           ? CameraOverlayCorner.values
           : const <CameraOverlayCorner>[],
       selectedCorner: kind == MediaDeviceKind.camera
@@ -857,10 +840,15 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// Whether the tile can be dragged, which is the same question as whether the
   /// preview stands for it (design `1p`).
   ///
+  /// Public because the launch screen says so in words: where a drag is
+  /// possible, the corner chosen before recording is where the tile *starts*
+  /// rather than where it is stuck.
+  ///
   /// A window source composites the tile over a captured window while the
   /// preview sits somewhere else on screen entirely, so nothing on screen is
   /// the tile and there is nothing to drag.
-  bool get _tileIsDraggable => selectedSource?.type != CaptureSourceType.window;
+  bool get cameraTileIsDraggable =>
+      selectedSource?.type != CaptureSourceType.window;
 
   static String _menuTitle(MediaDeviceKind kind) => switch (kind) {
     MediaDeviceKind.camera => 'Camera',
@@ -1942,11 +1930,6 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     final CameraOverlayCorner? corner = selection.corner;
     if (corner != null) {
       await setCameraCorner(corner);
-      await refreshInputMenu();
-      return;
-    }
-    if (selection.resetPosition) {
-      await resetCameraPipPosition();
       await refreshInputMenu();
       return;
     }

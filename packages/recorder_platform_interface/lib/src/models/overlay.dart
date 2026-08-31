@@ -134,7 +134,6 @@ class InputMenuOverlayState {
     this.level,
     this.presets = const <CameraPipPreset>[],
     this.selectedPreset,
-    this.canResetPosition = false,
     this.corners = const <CameraOverlayCorner>[],
     this.selectedCorner,
   });
@@ -152,11 +151,6 @@ class InputMenuOverlayState {
   /// made.
   final List<CameraPipPreset> presets;
   final CameraPipPreset? selectedPreset;
-
-  /// Whether the tile has been dragged away from its default corner, so the
-  /// sheet can offer to put it back. False draws no row at all rather than a
-  /// dead one.
-  final bool canResetPosition;
 
   /// The four corners, offered in window mode only (§33.5).
   ///
@@ -190,7 +184,6 @@ class InputMenuOverlayState {
     'items': <Object?>[for (final InputMenuItem item in items) item.toMap()],
     'presets': <Object?>[for (final CameraPipPreset p in presets) p.name],
     'selectedPreset': selectedPreset?.name,
-    'canResetPosition': canResetPosition,
     'corners': <Object?>[for (final CameraOverlayCorner c in corners) c.name],
     'selectedCorner': selectedCorner?.name,
   };
@@ -231,7 +224,6 @@ class InputMenuOverlayState {
       selectedPreset: CameraPipPreset.tryFromName(
         map['selectedPreset'] as String?,
       ),
-      canResetPosition: map['canResetPosition'] as bool? ?? false,
       corners: <CameraOverlayCorner>[
         for (final Object? entry
             in (map['corners'] as List<Object?>? ?? const <Object?>[]))
@@ -261,7 +253,6 @@ class InputMenuSelection {
     this.dismissed = false,
     this.preset,
     this.corner,
-    this.resetPosition = false,
   });
 
   /// A shape preset was pressed in the camera sheet (§33.5).
@@ -269,25 +260,14 @@ class InputMenuSelection {
     : deviceId = null,
       off = false,
       dismissed = false,
-      corner = null,
-      resetPosition = false;
+      corner = null;
 
   /// A corner was chosen in the camera sheet's window-mode placement row.
   const InputMenuSelection.corner(this.kind, CameraOverlayCorner this.corner)
     : deviceId = null,
       off = false,
       dismissed = false,
-      preset = null,
-      resetPosition = false;
-
-  /// `Reset position` was pressed in the camera sheet.
-  const InputMenuSelection.resetTilePosition(this.kind)
-    : deviceId = null,
-      off = false,
-      dismissed = false,
-      preset = null,
-      corner = null,
-      resetPosition = true;
+      preset = null;
 
   /// The menu closed without a choice — a click outside, the strip moving, the
   /// display changing. Nothing is applied; the application just stops believing
@@ -297,8 +277,7 @@ class InputMenuSelection {
       off = false,
       dismissed = true,
       preset = null,
-      corner = null,
-      resetPosition = false;
+      corner = null;
 
   final MediaDeviceKind kind;
 
@@ -319,8 +298,6 @@ class InputMenuSelection {
   /// open.
   final CameraOverlayCorner? corner;
 
-  final bool resetPosition;
-
   static InputMenuSelection? tryFromMap(Map<String, Object?> map) {
     final MediaDeviceKind? kind = MediaDeviceKind.fromName(
       map['kind'] as String?,
@@ -335,7 +312,6 @@ class InputMenuSelection {
       dismissed: map['dismissed'] as bool? ?? false,
       preset: CameraPipPreset.tryFromName(map['preset'] as String?),
       corner: CameraOverlayCorner.tryFromName(map['corner'] as String?),
-      resetPosition: map['resetPosition'] as bool? ?? false,
     );
   }
 
@@ -346,7 +322,6 @@ class InputMenuSelection {
     'dismissed': dismissed,
     'preset': preset?.name,
     'corner': corner?.name,
-    'resetPosition': resetPosition,
   };
 
   @override
@@ -357,24 +332,15 @@ class InputMenuSelection {
       other.off == off &&
       other.dismissed == dismissed &&
       other.preset == preset &&
-      other.corner == corner &&
-      other.resetPosition == resetPosition;
+      other.corner == corner;
 
   @override
-  int get hashCode => Object.hash(
-    kind,
-    deviceId,
-    off,
-    dismissed,
-    preset,
-    corner,
-    resetPosition,
-  );
+  int get hashCode =>
+      Object.hash(kind, deviceId, off, dismissed, preset, corner);
 
   @override
   String toString() => switch (this) {
     _ when dismissed => 'InputMenuSelection($kind, dismissed)',
-    _ when resetPosition => 'InputMenuSelection($kind, reset position)',
     _ when preset != null => 'InputMenuSelection($kind, ${preset!.name})',
     _ when corner != null => 'InputMenuSelection($kind, ${corner!.name})',
     _ => 'InputMenuSelection($kind, ${off ? 'off' : deviceId ?? 'default'})',
@@ -497,11 +463,11 @@ class RecordingOverlayState {
 /// Pushed rather than pulled, unlike the control strip's position. The strip is
 /// read once at teardown because nothing in the running session depends on
 /// where it is; the tile is different in two ways. It is composited into the
-/// file, so the application has to know it moved in order to keep offering
-/// `Reset position` and to survive the next preset change; and a position read
-/// back at teardown cannot say whether the user ever *dragged* — a tile sitting
-/// where its corner put it reports the same shape as one dropped there by hand,
-/// which is what made the corner rule stop being consulted after one session.
+/// file, so a preset chosen afterwards has to be applied around where the tile
+/// really is; and a position read back at teardown cannot say whether the user
+/// ever *dragged* — a tile sitting where its corner put it reports the same
+/// shape as one dropped there by hand, which is what made the corner rule stop
+/// being consulted after one session.
 ///
 /// Emitted only where the preview is the tile. In window mode it is a separate
 /// captioned object (design `1e`) and dragging it moves nothing else.

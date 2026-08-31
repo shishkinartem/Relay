@@ -346,7 +346,6 @@ decides whether a chevron is drawn at all.
   // Camera only; empty on every other kind (§33.4).
   "presets": ["camera", "square", "circle"],
   "selectedPreset": "circle",     // null means the default, `camera`
-  "canResetPosition": true,       // the tile has been dragged off its corner
   // Window mode only; empty with a display source, where the tile is dragged.
   "corners": ["topLeft", "topRight", "bottomLeft", "bottomRight"],
   "selectedCorner": "bottomRight"
@@ -374,15 +373,20 @@ The camera sheet raises two more, on the same map and the same call:
 ```jsonc
 {"kind": "camera", "preset": "circle"}        // a shape preset (§33.5)
 {"kind": "camera", "corner": "topLeft"}       // window mode's placement row
-{"kind": "camera", "resetPosition": true}     // put the tile back in its corner
 ```
 
-**None of the three camera rows closes the sheet** — a preset, a corner and
-`resetPosition` alike. The tile changes on screen underneath it, and comparing
-three shapes or four corners must not cost a reopen each time, so the host
-forwards them and leaves the window exactly where it is. A **device row** and
-**`off`** are the choices that close the sheet, and the host closes it before
-forwarding. A row that leaves the sheet open must not also send a dismissal.
+**Neither camera row closes the sheet.** The tile changes on screen underneath
+it, and comparing three shapes or four corners must not cost a reopen each time,
+so the host forwards them and leaves the window exactly where it is. A **device
+row** and **`off`** are the choices that close the sheet, and the host closes it
+before forwarding. A row that leaves the sheet open must not also send a
+dismissal.
+
+There is no `resetPosition`. The sheet carried a `Reset position` row until
+2026-08-31; it was a second way to say the corner the tile already had, and its
+`lower right` caption named the wrong corner whenever the tile's own was
+something else. **Choosing a corner clears a free position**, which is the whole
+of what it did.
 
 **A dismissal is sent too**, as `{"kind": "microphone", "dismissed": true}` with
 no device. It applies nothing — the host has already closed the window. It
@@ -533,9 +537,8 @@ Both hosts also apply the drag to the running compositor themselves, without
 waiting for the application: the gesture runs inside the platform's own drag
 loop, and a preview that has moved while the file has not is the disagreement
 `1p` forbids. This event is what tells the **application**, which needs it for
-two things it cannot do otherwise — build the next configuration it pushes
-around where the tile really is (§33.7's *preset changed mid-drag*), and offer
-`Reset position` during the session in which the tile was dragged.
+one thing it cannot do otherwise: build the next configuration it pushes around
+where the tile really is (§33.7's *preset changed mid-drag*).
 
 Never sent in window mode, where the preview is a separate captioned object and
 dragging it moves nothing else (design `1e`).
@@ -587,7 +590,7 @@ Overlay → native:
 | `command` | `{ command: String }` — forwarded to `relay/overlay/events` |
 | `contentSize` | `{ width, height }` — resizes the window to fit its content |
 | `beginMove` | — hands the drag to the platform's own window-move loop; a **success with nothing started** on a window that cannot move |
-| `chooseInputDevice` | `{ kind, deviceId, off }` — a row of the input menu was chosen; or `{ kind, preset }` / `{ kind, corner }` / `{ kind, resetPosition }` from the camera sheet, which the host forwards **without** closing the window |
+| `chooseInputDevice` | `{ kind, deviceId, off }` — a row of the input menu was chosen; or `{ kind, preset }` / `{ kind, corner }` from the camera sheet, which the host forwards **without** closing the window |
 | `dismissInputMenu` | — Esc, while the menu window happens to hold focus |
 
 **The two aspect ratios are not the same question**, and the keys look

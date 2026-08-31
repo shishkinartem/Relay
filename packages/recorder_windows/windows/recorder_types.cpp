@@ -848,12 +848,12 @@ bool ShouldBeginOverlayMove(bool draggable, bool move_in_flight, bool button_dow
   return draggable && !move_in_flight && button_down;
 }
 
-bool MenuChoiceClosesMenu(bool has_preset, bool has_corner, bool resets_position) {
-  // Everything that is not one of the camera sheet's three extra answers is a
+bool MenuChoiceClosesMenu(bool has_preset, bool has_corner) {
+  // Everything that is not one of the camera sheet's two extra answers is a
   // device row — including `System default`, whose id is null, and `Off`, whose
   // row is the strip's own toggle. Both of those are choices the sheet exists
   // to make, and making one is what closes it (spec 33.4).
-  return !has_preset && !has_corner && !resets_position;
+  return !has_preset && !has_corner;
 }
 
 RECT ClampToWorkArea(const RECT& work_area, const RECT& frame) {

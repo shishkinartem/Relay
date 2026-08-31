@@ -412,19 +412,19 @@ class _CameraPosition extends StatelessWidget {
         CameraCornerTiles(
           // Null while a dragged position is stored — the tile is in none of
           // the four, and drawing one as chosen would say it is.
-          selected: vm.canResetCameraPipPosition ? null : vm.cameraCorner,
+          selected: vm.hasFreeCameraPipPosition ? null : vm.cameraCorner,
           onChoose: vm.setCameraCorner,
         ),
-        if (vm.canResetCameraPipPosition) ...<Widget>[
+        if (vm.cameraTileIsDraggable) ...<Widget>[
           const SizedBox(height: 7),
-          // Offered only once there is something to undo: a tile that is
-          // already on its corner would be put where it already is. What there
-          // is to undo before a recording is a drag from a *previous* session,
-          // which is the only way a free position is ever stored (§33.5).
-          AppButton(
-            label: 'Reset position',
-            variant: AppButtonVariant.ghost,
-            onPressed: vm.resetCameraPipPosition,
+          // With a display source the preview *is* the tile (design `1p`), so
+          // the corner above is where it starts and a drag can put it anywhere.
+          // Said in words because nothing on this screen shows it: the preview
+          // only exists once recording has begun. With a window source there is
+          // nothing to drag (design `1e`), so the corner is the whole answer
+          // and this would be a promise the session does not keep.
+          const AppMonoText(
+            'the tile starts here · drag the preview to move it while recording',
           ),
         ],
       ],

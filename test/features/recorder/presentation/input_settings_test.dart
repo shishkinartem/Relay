@@ -331,9 +331,13 @@ void main() {
       );
     });
 
-    testWidgets('Reset position appears only once there is a drag to undo', (
+    testWidgets('a display source says the corner is only where it starts', (
       WidgetTester tester,
     ) async {
+      // The preview *is* the tile there (design `1p`), so the corner is a
+      // starting point and a drag can put it anywhere. Nothing on this screen
+      // shows that — the preview only exists once recording has begun — so it
+      // is said in words.
       await mount(
         tester,
         settings: const AppSettings(
@@ -341,12 +345,59 @@ void main() {
         ),
       );
 
-      expect(find.text('Reset position'), findsNothing);
+      expect(find.textContaining('drag the preview'), findsOneWidget);
     });
 
-    testWidgets('a position stored by a previous session can be undone', (
+    testWidgets('a window source promises no drag, because there is none', (
       WidgetTester tester,
     ) async {
+      // There the preview is a separate captioned object and not the tile
+      // (design `1e`): the corner chosen here is the whole answer.
+      final FakeRecorder recorder = FakeRecorder();
+      final TestHarness harness = await mount(
+        tester,
+        recorder: recorder,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+        ),
+      );
+      harness.viewModel.selectSource(
+        harness.viewModel.sources.firstWhere(
+          (CaptureSource s) => s.type == CaptureSourceType.window,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CameraCornerTiles), findsOneWidget);
+      expect(find.textContaining('drag the preview'), findsNothing);
+    });
+
+    testWidgets('a dragged tile is drawn as being in none of the four', (
+      WidgetTester tester,
+    ) async {
+      await mount(
+        tester,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+          cameraPipPosition: Offset(0.2, 0.2),
+        ),
+      );
+
+      expect(
+        tester
+            .widget<CameraCornerTiles>(find.byType(CameraCornerTiles))
+            .selected,
+        isNull,
+        reason:
+            'a dragged tile is in none of them; marking one would say it is',
+      );
+    });
+
+    testWidgets('choosing a corner is what puts a dragged tile back', (
+      WidgetTester tester,
+    ) async {
+      // There is no `Reset position` button: with the four corners on screen it
+      // was a fifth way to say the corner the tile already had.
       final TestHarness harness = await mount(
         tester,
         settings: const AppSettings(
@@ -355,20 +406,18 @@ void main() {
         ),
       );
 
-      // No corner is drawn as chosen while the tile is at a free position: it
-      // is in none of the four, and drawing one would say it is.
+      expect(find.text('Reset position'), findsNothing);
+
+      await tester.tap(find.bySemanticsLabel('Lower right picture-in-picture'));
+      await tester.pumpAndSettle();
+
+      expect(harness.settings.settings.cameraPipPosition, isNull);
       expect(
         tester
             .widget<CameraCornerTiles>(find.byType(CameraCornerTiles))
             .selected,
-        isNull,
+        CameraOverlayCorner.bottomRight,
       );
-
-      await tester.tap(find.text('Reset position'));
-      await tester.pumpAndSettle();
-
-      expect(harness.settings.settings.cameraPipPosition, isNull);
-      expect(find.text('Reset position'), findsNothing);
     });
   });
 }

@@ -1094,7 +1094,6 @@ void main() {
               kind: MediaDeviceKind.camera,
               title: 'Camera',
               presets: CameraPipPreset.values,
-              canResetPosition: true,
             ),
             onChoose: _noChoice,
           ),
@@ -1102,7 +1101,32 @@ void main() {
       );
 
       expect(find.byType(CameraPresetTiles), findsNothing);
+    });
+
+    testWidgets('the sheet offers no Reset position row at all', (
+      WidgetTester tester,
+    ) async {
+      // It was a second way to say the corner the tile already had, and its
+      // `lower right` caption named the wrong corner whenever the tile's own
+      // was something else. Choosing a corner is what clears a drag (§33.5).
+      await tester.pumpWidget(
+        host(
+          InputMenuSheet(
+            state: const InputMenuOverlayState(
+              kind: MediaDeviceKind.camera,
+              title: 'Camera',
+              presets: CameraPipPreset.values,
+              corners: CameraOverlayCorner.values,
+            ),
+            onChoose: (_) {},
+            onChoosePreset: (_) {},
+            onChooseCorner: (_) {},
+          ),
+        ),
+      );
+
       expect(find.text('Reset position'), findsNothing);
+      expect(find.byType(CameraCornerTiles), findsOneWidget);
     });
 
     testWidgets('window mode offers four named corners instead of a drag', (
@@ -1157,34 +1181,6 @@ void main() {
 
       expect(find.text('POSITION'), findsNothing);
       expect(find.text('Lower right'), findsNothing);
-    });
-
-    testWidgets('Reset position appears only once the tile has moved', (
-      WidgetTester tester,
-    ) async {
-      int reset = 0;
-      Future<void> mountCamera({required bool moved}) => tester.pumpWidget(
-        host(
-          InputMenuSheet(
-            state: InputMenuOverlayState(
-              kind: MediaDeviceKind.camera,
-              title: 'Camera',
-              presets: CameraPipPreset.values,
-              canResetPosition: moved,
-            ),
-            onChoose: (_) {},
-            onChoosePreset: (_) {},
-            onResetPosition: () => reset++,
-          ),
-        ),
-      );
-
-      await mountCamera(moved: false);
-      expect(find.text('Reset position'), findsNothing);
-
-      await mountCamera(moved: true);
-      await tester.tap(find.text('Reset position'));
-      expect(reset, 1);
     });
   });
 

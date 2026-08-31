@@ -1602,15 +1602,15 @@ void OverlayWindows::OverlayWindow::HandleCall(
     }
     // A device row closes the menu, and asks the host to do it: a window
     // destroyed from inside its own engine's channel callback would free the
-    // stack that is running. The camera sheet's shape presets, its corners and
-    // `Reset position` leave it open — the tile changes underneath it.
+    // stack that is running. The camera sheet's shape presets and its corners
+    // leave it open — the tile changes underneath it.
     //
     // Not host-initiated: the choice above is already on its way to the
     // application, which closes the menu itself in response. A dismissal beside
     // it would report the same close twice.
-    if (MenuChoiceClosesMenu(OptionalStringAt(*arguments, "preset").has_value(),
-                             OptionalStringAt(*arguments, "corner").has_value(),
-                             BoolAt(*arguments, "resetPosition", false)) &&
+    if (MenuChoiceClosesMenu(
+            OptionalStringAt(*arguments, "preset").has_value(),
+            OptionalStringAt(*arguments, "corner").has_value()) &&
         on_dismiss_) {
       on_dismiss_(/*host_initiated=*/false);
     }

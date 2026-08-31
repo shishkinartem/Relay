@@ -165,7 +165,6 @@ class OverlayPresenter implements SessionOverlays {
     const double presets = 99;
     // `Position`: a kicker, a gap and two rows of corner tiles.
     const double corners = 107;
-    const double resetRow = 34;
     final int rows = state.loading || state.items.isEmpty
         ? 1
         : state.items.length;
@@ -176,7 +175,6 @@ class OverlayPresenter implements SessionOverlays {
           (state.level == null ? 0 : meter) +
           (state.presets.isEmpty ? 0 : presets) +
           (state.corners.isEmpty ? 0 : corners) +
-          (state.canResetPosition ? resetRow : 0) +
           (state.notice == null ? 0 : notice),
     );
   }

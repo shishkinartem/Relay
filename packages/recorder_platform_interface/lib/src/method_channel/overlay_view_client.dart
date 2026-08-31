@@ -91,13 +91,6 @@ class OverlayViewClient {
     'corner': corner.name,
   });
 
-  /// `Reset position` in the camera sheet: put the tile back in its corner.
-  Future<void> resetCameraPipPosition(MediaDeviceKind kind) =>
-      _channel.invokeMethod<void>('chooseInputDevice', <String, Object?>{
-        'kind': kind.name,
-        'resetPosition': true,
-      });
-
   /// Esc while this window happens to hold focus. The host closes the menu and
   /// reports the dismissal itself, so nothing is sent from here twice.
   Future<void> dismissInputMenu() =>

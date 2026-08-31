@@ -1839,7 +1839,7 @@ a labelled device list, the pattern a Zoom user already knows.
 | Contents | `System default`, then devices, current one checked, then `Off` — which is the existing toggle |
 | Microphone sheet | carries the level meter for the selected device, under the list, **fed live** — the sheet renders in its own engine and holds no state, so a level that is not pushed to it is a bar that never moves |
 | System-audio sheet | list only, no meter |
-| Camera sheet | carries the three shape presets (§33.5) instead of a meter — the preview window already is one — plus `Reset position` once the tile has been dragged, and in **window mode** the four named corners |
+| Camera sheet | carries the three shape presets (§33.5) instead of a meter — the preview window already is one — and in **window mode** the four named corners. No `Reset position` row: choosing a corner is what clears a dragged position, and a separate row was a second way to say the corner the tile already had |
 | One at a time | a second chevron replaces the first sheet |
 | Not selectable on this platform | no chevron; the control stays a plain toggle |
 | Closed by the host | reported back to the application, as a selection carrying no device |
@@ -1867,9 +1867,9 @@ and shape are presets. There are **no resize handles**.
 | Rule | |
 |---|---|
 | Position | free, as a fraction of the canvas; clamped to the `0.01 × canvas width` margin; snaps to a corner within 2% of the canvas width |
-| Chosen before recording | the launch screen's camera section offers the four named corners and `Reset position`, in **both** display and window mode. A **free** position is reachable only by dragging the live preview, which exists only during a session |
+| Chosen before recording | the launch screen's camera section offers the four named corners, in **both** display and window mode, beneath `Shape and size`. With a **display** source it says so in words: the corner is where the tile *starts*, and the preview can be dragged from it once recording has begun. With a window source it says nothing of the kind, because there is nothing to drag. A **free** position is reachable only by that drag, and the live preview exists only during a session |
 | Dragged from | the live preview in display mode, where the preview **is** the tile (design `1p`). In window mode the preview is not the tile (design `1e`), so there the corner chosen before or during recording is the only placement, and the camera sheet the strip's chevron opens is where it is changed mid-recording |
-| Choosing a corner | clears any stored free position — the two are alternative answers to one question, and a stored fraction would silently win over the corner just chosen |
+| Choosing a corner | clears any stored free position — the two are alternative answers to one question, and a stored fraction would silently win over the corner just chosen. This is also how a dragged tile is put back: there is no separate `Reset position`, because with the four corners on screen it is a fifth way to say the corner the tile already has. While a free position is stored, **no** corner is drawn as chosen: the tile is in none of them |
 | A preset change | keeps the position. The new size is applied around the tile's existing **anchor** — its place within the canvas' free space on each axis — then re-clamped and re-snapped. A corner-flush tile stays corner-flush and a centred one stays centred. Holding the top-left instead would pull a lower-right tile 115 points inside the right margin on a 1920-wide canvas, which reads as the position having been reset |
 | A preset or a corner | leaves the sheet open. The tile changes under it, and comparing three shapes or four corners must not cost a reopen each time |
 | Applied | between frames, for the next frame; the encoder canvas never changes, so the file keeps one continuous video track |

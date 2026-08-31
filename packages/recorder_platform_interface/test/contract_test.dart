@@ -949,7 +949,6 @@ void main() {
           MediaDeviceKind.camera,
           CameraOverlayCorner.topLeft,
         ),
-        const InputMenuSelection.resetTilePosition(MediaDeviceKind.camera),
       ]) {
         expect(InputMenuSelection.tryFromMap(original.toMap()), original);
       }
@@ -965,7 +964,6 @@ void main() {
 
       expect(decoded?.preset, isNull);
       expect(decoded?.corner, isNull);
-      expect(decoded?.resetPosition, isFalse);
     });
 
     test('the menu state round-trips its shapes and corners', () {
@@ -976,7 +974,6 @@ void main() {
         selectedPreset: CameraPipPreset.square,
         corners: CameraOverlayCorner.values,
         selectedCorner: CameraOverlayCorner.topRight,
-        canResetPosition: true,
       );
 
       final InputMenuOverlayState decoded = InputMenuOverlayState.fromMap(
@@ -987,7 +984,6 @@ void main() {
       expect(decoded.selectedPreset, CameraPipPreset.square);
       expect(decoded.corners, original.corners);
       expect(decoded.selectedCorner, CameraOverlayCorner.topRight);
-      expect(decoded.canResetPosition, isTrue);
     });
 
     test('a shape or corner this build cannot read is dropped', () {

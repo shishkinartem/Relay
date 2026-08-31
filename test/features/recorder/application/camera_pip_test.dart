@@ -531,26 +531,20 @@ void main() {
       );
     });
 
-    test('a drag makes Reset position offerable', () async {
-      // The row is drawn from `canResetPosition`, which used to read only the
-      // *stored* position — written at teardown — so it was false for the whole
-      // session in which the tile had actually been dragged.
+    test('a drag is visible to the placement control at once', () async {
+      // This used to read only the *stored* position — written at teardown — so
+      // no placement control could tell the tile had been dragged during the
+      // very session in which it had been.
       final TestHarness harness = await TestHarness.create();
       addTearDown(harness.dispose);
       await harness.initialize();
       await harness.viewModel.requestStart();
 
-      expect(
-        harness.viewModel.menuStateFor(MediaDeviceKind.camera).canResetPosition,
-        isFalse,
-      );
+      expect(harness.viewModel.hasFreeCameraPipPosition, isFalse);
 
       await harness.reportCameraDrag(const Offset(0.2, 0.2));
 
-      expect(
-        harness.viewModel.menuStateFor(MediaDeviceKind.camera).canResetPosition,
-        isTrue,
-      );
+      expect(harness.viewModel.hasFreeCameraPipPosition, isTrue);
     });
 
     test('a corner chosen after a drag wins, and is what is stored', () async {
@@ -614,18 +608,21 @@ void main() {
       expect(harness.viewModel.cameraOverlay.position, isNotNull);
     });
 
-    test('Reset position after a drag clears it for good', () async {
+    test('the corner already chosen is what puts a dragged tile back', () async {
+      // There is no separate `Reset position`: with the four corners on screen
+      // it was a fifth way to say the corner the tile already had.
       final TestHarness harness = await TestHarness.create();
       addTearDown(harness.dispose);
       await harness.initialize();
       await harness.viewModel.requestStart();
       await harness.reportCameraDrag(const Offset(0.2, 0.2));
 
-      await harness.viewModel.resetCameraPipPosition();
+      await harness.viewModel.setCameraCorner(harness.viewModel.cameraCorner);
       await harness.viewModel.stop();
 
       expect(harness.viewModel.cameraOverlay.position, isNull);
       expect(harness.settings.settings.cameraPipPosition, isNull);
+      expect(harness.viewModel.hasFreeCameraPipPosition, isFalse);
     });
 
     test('the position survives a settings round trip', () {
