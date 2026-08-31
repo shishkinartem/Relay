@@ -149,6 +149,14 @@ on the default 16:9.
 ```text
 NOT RUN: Windows native build (packages/recorder_windows/windows/CMakeLists.txt)
 Reason: no MSVC toolchain, no Windows SDK and no cmake on the development host (macOS).
+That is no longer the whole reason. `.github/workflows/ci.yml` already carries the two
+jobs that would compile all of this on a real Windows host — `native-windows` runs the
+cmake/ctest suite and `build-windows` runs `flutter build windows`, both on
+`windows-2022`. Neither has ever seen this work: checked 2026-08-30, the branch carrying
+it has never been pushed and the commit is not on `main`, so no CI run exists for it.
+The compile half is therefore a push away rather than a hardware problem. The DPI
+question under *The movable control strip* is the part that genuinely still needs a
+physical two-monitor machine, which CI's single virtual display cannot provide.
 
 RED IN CI: Windows native unit tests (packages/recorder_windows/windows/test)
 Reason: not the development host's gap. CI's `native-windows` job configures and
@@ -288,6 +296,23 @@ if it does not, that same resize makes it strictly worse. Whoever has a Windows
 machine should drag the strip across a scale boundary, log the view's device
 pixel ratio and the host window's DPI on each side, and only then choose.
 
+Two halves of that question are already settled by reading the sources, and do
+not need the machine (checked 2026-08-30):
+
+- the process really is `PerMonitorV2`. `windows/runner/runner.exe.manifest`
+  declares it, so Windows does notify the whole window tree and the host window
+  does receive `WM_DPICHANGED`.
+- the host already hands that message to the engine. `OverlayWindow::HandleMessage`
+  forwards **every** message to `controller_->HandleTopLevelWindowProc` before its
+  own switch, `WM_DPICHANGED` included, so "forward the DPI change to the view
+  controller" is not the missing piece of the second remedy — only the forced
+  re-measure after it would be.
+
+What is still unknown, and is exactly what the two-monitor run has to answer, is
+whether the Flutter embedder acts on that message for a view parented in with
+`SetParent` — that is, whether the view's device pixel ratio actually changes.
+Nothing in the sources decides it.
+
 **Keyboard movement and `Reset position` exist on the wire and nowhere else.**
 `OverlayCommand.resetStripPosition` and the eight nudge commands are declared,
 both hosts answer them, and the application dispatches each into the one
@@ -385,7 +410,9 @@ keeping because they are not documented anywhere else:
 ## Known gaps
 
 - **Windows is written but not built.** No MSVC toolchain on the development
-  host — see *Not verified* above.
+  host, and — the half that is actually actionable — the branch carrying the
+  work has never been pushed, so CI's `native-windows` and `build-windows` jobs
+  have never seen it. See *Not verified* above.
 - ~~**`deviceId` on `startInputMetering` is not honoured by either platform.**~~
   **Closed.** Both hosts now take the id from the call — macOS at
   `RecorderMacosPlugin.startInputMetering` → `meter.start(kind:deviceId:)`,
