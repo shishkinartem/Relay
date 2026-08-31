@@ -99,6 +99,10 @@ class _ControlStripWindowState extends State<ControlStripWindow>
   Widget build(BuildContext context) {
     WidgetsBinding.instance.addPostFrameCallback(_reportSize);
     return RelayTheme(
+      // No ground. The strip paints its own frame, and its window is never
+      // shrunk (see `OverlayWindows.apply`), so any surplus has to be the
+      // user's screen rather than a pale rectangle beside the strip.
+      ground: null,
       child: _NudgeShortcuts(
         onNudge: _client.send,
         child: Align(

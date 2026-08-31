@@ -1124,7 +1124,7 @@ final class OverlayWindowController {
   /// to commit into. When the size genuinely did change, the panel is ordered
   /// front *first* so the commit has somewhere to land.
   private func place(_ panel: NSPanel, at frame: NSRect) {
-    let target = apply(panel, frame: frame)
+    let target = apply(panel, frame: frame, sizeIsTheContent: panel === previewPanel)
     if OverlayPlacementGeometry.needsResize(from: panel.frame, to: target) {
       panel.orderFrontRegardless()
       panel.setFrame(target, display: true)
@@ -1144,7 +1144,20 @@ final class OverlayWindowController {
   /// Returns the frame that may actually be applied: the requested origin
   /// always, and a size that never shrinks and never returns to one the panel
   /// has already rendered.
-  private func apply(_ panel: NSPanel, frame: NSRect) -> NSRect {
+  /// [sizeIsTheContent] exempts a panel whose size *is* what the user sees.
+  ///
+  /// The camera preview in display mode is the composited picture-in-picture
+  /// (design `1p`): its window frame is the tile rect, so holding it at a
+  /// high-water size would draw a tile that is not the tile in the file — the
+  /// exact disagreement `1p` exists to forbid. It therefore keeps resizing, and
+  /// keeps the crash risk that comes with it. The proper answer is a fixed
+  /// window with the tile drawn inside it, which is a larger change than this
+  /// one and is not attempted here; until then this is a stated trade, not an
+  /// oversight. Neither crash was on this engine.
+  private func apply(
+    _ panel: NSPanel, frame: NSRect, sizeIsTheContent: Bool = false
+  ) -> NSRect {
+    guard !sizeIsTheContent else { return frame }
     let key = ObjectIdentifier(panel)
     let scale = panel.backingScaleFactor
     let action = OverlayPlacementGeometry.panelSizeAction(
@@ -1446,7 +1459,7 @@ final class OverlayWindowController {
   /// resize as far as the engine's surface cache is concerned. That is why this
   /// goes through `apply` too, rather than trusting its own name.
   private func move(_ panel: NSPanel, to frame: NSRect) {
-    let target = apply(panel, frame: frame)
+    let target = apply(panel, frame: frame, sizeIsTheContent: panel === previewPanel)
     guard panel.frame != target else { return }
     panel.setFrame(target, display: true)
   }
