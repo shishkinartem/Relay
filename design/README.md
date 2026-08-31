@@ -125,6 +125,16 @@ polished UX for them — see the "Missing states" rule in
 - a muted state for the system-audio glyph — `1f` and `1g` only ever draw it on.
   The implementation reuses the system's own slash treatment from mic-off and
   camera-off (`AppIcons.systemAudioOff`, marked `design gap:` in the source).
+- **the whole camera picture-in-picture control**: neither the `Shape and size`
+  presets nor the `Position` corners appear anywhere in the canvas —
+  `grep -c "Shape and size"` returns 0 in both the `.dc.html` and
+  `preview.html`. `1h` draws the tile's *geometry*, not a control for it, and
+  the presets and the free position both post-date the connected design (§33.5,
+  accepted 2026-08-30). The implementation draws each preset at its own
+  proportions and each corner as a frame with the tile in it, in one shared
+  component per choice — `CameraPresetTiles` and `CameraCornerTiles`, both
+  marked `design gap:` in the source, both used unchanged by the launch screen
+  and by the camera sheet so the two placements cannot drift.
 
 `1d`'s annotation also no longer matches the implemented behaviour. It describes
 a blocking screen for any explicitly enabled source whose permission is refused;

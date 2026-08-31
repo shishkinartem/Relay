@@ -216,6 +216,8 @@ class _Details extends StatelessWidget {
         if (kind == MediaDeviceKind.camera) ...<Widget>[
           const SizedBox(height: 9),
           const _CameraPresets(),
+          const SizedBox(height: 9),
+          const _CameraPosition(),
         ],
         if (vm.canMeter(kind)) ...<Widget>[
           const SizedBox(height: 9),
@@ -371,6 +373,60 @@ class _CameraPresets extends StatelessWidget {
           selected: vm.cameraPreset,
           onChoose: vm.setCameraPreset,
         ),
+      ],
+    );
+  }
+}
+
+/// Where the tile goes, chosen before recording (§33.5).
+///
+/// The shape could be chosen here and the place could not, in either mode: the
+/// only placement control that existed was the camera sheet's, which the strip
+/// opens during a recording and which offers corners in window mode alone. A
+/// user who wanted the tile out of the lower right had to start a recording to
+/// move it.
+///
+/// **Corners only, deliberately.** A free position is what a drag produces, and
+/// a drag needs the live preview, which exists only inside a session. Offering
+/// a free position here would need a canvas proxy the design does not have, and
+/// inventing one is exactly what `CLAUDE.md` says not to do — so this offers
+/// the four places that *are* nameable without a picture of the screen.
+///
+/// **design gap:** the connected design draws no camera placement control, and
+/// no `Shape and size` block either; both post-date it. Recorded in
+/// `design/README.md` rather than designed around here.
+class _CameraPosition extends StatelessWidget {
+  const _CameraPosition();
+
+  @override
+  Widget build(BuildContext context) {
+    final RecorderViewModel vm = AppScope.of(context).recorder;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        const AppKicker('Position'),
+        const SizedBox(height: 7),
+        // The same component the camera sheet draws during recording, for the
+        // same reason the presets share one: two drawings of one choice drift.
+        CameraCornerTiles(
+          // Null while a dragged position is stored — the tile is in none of
+          // the four, and drawing one as chosen would say it is.
+          selected: vm.canResetCameraPipPosition ? null : vm.cameraCorner,
+          onChoose: vm.setCameraCorner,
+        ),
+        if (vm.canResetCameraPipPosition) ...<Widget>[
+          const SizedBox(height: 7),
+          // Offered only once there is something to undo: a tile that is
+          // already on its corner would be put where it already is. What there
+          // is to undo before a recording is a drag from a *previous* session,
+          // which is the only way a free position is ever stored (§33.5).
+          AppButton(
+            label: 'Reset position',
+            variant: AppButtonVariant.ghost,
+            onPressed: vm.resetCameraPipPosition,
+          ),
+        ],
       ],
     );
   }

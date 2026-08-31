@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import 'package:relay/app/app_scope.dart';
 import 'package:relay/core/environment/app_environment.dart';
 import 'package:relay/core/logging/app_logger.dart';
@@ -122,6 +123,15 @@ class TestHarness {
   }
 
   Future<void> initialize() => viewModel.initialize();
+
+  /// The host reporting that the tile was dragged to [position] (§33.5).
+  ///
+  /// Awaited to the next microtask turn, because the view model reacts to the
+  /// event on the stream rather than in the call that raised it.
+  Future<void> reportCameraDrag(Offset position) async {
+    overlays.cameraMoveController.add(CameraPreviewMove(position));
+    await Future<void>.delayed(Duration.zero);
+  }
 
   Widget wrap(Widget child) => RelayTheme(
     child: AppScope(

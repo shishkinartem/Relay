@@ -66,6 +66,12 @@ Errors are typed states/results rather than arbitrary UI strings.
   frame; alternating two sizes in one main-loop turn can hand the engine a back
   buffer of the wrong size, and the render target that results has no colour
   attachment. See `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md`;
+- the camera preview obeys that rule by being sized for **every** preset rather
+  than for the one it is showing. Its window takes the bounding size of all
+  three (`CameraOverlayConfiguration.boundingTileSize`) and the tile is drawn as
+  a rectangle inside it, sent on `cameraPreviewState`. Sizing the window to the
+  tile made `Camera → Square → Camera` — one press each way — a literal
+  A → B → A, which is why the preview was the last panel still alternating;
 - overlay placement is resolved against the display the main application window
   was on when the session started (§5). That window is hidden for the whole
   session, so the display is pinned at the first show rather than re-resolved

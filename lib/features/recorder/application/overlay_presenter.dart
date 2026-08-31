@@ -38,6 +38,10 @@ abstract interface class SessionOverlays {
   /// Choices made in the menu.
   Stream<InputMenuSelection> get menuSelections;
 
+  /// Where the tile was dragged to, once the host has clamped and snapped it
+  /// (§33.5). Silent on a host whose preview is not the tile.
+  Stream<CameraPreviewMove> get cameraPreviewMoves;
+
   /// Pushes a snapshot for the strip to draw.
   Future<void> push(RecordingOverlayState state);
 
@@ -189,6 +193,10 @@ class OverlayPresenter implements SessionOverlays {
 
   @override
   Stream<InputMenuSelection> get menuSelections => _overlays.menuSelections;
+
+  @override
+  Stream<CameraPreviewMove> get cameraPreviewMoves =>
+      _overlays.cameraPreviewMoves;
 
   @override
   Future<void> nudgeControlStrip(double dx, double dy) =>

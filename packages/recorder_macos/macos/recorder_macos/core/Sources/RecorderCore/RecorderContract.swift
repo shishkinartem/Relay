@@ -328,6 +328,69 @@ public struct CameraOverlayConfiguration {
     return min(max(value, margin), upper)
   }
 
+  /// A copy carrying `preset`'s own size and shape, and nothing else of it.
+  ///
+  /// Mirrors `CameraOverlayConfiguration.forPreset` in
+  /// `recorder_platform_interface` — that file is the authority, this is the
+  /// copy `swift test` executes. The position, the corner and the margin are
+  /// kept, because a preset says nothing about where the tile goes.
+  ///
+  /// Here so the host can ask what the *other* presets would measure without
+  /// waiting for Dart to send them, which is what `boundingTileSize` needs.
+  public func sized(for preset: CameraPipPreset) -> CameraOverlayConfiguration {
+    var sized = self
+    sized.preset = preset
+    sized.requestedFit = nil
+    switch preset {
+    case .camera:
+      sized.widthRatio = CameraOverlayConfiguration.cameraPresetWidthCap
+      sized.followsSourceAspectRatio = true
+      sized.cornerRadiusRatio = 0
+    case .square, .circle:
+      sized.widthRatio = CameraOverlayConfiguration.smallPresetWidth
+      sized.aspectRatio = 1
+      sized.followsSourceAspectRatio = false
+      sized.cornerRadiusRatio = preset == .circle ? 0.5 : 0
+    }
+    return sized
+  }
+
+  /// The smallest size that holds this tile at **every** preset (§33.5).
+  ///
+  /// The camera preview window is sized to this once per show and then only
+  /// moved, because a panel hosting a `FlutterView` that is driven through
+  /// size A → B → A can be handed a surface of the wrong size and crash its
+  /// raster thread (flutter/flutter#185394, `OverlayPlacementGeometry`). The
+  /// tile is 0.16 x the canvas at the camera's own shape on one preset and a
+  /// 0.10 square on the other two, so `Camera → Square → Camera` — one press
+  /// each way — is a literal A → B → A. Sizing for all three removes the
+  /// alternation instead of forbidding the presses.
+  ///
+  /// Two canvases, as everywhere else here: the `camera` preset's width cap is
+  /// resolved against the **encoder** canvas, where the sensor's pixels are the
+  /// thing being compared, and the rectangle is then measured on the canvas the
+  /// window lives on, which is in points.
+  public func boundingTileSize(
+    canvasWidth: Double, canvasHeight: Double, encoderCanvasWidth: Double,
+    sourceAspectRatio: Double?, sourceWidth: Int?
+  ) -> CGSize {
+    var bounds = CGSize.zero
+    for preset in [CameraPipPreset.camera, .square, .circle] {
+      var candidate = sized(for: preset)
+      if encoderCanvasWidth > 0 {
+        candidate = candidate.resolvedForCamera(
+          canvasWidth: encoderCanvasWidth, sourceWidth: sourceWidth)
+      }
+      let size = candidate.rect(
+        canvasWidth: canvasWidth, canvasHeight: canvasHeight,
+        sourceAspectRatio: sourceAspectRatio
+      ).size
+      bounds.width = max(bounds.width, size.width)
+      bounds.height = max(bounds.height, size.height)
+    }
+    return bounds
+  }
+
   /// Pulls a nearly-cornered tile onto the corner exactly.
   ///
   /// "Put it back in the corner" is one gesture rather than a pixel hunt, and a

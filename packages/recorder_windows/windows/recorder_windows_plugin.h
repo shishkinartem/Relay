@@ -90,9 +90,22 @@ class RecorderWindowsPlugin : public flutter::Plugin {
   // the application stops believing a window that is already gone is still open
   // (spec 33.4, platform-channel-contract "input-menu map").
   void EmitMenuDismissal(MediaDeviceKind kind);
-  // The one place either of the two reaches the overlay event sink, so a choice
-  // and a dismissal cannot drift apart in how they are delivered.
-  void EmitOverlayChoiceMap(flutter::EncodableMap map);
+  // The preview was dragged, and it is the tile: where it landed, as a fraction
+  // of the canvas, once the margin clamp and the corner snap have had their say
+  // (spec 33.5).
+  //
+  // A third shape on this channel, named by an `event` key rather than by a
+  // `kind`, which is how Dart tells it from an input-menu choice. It has to be
+  // sent: the application builds the configuration it pushes on the next preset
+  // change out of the position it holds, and a drag only the host knew about
+  // was discarded by every one of them (spec 33.7, "preset changed mid-drag").
+  //
+  // Never sent in window mode, where the preview is not the tile (design 1e)
+  // and `SetCameraMovedHandler` is never called.
+  void EmitCameraPreviewMoved(double x, double y);
+  // The one place any of the three reaches the overlay event sink, so they
+  // cannot drift apart in how they are delivered.
+  void EmitOverlayMap(flutter::EncodableMap map);
   void EmitInputLevel(MediaDeviceKind kind, const InputLevelSample& level);
   // Named no kind: what Windows reports is an audio endpoint change, and
   // "re-read everything" is the only instruction that is also true of the

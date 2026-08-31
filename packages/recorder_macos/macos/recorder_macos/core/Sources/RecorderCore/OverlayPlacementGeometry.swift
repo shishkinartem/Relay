@@ -227,6 +227,69 @@ public enum OverlayPlacementGeometry {
       height: frame.height)
   }
 
+  /// Where the camera preview window goes so that it holds `tile` at `size`.
+  ///
+  /// The window is **larger than the tile** and never resized: it is sized once
+  /// to what every preset needs (`CameraOverlayConfiguration.boundingTileSize`)
+  /// and only moved after that, because a panel driven through size A → B → A
+  /// can be handed a surface of the wrong size and crash its raster thread —
+  /// `panelSizeAction` below carries the whole argument. The tile is then drawn
+  /// as a rectangle *inside* the window, at `contentRect`, and everything
+  /// around it is left transparent so the compositor's promise still holds:
+  /// what is on screen is exactly what is in the file (design `1p`).
+  ///
+  /// The tile is centred in the window where there is room for that, so the
+  /// transparent surplus is spread rather than hung off one side, and the
+  /// window is then pulled back onto the display. **Containment wins over
+  /// staying on screen**: a tile flush to the right margin on a preset that is
+  /// itself the widest leaves no slack at all, and shifting the window to keep
+  /// its last points on the display would push part of the tile outside the
+  /// window that is drawing it.
+  public static func previewWindowFrame(
+    tile: CGRect, size: CGSize, inDisplayFrame display: CGRect
+  ) -> CGRect {
+    CGRect(
+      origin: CGPoint(
+        x: previewWindowOrigin(
+          tileMin: tile.minX, tileExtent: tile.width, windowExtent: size.width,
+          displayMin: display.minX, displayExtent: display.width),
+        y: previewWindowOrigin(
+          tileMin: tile.minY, tileExtent: tile.height,
+          windowExtent: size.height, displayMin: display.minY,
+          displayExtent: display.height)),
+      size: size)
+  }
+
+  /// One axis of `previewWindowFrame`.
+  private static func previewWindowOrigin(
+    tileMin: CGFloat, tileExtent: CGFloat, windowExtent: CGFloat,
+    displayMin: CGFloat, displayExtent: CGFloat
+  ) -> CGFloat {
+    let centred = tileMin + (tileExtent - windowExtent) / 2
+    let onDisplay = min(
+      max(centred, displayMin), max(displayMin + displayExtent - windowExtent, displayMin))
+    // Last, so it is the rule that survives a conflict: a window that has been
+    // shifted off the tile is drawing a tile with a piece missing, which is
+    // worse than a window whose transparent edge hangs off the display.
+    return min(max(onDisplay, tileMin + tileExtent - windowExtent), tileMin)
+  }
+
+  /// `tile` expressed inside `window`, top-left origin — what the preview
+  /// engine is told to draw in.
+  ///
+  /// The window is AppKit's, bottom-left; Flutter lays out from the top, and
+  /// the contract already expresses every rectangle that crosses it top-left.
+  /// Taken from the window's **actual** frame rather than the one that was
+  /// requested, because `panelSizeAction` may hold a panel larger than the
+  /// request and the tile has to be drawn where it really is.
+  public static func contentRect(of tile: CGRect, inWindow window: CGRect)
+    -> CGRect
+  {
+    CGRect(
+      x: tile.minX - window.minX, y: window.maxY - tile.maxY,
+      width: tile.width, height: tile.height)
+  }
+
   /// An anchored dock, resolved against the display's **usable** area.
   ///
   /// `visibleFrame`, not `frame`: the control strip has to land under the menu

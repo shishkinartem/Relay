@@ -501,6 +501,13 @@ RecorderWindowsPlugin::RecorderWindowsPlugin(flutter::PluginRegistrarWindows* re
     // The window is already where the drag left it, and it was put there by the
     // same arithmetic; re-placing it would be a second move for nothing.
     ApplyCameraOverlay(moved, /*from_preview=*/true);
+    // And the application is told, because the configuration it pushes on the
+    // next preset change is built from the position *it* holds (spec 33.5).
+    // This used to be pulled instead, at teardown, by `cameraPreviewPosition` —
+    // which reports the window's rectangle whether the user dragged it there or
+    // the corner rule put it there, so a session that never touched the tile
+    // still stored a free position and the corner stopped being consulted.
+    EmitCameraPreviewMoved(x, y);
   });
 
   // Configured once, before anything can start metering. The meter is not
@@ -713,7 +720,7 @@ void RecorderWindowsPlugin::EmitMenuChoice(flutter::EncodableMap choice) {
   // The one field the host owns is `dismissed`: a choice is never one, and
   // stating it keeps the two shapes this channel emits identical in outline.
   choice[flutter::EncodableValue("dismissed")] = flutter::EncodableValue(false);
-  EmitOverlayChoiceMap(std::move(choice));
+  EmitOverlayMap(std::move(choice));
 }
 
 void RecorderWindowsPlugin::EmitMenuDismissal(MediaDeviceKind kind) {
@@ -727,16 +734,30 @@ void RecorderWindowsPlugin::EmitMenuDismissal(MediaDeviceKind kind) {
   dismissal[flutter::EncodableValue("deviceId")] = flutter::EncodableValue();
   dismissal[flutter::EncodableValue("off")] = flutter::EncodableValue(false);
   dismissal[flutter::EncodableValue("dismissed")] = flutter::EncodableValue(true);
-  EmitOverlayChoiceMap(std::move(dismissal));
+  EmitOverlayMap(std::move(dismissal));
 }
 
-void RecorderWindowsPlugin::EmitOverlayChoiceMap(flutter::EncodableMap map) {
+void RecorderWindowsPlugin::EmitCameraPreviewMoved(double x, double y) {
+  flutter::EncodableMap moved;
+  // Named by `event` rather than by `kind`: an input-menu choice is the map
+  // this channel already carries, and Dart decodes both by shape. A map with a
+  // `kind` is a choice; this one is not, and must never grow one.
+  moved[flutter::EncodableValue("event")] =
+      flutter::EncodableValue(std::string("cameraPreviewMoved"));
+  moved[flutter::EncodableValue("x")] = flutter::EncodableValue(x);
+  moved[flutter::EncodableValue("y")] = flutter::EncodableValue(y);
+  EmitOverlayMap(std::move(moved));
+}
+
+void RecorderWindowsPlugin::EmitOverlayMap(flutter::EncodableMap map) {
   RunOnPlatformThread([this, map = std::move(map)]() {
     std::lock_guard<std::mutex> lock(sink_mutex_);
     if (overlay_sink_) {
       // A map beside the bare command names this channel already emits. Dart
-      // decodes by shape, so a command must never become a map and a choice
-      // must never become a string.
+      // decodes by shape, so a command must never become a map, and a map must
+      // never become a string. Which map it is, the two shapes tell apart
+      // between themselves: a `kind` is an input-menu choice, an `event` is
+      // everything else.
       overlay_sink_->Success(flutter::EncodableValue(map));
     }
   });

@@ -328,6 +328,90 @@ class CameraOverlayConfiguration {
     );
   }
 
+  /// This configuration's tile, anchored where [previous]'s tile sat (§33.5).
+  ///
+  /// A preset changes the tile's **size**, and a size has to be applied around
+  /// something. Holding the top-left is the obvious choice and the wrong one:
+  /// a tile flush to the lower-right corner would be pulled 115 points inside
+  /// the right margin by `Camera → Square` on a 1920-wide canvas — far enough
+  /// that the snap does not catch it, and near enough to the default that the
+  /// user reads it as the position having been reset. §33.7's "preset changed
+  /// mid-drag" row forbids exactly that.
+  ///
+  /// What is held instead is the tile's place **within the canvas' free
+  /// space**, on each axis independently: the distance from the near edge as a
+  /// fraction of the room a tile of that size has to move in. Flush to an edge
+  /// is `0` or `1` and stays flush at any size; dead centre is `0.5` and stays
+  /// centred; everything between moves proportionally rather than jumping at a
+  /// midpoint the way a "hold whichever edge is nearer" rule would.
+  ///
+  /// Returns this configuration untouched when [previous] has no free
+  /// position: a corner is already a live rule that survives a size change, and
+  /// writing a fraction for it would replace the rule with a snapshot of it —
+  /// the defect `_rememberCameraPipPosition` exists to avoid.
+  ///
+  /// **The sizes are this side's estimate**, resolved from the configured
+  /// fallback aspect ratio and the preset's own width cap. Only the host knows
+  /// what the camera actually produces, so the tile it draws can be a different
+  /// shape; it re-resolves this position against the real one and re-clamps and
+  /// re-snaps it, exactly as it does for every other position that reaches it.
+  /// Pass [sourceAspectRatio] and [sourceWidth] wherever they are known.
+  CameraOverlayConfiguration repositionedForSize({
+    required CameraOverlayConfiguration previous,
+    required double canvasWidth,
+    required double canvasHeight,
+    double? sourceAspectRatio,
+    int? sourceWidth,
+  }) {
+    if (previous.position == null || canvasWidth <= 0 || canvasHeight <= 0) {
+      return this;
+    }
+    final Rect before = previous.resolveRect(
+      canvasWidth,
+      canvasHeight,
+      sourceAspectRatio: sourceAspectRatio,
+      sourceWidth: sourceWidth,
+    );
+    final double width =
+        canvasWidth *
+        effectiveWidthRatio(canvasWidth, sourceWidth: sourceWidth);
+    final double height = width / effectiveAspectRatio(sourceAspectRatio);
+    // Each side keeps its own margin. They are the same number today; reading
+    // one for both would make this quietly wrong the day they are not.
+    final double was = canvasWidth * previous.marginRatio;
+    final double now = canvasWidth * marginRatio;
+    return copyWith(
+      position: positionRatio(
+        _anchored(before.left, before.width, width, canvasWidth, was, now),
+        _anchored(before.top, before.height, height, canvasHeight, was, now),
+        canvasWidth,
+        canvasHeight,
+      ),
+    );
+  }
+
+  /// One axis of [repositionedForSize].
+  ///
+  /// A tile with no room to move — one as wide as its canvas, margins included
+  /// — is pinned to the near margin rather than divided by zero, which is the
+  /// same answer [_clampInside] gives it.
+  static double _anchored(
+    double near,
+    double wasExtent,
+    double nowExtent,
+    double canvasExtent,
+    double wasMargin,
+    double nowMargin,
+  ) {
+    final double wasSlack = canvasExtent - 2 * wasMargin - wasExtent;
+    final double nowSlack = canvasExtent - 2 * nowMargin - nowExtent;
+    if (wasSlack <= 0 || nowSlack <= 0) {
+      return nowMargin;
+    }
+    return nowMargin +
+        ((near - wasMargin) / wasSlack).clamp(0.0, 1.0) * nowSlack;
+  }
+
   /// The fraction a tile at [left], [top] on this canvas would be stored as.
   ///
   /// The inverse of [resolveRect]'s free branch, so a drag that reports pixels

@@ -190,6 +190,10 @@ class _UnsupportedOverlays implements OverlayWindowController {
       const Stream<InputMenuSelection>.empty();
 
   @override
+  Stream<CameraPreviewMove> get cameraPreviewMoves =>
+      const Stream<CameraPreviewMove>.empty();
+
+  @override
   Future<void> showCameraPreview(
     OverlayPlacement placement, {
     required bool matchesCompositedPip,

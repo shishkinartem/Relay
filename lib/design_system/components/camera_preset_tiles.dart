@@ -11,6 +11,12 @@ import '../tokens/app_typography.dart';
 /// and the camera sheet the strip's chevron opens during recording. Two drawings
 /// of one choice drift, and the drift is invisible until someone opens both.
 ///
+/// **design gap:** the connected design has no `Shape and size` block, and no
+/// camera placement control either — both post-date it. `1h` draws the tile's
+/// geometry, not a control for it. This draws each preset at its own
+/// proportions so the choice is legible before it is made; see
+/// `design/README.md`.
+///
 /// A presentation component: it renders a selection and raises an intent, so it
 /// works identically inside a widget test, the main window and an overlay
 /// engine.

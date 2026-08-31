@@ -6,6 +6,7 @@ import '../tokens/app_shadows.dart';
 import '../tokens/app_typography.dart';
 import 'app_select.dart';
 import 'app_text.dart';
+import 'camera_corner_tiles.dart';
 import 'camera_preset_tiles.dart';
 import 'level_meter.dart';
 
@@ -149,6 +150,10 @@ class InputMenuSheet extends StatelessWidget {
   /// is a separate captioned object and not the tile (design `1e`): there is
   /// nothing on screen to drag, and nothing that would show where a drag had
   /// put it. A named corner is legible without a preview.
+  ///
+  /// The same component the launch screen's camera section draws before
+  /// recording, so the two placements cannot disagree about what a corner looks
+  /// like — the rule `CameraPresetTiles` already follows beside it.
   Widget _corners() => Container(
     padding: const EdgeInsets.fromLTRB(10, 9, 10, 11),
     decoration: BoxDecoration(
@@ -161,25 +166,12 @@ class InputMenuSheet extends StatelessWidget {
       children: <Widget>[
         const AppKicker('Position'),
         const SizedBox(height: 7),
-        for (int row = 0; row < 2; row++) ...<Widget>[
-          if (row > 0) const SizedBox(height: 5),
-          Row(
-            children: <Widget>[
-              for (final CameraOverlayCorner corner
-                  in state.corners.skip(row * 2).take(2)) ...<Widget>[
-                Expanded(
-                  child: _CornerTile(
-                    corner: corner,
-                    selected: state.selectedCorner == corner,
-                    onPressed: () => onChooseCorner!(corner),
-                  ),
-                ),
-                if (corner != state.corners.skip(row * 2).take(2).last)
-                  const SizedBox(width: 5),
-              ],
-            ],
-          ),
-        ],
+        CameraCornerTiles(
+          corners: state.corners,
+          selected: state.selectedCorner,
+          onChoose: onChooseCorner!,
+          compact: true,
+        ),
       ],
     ),
   );
@@ -221,84 +213,6 @@ class _Message extends StatelessWidget {
     child: Text(
       text,
       style: AppTypography.bodyXSmall.copyWith(color: AppColors.ink(45)),
-    ),
-  );
-}
-
-/// One named corner, drawn as a frame with the tile in the corner it names —
-/// the same "show the choice before it is made" rule the shape presets follow.
-class _CornerTile extends StatelessWidget {
-  const _CornerTile({
-    required this.corner,
-    required this.selected,
-    required this.onPressed,
-  });
-
-  final CameraOverlayCorner corner;
-  final bool selected;
-  final VoidCallback onPressed;
-
-  static const Map<CameraOverlayCorner, Alignment> _alignments =
-      <CameraOverlayCorner, Alignment>{
-        CameraOverlayCorner.topLeft: Alignment.topLeft,
-        CameraOverlayCorner.topRight: Alignment.topRight,
-        CameraOverlayCorner.bottomLeft: Alignment.bottomLeft,
-        CameraOverlayCorner.bottomRight: Alignment.bottomRight,
-      };
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    selected: selected,
-    label: '${corner.label} picture-in-picture',
-    excludeSemantics: true,
-    onTap: onPressed,
-    child: GestureDetector(
-      onTap: onPressed,
-      behavior: HitTestBehavior.opaque,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(7, 6, 7, 6),
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: selected ? AppColors.accent : AppColors.divider,
-            ),
-            color: selected ? AppColors.accentHoverTint : null,
-          ),
-          child: Row(
-            children: <Widget>[
-              Container(
-                width: 22,
-                height: 14,
-                padding: const EdgeInsets.all(2),
-                decoration: BoxDecoration(
-                  border: Border.all(color: AppColors.ink(28)),
-                ),
-                alignment: _alignments[corner],
-                child: Container(
-                  width: 7,
-                  height: 5,
-                  color: AppColors.accent700,
-                ),
-              ),
-              const SizedBox(width: 7),
-              Expanded(
-                child: Text(
-                  corner.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppTypography.bodyXSmall.copyWith(
-                    fontSize: 10.5,
-                    color: selected ? AppColors.accent800 : AppColors.text,
-                    fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     ),
   );
 }

@@ -1867,11 +1867,23 @@ and shape are presets. There are **no resize handles**.
 | Rule | |
 |---|---|
 | Position | free, as a fraction of the canvas; clamped to the `0.01 × canvas width` margin; snaps to a corner within 2% of the canvas width |
-| Dragged from | the live preview in display mode, where the preview **is** the tile (design `1p`); in window mode it is not (design `1e`), so position there is one of the four corners, chosen in the camera sheet the strip's chevron opens |
+| Chosen before recording | the launch screen's camera section offers the four named corners and `Reset position`, in **both** display and window mode. A **free** position is reachable only by dragging the live preview, which exists only during a session |
+| Dragged from | the live preview in display mode, where the preview **is** the tile (design `1p`). In window mode the preview is not the tile (design `1e`), so there the corner chosen before or during recording is the only placement, and the camera sheet the strip's chevron opens is where it is changed mid-recording |
 | Choosing a corner | clears any stored free position — the two are alternative answers to one question, and a stored fraction would silently win over the corner just chosen |
+| A preset change | keeps the position. The new size is applied around the tile's existing **anchor** — its place within the canvas' free space on each axis — then re-clamped and re-snapped. A corner-flush tile stays corner-flush and a centred one stays centred. Holding the top-left instead would pull a lower-right tile 115 points inside the right margin on a 1920-wide canvas, which reads as the position having been reset |
 | A preset or a corner | leaves the sheet open. The tile changes under it, and comparing three shapes or four corners must not cost a reopen each time |
 | Applied | between frames, for the next frame; the encoder canvas never changes, so the file keeps one continuous video track |
-| Persisted | when the session ends normally, so a mid-session experiment does not survive a crash |
+| Persisted | when the session ends normally, **and only if the user dragged the tile**. A tile that sat where its corner put it stores no free position, so the corner stays the live rule for the next session. A mid-session experiment that ends in a crash is not persisted at all |
+| Reported | the host raises one event when a drag settles, carrying where the tile landed. Reading the preview window's position back at teardown cannot answer *whether the user dragged*: the window is at the tile's rectangle either way |
+
+**The preview window is not the tile's rectangle**, on a host that needs it not
+to be. macOS sizes it once to what all three presets need and draws the tile as
+a rectangle inside it, because a panel hosting a Flutter view that is driven
+through size A → B → A can be handed a surface of the wrong size and crash its
+raster thread — and `Camera → Square → Camera` is exactly that (§33.7,
+`docs/architecture/platform-channel-contract.md`). What is on screen is still
+exactly what is in the file: everything outside the tile is transparent and
+takes no press.
 
 **The no-crop invariant changes, deliberately.** §7 and `CLAUDE.md` currently
 say the camera frame is never cropped and never distorted. A 16:9 sensor cannot
@@ -1981,9 +1993,9 @@ revisited, it needs a new decision, not a quiet change.
 | Case | Required behaviour |
 |---|---|
 | Drag past a canvas edge | clamped to the margin |
-| Preset changed mid-drag | the drag ends at the tile's current position; the new preset's size is applied around it, then re-clamped |
+| Preset changed mid-drag | the drag ends at the tile's current position; the new preset's size is applied around that tile's current **anchor**, then re-clamped and re-snapped — §33.5's *a preset change* row |
 | Corner chosen while a free position is stored | the corner wins and the position is cleared, so the tile does not stay where it was dragged |
-| Corner offered with a display source | never — the tile is dragged there, and a corner list would be a second, worse answer to a question already answered better |
+| Corner offered with a display source | never **in the camera sheet** — during a recording the tile is dragged there, and a corner list would be a second, worse answer to a question already answered better. Before recording there is no preview to drag, so the launch screen offers the four corners in both modes |
 | Camera swapped for one with a different shape, on the `Camera` preset | the tile keeps its top-left and width; the height changes; the position is re-clamped if that pushes it out |
 | Camera swapped, on `Square` or `Circle` | nothing moves — the tile is 1:1 whatever the sensor is; only what the centre crop contains changes |
 | A camera narrower than the crop needs | the crop takes the full width and the full height it can; it is never upscaled past the sensor's own pixels |
@@ -2022,8 +2034,8 @@ operating-system name (§28), and recorded in
 
 | Level | Coverage |
 |---|---|
-| Pure/unit | the capturable-window rule (**done**); strip drag, snap and clamp arithmetic; preset resolution and picture-in-picture geometry at every canvas size, both bounds and all three presets |
-| Widget | the disclosure — closed by default, opens, persists; the action sheet's states — loading, empty, selected, device lost, no permission, silent; the meter's dead and clipping states; the strip's click-versus-drag threshold; every reflowing screen at all three widths |
+| Pure/unit | the capturable-window rule (**done**); strip drag, snap and clamp arithmetic; preset resolution and picture-in-picture geometry at every canvas size, both bounds and all three presets; the anchor a preset change is applied around, and the one window size that holds every preset |
+| Widget | the disclosure — closed by default, opens, persists; the action sheet's states — loading, empty, selected, device lost, no permission, silent; the meter's dead and clipping states; the strip's click-versus-drag threshold; every reflowing screen at all three widths; the launch screen's camera placement, and the preview drawing its tile inside a larger window without taking a press outside it |
 | Plugin | device enumeration and `selectInputDevice` payloads, on both platforms or neither |
 | Integration | the third overlay is absent from a recording made from a **display** source; a device swapped mid-recording produces one continuous file; each camera preset lands in the file at the geometry the preview drew |
 | Soak (§24) | repeated microphone swaps during a long recording, verified for A/V sync at the end |

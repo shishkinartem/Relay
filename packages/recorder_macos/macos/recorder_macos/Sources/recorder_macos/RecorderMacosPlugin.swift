@@ -200,9 +200,31 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
     // for the application to read the position back and push it: the drag ran
     // inside AppKit's own loop, and a preview that has moved while the file has
     // not is the disagreement §33.7 calls a defect.
-    overlays.onCameraPreviewMoved = { [weak self] _ in
-      guard let self, let overlay = self.overlays.cameraOverlay else { return }
-      self.session?.setCameraOverlay(overlay)
+    //
+    // The application is told as well, on the events channel, as a map with an
+    // `event` name — beside the bare command strings and the input menu's maps,
+    // which Dart tells apart by shape (§33.4). It has to be told: the
+    // configuration it pushes on the next preset change is built from the
+    // position *it* holds, and a drag only this side knew about was thrown away
+    // by every one of them (§33.5, §33.7's "preset changed mid-drag").
+    //
+    // Pushed rather than left to be pulled at teardown. The old pull asked the
+    // window where it was, which is the tile's rectangle whether the user
+    // dragged it there or the corner rule put it there — so a session that
+    // never touched the tile still stored a free position, and the corner
+    // stopped being consulted from then on.
+    overlays.onCameraPreviewMoved = { [weak self] landed in
+      guard let self else { return }
+      if let overlay = self.overlays.cameraOverlay {
+        self.session?.setCameraOverlay(overlay)
+      }
+      DispatchQueue.main.async {
+        self.overlayEventSink?([
+          "event": "cameraPreviewMoved",
+          "x": Double(landed.x),
+          "y": Double(landed.y),
+        ])
+      }
     }
 
     // Device lists change under the user: a webcam is unplugged, an iPhone

@@ -58,7 +58,7 @@ inspects a message string.
 | `setSystemAudioEnabled` | `enabled: bool` | `null` |
 | `selectInputDevice` | `kind: String`, `deviceId: String?` | `null` — re-points the **running** capture (§33.2). A null id is the platform default |
 | `setCameraOverlay` | camera-overlay map | `null` — the tile's shape and position, applied between frames (§33.5) |
-| `cameraPreviewPosition` | — | `{x, y}` as a fraction of the canvas, or `null` in window mode where the preview is not the tile |
+| `cameraPreviewPosition` | — | `{x, y}` as a fraction of the canvas, or `null` in window mode where the preview is not the tile. **No longer the application's path** — see `cameraPreviewMoved` below |
 | `recoverArtifact` | `path: String` | recording-file map, or `null` |
 | `releaseSession` | — | `null` |
 | `dispose` | — | `null` |
@@ -513,6 +513,43 @@ overlays out of the file (§6).
 
 ## `relay/overlay/events`
 
+Three shapes on one channel, told apart by their form: a bare `String` is a
+command, a `Map` with a `kind` is an input-menu choice, and a `Map` with an
+`event` is everything else. Each stream keeps what it recognises, so a host that
+emits only some of them keeps working untouched.
+
+### `cameraPreviewMoved`
+
+```jsonc
+{"event": "cameraPreviewMoved", "x": 0.83, "y": 0.82}
+```
+
+The camera preview was dragged, and it **is** the tile (display mode, design
+`1p`). `x` and `y` are its new top-left as a fraction of the canvas, **after**
+the host has applied the margin clamp and the corner snap — so it reports where
+the tile actually is, not where the pointer was released.
+
+Both hosts also apply the drag to the running compositor themselves, without
+waiting for the application: the gesture runs inside the platform's own drag
+loop, and a preview that has moved while the file has not is the disagreement
+`1p` forbids. This event is what tells the **application**, which needs it for
+two things it cannot do otherwise — build the next configuration it pushes
+around where the tile really is (§33.7's *preset changed mid-drag*), and offer
+`Reset position` during the session in which the tile was dragged.
+
+Never sent in window mode, where the preview is a separate captioned object and
+dragging it moves nothing else (design `1e`).
+
+**This replaces the `cameraPreviewPosition` pull.** That method asked the window
+where it was, which is the tile's rectangle whether the user dragged it there or
+the corner rule put it there — so the first session with the camera on stored
+the corner's own spot as a *free* position, after which the corner stopped being
+consulted at all. A push says *that the user dragged*, which is the thing being
+asked. The method stays on the interface, and both hosts still answer it, but
+nothing in the application calls it.
+
+### commands
+
 Emits the raised `OverlayCommand` name as a bare `String`:
 `toggleMicrophone`, `toggleCamera`, `toggleSystemAudio`, `pauseOrResume`,
 `stop`, `openMicrophoneMenu`, `openCameraMenu`, `openSystemAudioMenu`,
@@ -541,7 +578,7 @@ Native → overlay:
 |---|---|
 | `controlStripState` | overlay-state map |
 | `inputMenuState` | input-menu map — pushed to the menu engine, forwarded by both hosts untouched |
-| `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio, pipAspectRatio, fit, cornerRadiusRatio }` |
+| `cameraPreviewState` | `{ textureId, mirrored, matchesCompositedPip, aspectRatio, pipAspectRatio, fit, cornerRadiusRatio, contentX?, contentY?, contentWidth?, contentHeight? }` |
 
 Overlay → native:
 
@@ -561,6 +598,28 @@ frame in both modes:
 |---|---|
 | `aspectRatio` | the shape of the **texture** being pushed. macOS sends the camera's own frame ratio in both modes, because it never crops the texture. Windows sends the *tile's* in display mode — `PushFrame` has already cropped — and the camera's in window mode |
 | `pipAspectRatio` | the shape of the **box the picture is drawn into**: the tile's, in both modes. Equal to `aspectRatio` in display mode, where the window *is* the tile |
+
+`contentX` / `contentY` / `contentWidth` / `contentHeight` are the rectangle
+**inside the window** the preview draws in, top-left origin, in the window's own
+logical points. All four or none: part of a rectangle is not a rectangle, and
+their absence means *the window is the picture*, which is what a host that has
+not learned the keys means.
+
+They exist because a host may have to make the window bigger than the picture.
+macOS does, in display mode: a panel hosting a `FlutterView` that is driven
+through size A → B → A can be handed a surface of the wrong size and crash its
+raster thread (flutter/flutter#185394), and the tile is `0.16 × canvas` at the
+camera's shape on the `Camera` preset and a `0.10` square on the other two — so
+`Camera → Square → Camera`, one press each way, is exactly that alternation. The
+window is therefore sized once to what all three presets need and only moved
+afterwards, and the tile is drawn here inside it. **Windows sends none of the
+four**: its preview window is the tile, and its overlay windows are a different
+mechanism entirely (`SetWindowRgn`, not a transparent layered window), so it has
+no alternation to remove.
+
+Everything outside the rectangle is left transparent and takes no press: the
+surplus is the user's own screen showing through, and a drag handle spanning the
+whole window would move a picture that is not under the pointer.
 
 `fit` and `cornerRadiusRatio` carry the preset's crop and mask **in both modes**.
 The compositor has no source-type gate, so a window recording gets the chosen
@@ -594,7 +653,9 @@ The strip then belongs to whichever display holds its centre.
 
 There is deliberately no per-move message: §3 keeps this channel for commands,
 and the operating system already has a drag loop that runs at the display's
-refresh rate.
+refresh rate. The camera preview's `cameraPreviewMoved` is not one either — it
+is raised once, when the drag has ended and the tile has been clamped and
+snapped, and it travels on the events channel rather than this one.
 
 `textureId` is registered against the preview engine's own texture registry, so
 it is meaningful only inside that engine and never crosses into the main one.

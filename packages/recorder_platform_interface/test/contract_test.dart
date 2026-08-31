@@ -815,7 +815,7 @@ void main() {
     });
   });
 
-  group('one overlay event channel, two shapes (§33.4)', () {
+  group('one overlay event channel, three shapes (§33.4, §33.5)', () {
     const EventChannel channel = EventChannel('relay/overlay/events');
 
     setUp(() {
@@ -834,6 +834,11 @@ void main() {
                 sink.success(<Object?, Object?>{
                   'kind': 'camera',
                   'dismissed': true,
+                });
+                sink.success(<Object?, Object?>{
+                  'event': 'cameraPreviewMoved',
+                  'x': 0.58,
+                  'y': 0.30,
                 });
               },
             ),
@@ -902,6 +907,30 @@ void main() {
       );
       expect(selections.last.deviceId, isNull);
       expect(selections.last.off, isFalse);
+    });
+
+    test('a dragged tile is a third shape, and only that stream sees it', () {
+      // The application has to be told where the tile went: it builds the
+      // configuration it pushes on the next preset change out of the position
+      // it holds, and a drag only the host knew about was thrown away by every
+      // one of them (§33.5).
+      final MethodChannelOverlayWindowController overlays =
+          MethodChannelOverlayWindowController();
+
+      expect(
+        overlays.cameraPreviewMoves,
+        emits(const CameraPreviewMove(Offset(0.58, 0.30))),
+      );
+      // A map with a `kind` is a choice and never a move; a bare name is a
+      // command and never either.
+      expect(
+        overlays.menuSelections.take(2).map((InputMenuSelection s) => s.kind),
+        emitsInOrder(<MediaDeviceKind>[
+          MediaDeviceKind.microphone,
+          MediaDeviceKind.camera,
+        ]),
+      );
+      expect(overlays.commands, emits(OverlayCommand.stop));
     });
 
     test('a selection round-trips through the map it travels as', () {

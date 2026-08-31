@@ -379,6 +379,16 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
       .cast<InputMenuSelection>();
 
   @override
+  Stream<CameraPreviewMove> get cameraPreviewMoves => _events
+      .map(
+        (Object? event) => event is Map<Object?, Object?>
+            ? CameraPreviewMove.tryFromMap(event.cast<String, Object?>())
+            : null,
+      )
+      .where((CameraPreviewMove? move) => move != null)
+      .cast<CameraPreviewMove>();
+
+  @override
   Future<OverlayStripPosition?> controlStripPosition() => _guard(() async {
     final Map<Object?, Object?>? raw = await _channel
         .invokeMethod<Map<Object?, Object?>>('controlStripPosition');
@@ -439,7 +449,8 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
       .where((OverlayCommand? command) => command != null)
       .cast<OverlayCommand>();
 
-  /// The one subscription to `relay/overlay/events`, shared by both streams.
+  /// The one subscription to `relay/overlay/events`, shared by all three
+  /// streams.
   ///
   /// Not one `receiveBroadcastStream()` each: a second listen replaces the
   /// first on *both* sides of the bridge — Dart's binary messenger overwrites
@@ -448,9 +459,9 @@ class MethodChannelOverlayWindowController implements OverlayWindowController {
   /// would be the only one that ever received anything, and the control strip's
   /// buttons would silently stop working the moment a menu was listened for.
   ///
-  /// One channel carrying two shapes is deliberate (§33.4): a command is a bare
-  /// name and always will be, a choice is a map, and each stream keeps what it
-  /// recognises.
+  /// One channel carrying three shapes is deliberate (§33.4): a command is a
+  /// bare name and always will be, a choice is a map with a `kind`, a preview
+  /// move is a map with an `event`, and each stream keeps what it recognises.
   Stream<Object?> get _events => _overlayEvents ??= _eventChannel
       .receiveBroadcastStream()
       .asBroadcastStream();

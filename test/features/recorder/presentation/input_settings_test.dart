@@ -272,4 +272,103 @@ void main() {
     expect(meter.enabled, isTrue);
     expect(find.text('TEST — SPEAK NOW'), findsOneWidget);
   });
+
+  group('the camera tile can be placed before recording (§33.5)', () {
+    testWidgets('the camera section offers all four corners', (
+      WidgetTester tester,
+    ) async {
+      // There used to be no placement control of any kind before a recording:
+      // the shape could be chosen here and the place could not, and the only
+      // corner list lived in the strip's camera sheet, in window mode alone.
+      await mount(
+        tester,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+        ),
+      );
+
+      expect(find.byType(CameraCornerTiles), findsOneWidget);
+      for (final CameraOverlayCorner corner in CameraOverlayCorner.values) {
+        expect(find.text(corner.label), findsOneWidget);
+      }
+    });
+
+    testWidgets('the stored corner is the one drawn as chosen', (
+      WidgetTester tester,
+    ) async {
+      await mount(
+        tester,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+          cameraPipCorner: CameraOverlayCorner.topLeft,
+        ),
+      );
+
+      expect(
+        tester
+            .widget<CameraCornerTiles>(find.byType(CameraCornerTiles))
+            .selected,
+        CameraOverlayCorner.topLeft,
+      );
+    });
+
+    testWidgets('choosing one stores it, with no session running', (
+      WidgetTester tester,
+    ) async {
+      final TestHarness harness = await mount(
+        tester,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+        ),
+      );
+
+      await tester.tap(find.bySemanticsLabel('Top left picture-in-picture'));
+      await tester.pumpAndSettle();
+
+      expect(
+        harness.settings.settings.cameraPipCorner,
+        CameraOverlayCorner.topLeft,
+      );
+    });
+
+    testWidgets('Reset position appears only once there is a drag to undo', (
+      WidgetTester tester,
+    ) async {
+      await mount(
+        tester,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+        ),
+      );
+
+      expect(find.text('Reset position'), findsNothing);
+    });
+
+    testWidgets('a position stored by a previous session can be undone', (
+      WidgetTester tester,
+    ) async {
+      final TestHarness harness = await mount(
+        tester,
+        settings: const AppSettings(
+          expandedInputs: <MediaDeviceKind>{MediaDeviceKind.camera},
+          cameraPipPosition: Offset(0.2, 0.2),
+        ),
+      );
+
+      // No corner is drawn as chosen while the tile is at a free position: it
+      // is in none of the four, and drawing one would say it is.
+      expect(
+        tester
+            .widget<CameraCornerTiles>(find.byType(CameraCornerTiles))
+            .selected,
+        isNull,
+      );
+
+      await tester.tap(find.text('Reset position'));
+      await tester.pumpAndSettle();
+
+      expect(harness.settings.settings.cameraPipPosition, isNull);
+      expect(find.text('Reset position'), findsNothing);
+    });
+  });
 }
