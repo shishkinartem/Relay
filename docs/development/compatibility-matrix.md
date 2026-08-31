@@ -179,8 +179,34 @@ been through a compiler on this host, so the endpoint enumeration, the camera
 enumeration through Media Foundation, the default-first ordering, the
 reference-counted meter, the IMMNotificationClient watcher and every divergence
 listed under *Where the two halves actually diverge* are read off the source and
-not measured. The 152 cases in windows/test/recorder_types_test.cpp cover the pure
-half only, and they have not been compiled here.
+not measured. windows/test/recorder_types_test.cpp covers the pure half only, and
+it has not been compiled here — run it with
+`ctest --test-dir build/win-tests -C Debug --output-on-failure` on a Windows host.
+The count is deliberately not quoted: it has been hand-copied into three files
+before and drifted three ways.
+
+NOT RUN: Windows debugResourceCensus (spec 19.1)
+Reason: same — never compiled. `RecordingSession::DebugCensus()`,
+`OverlayWindows::DebugCensus()`, `InputMeter::DebugCensus()`, the `ResourceCensus`
+struct in recorder_types.{h,cpp} and the plugin's `debugResourceCensus` arm are all
+read off the source and not measured. The `ResourceCensus` and
+`MeteringSubscriptions::Total` cases added to windows/test/recorder_types_test.cpp
+cover the arithmetic and the released-rows rule; like the rest of that suite they
+have not been compiled here.
+
+NOT RUN: what a census actually proves on either platform
+Reason: the two tests spec 19.1 names run at the view-model level against
+`FakeHostResources` (test/features/recorder/application/resource_census_test.dart).
+They prove the *application* drives a host that obeys 19.1 back to where it
+started — every `releaseSession` sent, every meter stopped, every overlay hidden,
+on every exit including a fatal error and a quit. They cannot prove that
+ScreenCaptureKit, AVFoundation or WASAPI let go of anything, because no Dart test
+can see a native object graph, and neither native suite can reach the code that
+counts it: `RecorderMacosPlugin`, `OverlayWindowController` and `InputMeter` all
+need FlutterMacOS and AVFoundation and sit outside `RecorderCore` — the same
+asymmetry `packages/CLAUDE.md` records for `LetterboxRect`. Closing this needs a
+real integration run that calls `debugResourceCensus` across ten start → stop
+cycles on each platform.
 
 NOT RUN: Windows stop/abort teardown ordering
 Reason: same. `RecordingSession::teardown_mutex_` now spans the MediaWriter call as well
@@ -206,6 +232,27 @@ Reason: each run exceeds an interactive session; they are release gates, not per
 NOT RUN: tool/package-dmg.sh notarization path
 Reason: no Developer ID certificate on this host.
 ```
+
+## What a session ends holding (§19.1)
+
+The census is the falsifiable half of §19.1. Both hosts answer
+`debugResourceCensus`; the two lifetimes it reports differ, and **both are
+lawful** — §19.1's second table permits either, and the difference is recorded
+here rather than papered over on the wire.
+
+| | macOS | Windows |
+|---|---|---|
+| Overlay engines | built on first use, kept for the life of the process. Census settles at 3 and stays there | destroyed with each window on hide. Census returns to 0 |
+| Preview texture | registered on show, **unregistered on hide** — a registered texture keeps its last uploaded contents, so re-showing drew the previous session's last camera frame until the new camera delivered | belongs to the window, so it goes with it |
+| Event monitors | drag-end and menu-dismissal `NSEvent` monitors, plus the rolling left-button watch | low-level mouse and keyboard hooks, installed for exactly as long as a menu is open |
+| Session rows | read from `RecordingSession` through a lock-guarded ledger; the camera and microphone are asked directly (`isConfigured`) | read from each owner's own predicate — `CaptureEngine::is_running`, `MediaWriter::is_open`, `VideoCompositor::is_initialized` |
+| Verified | `swift test` covers the arithmetic and the ledger; the plugin's three contributors are covered only through Dart against a fake | **nothing** — never compiled |
+
+Because the counts differ, §19.1's equality census is taken **after the first
+cycle, not at launch**: a launch census on macOS is short by three engines that
+the first session creates and every later one reuses. A launch census still
+bounds every row of §19.1's *first* table, which must be zero on both platforms
+in both places, and `resource_census_test.dart` asserts that separately.
 
 ## The movable control strip (§33.3)
 
@@ -241,18 +288,35 @@ if it does not, that same resize makes it strictly worse. Whoever has a Windows
 machine should drag the strip across a scale boundary, log the view's device
 pixel ratio and the host window's DPI on each side, and only then choose.
 
-**Keyboard movement and `Reset position` now exist**, both answered by the host
-so neither needs the strip's window to keep key focus. `resetStripPosition` and
-the eight nudge commands travel as bare names on `relay/overlay/events`; the
-application turns each into the one `nudgeControlStrip(dx, dy)` call both hosts
-already implement, which clamps and snaps exactly as the end of a drag does.
+**Keyboard movement and `Reset position` exist on the wire and nowhere else.**
+`OverlayCommand.resetStripPosition` and the eight nudge commands are declared,
+both hosts answer them, and the application dispatches each into the one
+`nudgeControlStrip(dx, dy)` call that clamps and snaps exactly as the end of a
+drag does. **Nothing sends any of them.** There is no strip menu, no key binding
+and no button: the whole path from a user's finger to `resetStripPosition` is
+missing, and the same is true of every arrow.
 
-The arrow keys carry a real limit, stated in §33.3 rather than hidden: a key is
-only delivered to a focused window, and the strip's panel is non-activating, so
-the arrows work after the user has clicked the strip — not while the recorded
-application is in front. Claiming a global hotkey would be worse than the limit:
-a recorder that swallows the arrow keys of every application it records is a
-bug. `Reset position` is raised by a click and needs no focus at all.
+This entry previously read "now exist", which was wrong in the way that matters
+— a reader checking whether the accessibility path was covered would have
+concluded it was. §33.3 and
+`../adr/2026-08-30-movable-control-strip-and-input-menus.md` carry the same
+correction; `../adr/README.md` already said it.
+
+| | State |
+|---|---|
+| `OverlayCommand.resetStripPosition` / `nudgeUp…` etc. | declared |
+| macOS host handler | implemented |
+| Windows host handler | written, never compiled |
+| Dart dispatch to `nudgeControlStrip` | implemented, tested |
+| Anything that raises them | **missing** |
+
+When it is built, the arrow keys carry a real limit that is stated in §33.3
+rather than hidden: a key is only delivered to a focused window, and the strip's
+panel is non-activating, so the arrows will work after the user has clicked the
+strip — not while the recorded application is in front. Claiming a global hotkey
+would be worse than the limit: a recorder that swallows the arrow keys of every
+application it records is a bug. `Reset position` is raised by a click and needs
+no focus at all, so it is the half that could ship on its own.
 
 ## Overlay window transparency
 

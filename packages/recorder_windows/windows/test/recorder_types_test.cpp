@@ -1861,5 +1861,104 @@ TEST(JoinPath, InsertsExactlyOneSeparator) {
   EXPECT_EQ(JoinPath(L"C:\\Relay\\", L"a.mp4"), L"C:\\Relay\\a.mp4");
 }
 
+// ── the resource census (spec 19.1) ──────────────────────────────────────────
+//
+// The mirror of `ResourceCensusTests` in the macOS core. Whether the plugin's
+// three contributors report the right numbers is asserted from Dart; what is
+// here is the arithmetic and the released-rows rule, which are the parts a
+// Flutter-free suite can reach.
+
+TEST(ResourceCensus, SummingAddsEachRowIndependently) {
+  ResourceCensus session;
+  session.capture_streams = 1;
+  session.camera_sessions = 1;
+  session.microphone_sessions = 1;
+  session.session_timers = 1;
+  session.power_assertions = 1;
+  session.writers = 1;
+  session.compositors = 1;
+
+  ResourceCensus overlays;
+  overlays.registered_textures = 1;
+  overlays.overlay_engines = 3;
+  overlays.event_monitors = 2;
+
+  ResourceCensus meter;
+  meter.metering_taps = 1;
+  meter.meter_subscriptions = 2;
+
+  const ResourceCensus total = session + overlays + meter;
+
+  ResourceCensus expected;
+  expected.capture_streams = 1;
+  expected.camera_sessions = 1;
+  expected.microphone_sessions = 1;
+  expected.metering_taps = 1;
+  expected.meter_subscriptions = 2;
+  expected.registered_textures = 1;
+  expected.overlay_engines = 3;
+  expected.event_monitors = 2;
+  expected.session_timers = 1;
+  expected.power_assertions = 1;
+  expected.writers = 1;
+  expected.compositors = 1;
+  EXPECT_TRUE(total == expected);
+}
+
+TEST(ResourceCensus, AnEmptyCensusHasReleasedEverything) {
+  EXPECT_TRUE(ResourceCensus().session_resources_released());
+}
+
+// Spec 19.1's second table lets a host keep its overlay engines for the life of
+// the process. This host does not, but the rule is about the specification
+// rather than about Windows, and both halves of the contract have to agree.
+TEST(ResourceCensus, KeptOverlayEnginesAreNotHeldSessionResources) {
+  ResourceCensus census;
+  census.overlay_engines = 3;
+  EXPECT_TRUE(census.session_resources_released());
+}
+
+TEST(ResourceCensus, EveryOtherRowFailsTheReleasedCheck) {
+  int ResourceCensus::*const rows[] = {
+      &ResourceCensus::capture_streams,     &ResourceCensus::camera_sessions,
+      &ResourceCensus::microphone_sessions, &ResourceCensus::metering_taps,
+      &ResourceCensus::meter_subscriptions, &ResourceCensus::registered_textures,
+      &ResourceCensus::event_monitors,      &ResourceCensus::session_timers,
+      &ResourceCensus::power_assertions,    &ResourceCensus::writers,
+      &ResourceCensus::compositors,
+  };
+  for (int ResourceCensus::*const row : rows) {
+    ResourceCensus census;
+    census.*row = 1;
+    EXPECT_FALSE(census.session_resources_released());
+  }
+}
+
+TEST(ResourceCensus, EqualityComparesEveryRow) {
+  ResourceCensus left;
+  ResourceCensus right;
+  EXPECT_TRUE(left == right);
+  right.compositors = 1;
+  EXPECT_TRUE(left != right);
+}
+
+// The reference count, not "is anything active": a leaked subscription with no
+// tap open is a meter that will re-open a device on the next start.
+TEST(MeteringSubscriptions, TotalCountsEveryOutstandingReference) {
+  MeteringSubscriptions subscriptions;
+  EXPECT_EQ(subscriptions.Total(), 0);
+
+  subscriptions.Retain(MediaDeviceKind::kMicrophone);
+  subscriptions.Retain(MediaDeviceKind::kMicrophone);
+  subscriptions.Retain(MediaDeviceKind::kCamera);
+  EXPECT_EQ(subscriptions.Total(), 3);
+
+  subscriptions.Release(MediaDeviceKind::kMicrophone);
+  EXPECT_EQ(subscriptions.Total(), 2);
+
+  subscriptions.Clear();
+  EXPECT_EQ(subscriptions.Total(), 0);
+}
+
 }  // namespace
 }  // namespace relay

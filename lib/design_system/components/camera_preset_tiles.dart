@@ -4,6 +4,10 @@ import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import '../tokens/app_colors.dart';
 import '../tokens/app_typography.dart';
 
+/// design gap: `1h` specifies the picture-in-picture's composition and draws
+/// no shape *chooser*. The tiles, their proportions and the selected state are
+/// undrawn — `design/README.md` → *The v0.5 interface has no design backing*.
+///
 /// The camera picture-in-picture's three shapes, as a row of tiles (§33.5).
 ///
 /// Shared rather than duplicated because the same three choices are offered in

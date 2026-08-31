@@ -17,39 +17,35 @@ import RecorderCore
 /// product expects when nothing is being recorded.
 public enum RecorderWindowPolicy {
   private static let lock = NSLock()
-  private static var suppressions = 0
+  private static var suppressed = false
 
   /// The answer `applicationShouldTerminateAfterLastWindowClosed` should give.
   public static var terminatesOnLastWindowClosed: Bool {
     lock.lock()
     defer { lock.unlock() }
-    return suppressions == 0
+    return !suppressed
   }
 
-  /// Counted rather than boolean so overlapping hides — a camera preview going
-  /// up while the strip is already shown — cannot release each other's hold.
+  /// Raised whenever the main panel is hidden, and idempotent: overlapping
+  /// hides — a camera preview going up while the strip is already shown — are
+  /// the same hold, not two.
+  ///
+  /// This was a counter, paired with an `allowTermination()` that decremented
+  /// it. Nothing ever called that: the only release is `reset()`, because the
+  /// only moment the application may quit again is when the session is over and
+  /// the panel is back. A count with no individual release is a flag, and one
+  /// that reads as a count invites a caller to try balancing it.
   static func suppressTermination() {
     lock.lock()
-    defer { lock.unlock() }
-    suppressions += 1
+    suppressed = true
+    lock.unlock()
   }
 
-  /// Idempotent: releasing a hold that was never taken is a no-op, so a
-  /// duplicated teardown cannot drive the count negative and re-arm termination
-  /// while a recording is still live.
-  static func allowTermination() {
-    lock.lock()
-    defer { lock.unlock() }
-    if suppressions > 0 {
-      suppressions -= 1
-    }
-  }
-
-  /// Drops every hold. Used when the session ends, where the only correct state
+  /// Drops the hold. Used when the session ends, where the only correct state
   /// is "the application may quit again" regardless of how it got here.
   static func reset() {
     lock.lock()
-    defer { lock.unlock() }
-    suppressions = 0
+    suppressed = false
+    lock.unlock()
   }
 }

@@ -721,6 +721,122 @@ void main() {
       expect(harness.viewModel.state, isA<SessionActive>());
     });
 
+    group('a swap that will not open is shown (§33.7)', () {
+      Future<TestHarness> refusedSwap() async {
+        final TestHarness harness = await recording();
+        harness.recorder.failOnSelectDevice = const RecorderException(
+          RecorderErrorCode.microphoneUnavailable,
+          'busy',
+        );
+        harness.overlays.menuController.add(
+          const InputMenuSelection(
+            kind: MediaDeviceKind.microphone,
+            deviceId: 'mic:mv7',
+          ),
+        );
+        await pumpEventQueue();
+        return harness;
+      }
+
+      test('the sheet comes back carrying the reason', () async {
+        // The main window is hidden for the whole of a recording, so the sheet
+        // the choice was made in is the only surface left — and it already has
+        // a line for this (`InputMenuOverlayState.notice`). The strip cannot
+        // carry it: it presents one size in every session state (§6).
+        final TestHarness harness = await refusedSwap();
+
+        expect(harness.viewModel.openMenuKind, MediaDeviceKind.microphone);
+        expect(
+          harness.overlays.menuStates.last.notice,
+          contains('would not open'),
+        );
+        expect(
+          harness.overlays.menuStates.last.notice,
+          contains('still using the previous one'),
+        );
+      });
+
+      test('the previous device is what the file keeps', () async {
+        final TestHarness harness = await refusedSwap();
+
+        expect(harness.viewModel.state, isA<SessionActive>());
+        expect(
+          harness.recorder.liveDevices,
+          isEmpty,
+          reason: 'nothing was swapped, so nothing was re-pointed',
+        );
+      });
+
+      test('the next attempt clears the last one\'s notice', () async {
+        final TestHarness harness = await refusedSwap();
+        harness.recorder.failOnSelectDevice = null;
+
+        harness.overlays.menuController.add(
+          const InputMenuSelection(
+            kind: MediaDeviceKind.microphone,
+            deviceId: 'mic:builtin',
+          ),
+        );
+        await pumpEventQueue();
+
+        expect(
+          harness.viewModel.menuStateFor(MediaDeviceKind.microphone).notice,
+          isNull,
+        );
+      });
+
+      test('it does not outlive the session it happened in', () async {
+        final TestHarness harness = await refusedSwap();
+
+        await harness.viewModel.stop();
+
+        expect(
+          harness.viewModel.menuStateFor(MediaDeviceKind.microphone).notice,
+          isNull,
+          reason: 'a notice about a device no longer in use is worse than none',
+        );
+      });
+
+      test('an automatic re-point reports but opens nothing', () async {
+        // A menu appearing over the application being recorded, unasked, is
+        // worse than the message is worth — so the device-loss path records the
+        // notice without putting a window on screen.
+        final TestHarness harness = await recording();
+        await harness.viewModel.selectInputDevice(
+          MediaDeviceKind.microphone,
+          harness.viewModel
+              .devicesFor(MediaDeviceKind.microphone)
+              .firstWhere((MediaDevice d) => d.id == 'mic:mv7'),
+        );
+        harness.recorder.failOnSelectDevice = const RecorderException(
+          RecorderErrorCode.microphoneUnavailable,
+          'busy',
+        );
+        harness.recorder.devices = <MediaDeviceKind, List<MediaDevice>>{
+          ...harness.recorder.devices,
+          MediaDeviceKind.microphone: <MediaDevice>[
+            const MediaDevice(
+              id: 'mic:builtin',
+              kind: MediaDeviceKind.microphone,
+              label: 'MacBook Pro Microphone',
+              isSystemDefault: true,
+            ),
+          ],
+        };
+
+        harness.recorder.emit(
+          const RecorderDevicesChangedEvent(MediaDeviceKind.microphone),
+        );
+        await pumpEventQueue();
+
+        expect(harness.viewModel.openMenuKind, isNull);
+        expect(
+          harness.viewModel.menuStateFor(MediaDeviceKind.microphone).notice,
+          contains('would not open'),
+        );
+      });
+    });
+
     test(
       'a choice outside a session changes the next recording only',
       () async {

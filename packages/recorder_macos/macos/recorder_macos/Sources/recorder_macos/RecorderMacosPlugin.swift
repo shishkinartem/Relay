@@ -422,6 +422,13 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
         await MainActor.run { result(nil) }
       }
 
+    case "debugResourceCensus":
+      // Answered synchronously on the platform thread, which is where the
+      // overlay windows may be read at all. Nothing here opens, closes or
+      // waits on anything: a census that could block would be a new way for a
+      // test to hang the very teardown it is checking.
+      result(debugResourceCensus().map)
+
     case "dispose":
       Task {
         await self.replaceSession(with: nil)
@@ -502,6 +509,21 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
   }
 
   // MARK: - operations
+
+  /// What this process is still holding (§19.1).
+  ///
+  /// Three contributors, each counting only what it owns, summed once: the
+  /// session's capture, writer, compositor, timer, power assertion and its two
+  /// device inputs; the overlay layer's engines, texture and event monitors;
+  /// and the meter's tap and reference count. Nothing is counted twice, and a
+  /// contributor that does not exist yet contributes zeros rather than being
+  /// skipped — which is what makes "the launch census" a real number to compare
+  /// a later one against.
+  private func debugResourceCensus() -> ResourceCensus {
+    (session?.debugCensus ?? ResourceCensus()) + overlays.debugCensus
+      + meter.debugCensus
+  }
+
 
   /// `getCapabilities`, off the platform thread. See the `handle` arm.
   private func respondWithCapabilities(result: @escaping FlutterResult) async {

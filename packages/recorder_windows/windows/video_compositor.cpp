@@ -157,6 +157,11 @@ void VideoCompositor::SetCameraEnabled(bool enabled) {
   }
 }
 
+bool VideoCompositor::is_initialized() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return device_ != nullptr;
+}
+
 bool VideoCompositor::camera_enabled() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return camera_enabled_;

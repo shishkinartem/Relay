@@ -80,6 +80,13 @@ class InputMeter {
   // stop is not delivered after it (spec 33.2).
   bool IsMetering(MediaDeviceKind kind) const;
 
+  // The meter's rows of spec 19.1's census.
+  //
+  // Only a tap of the meter's *own* is counted. During a session the levels
+  // come off the capture the recording already holds, which opens nothing —
+  // counting that as a tap would report a leak for obeying spec 33.7.
+  ResourceCensus DebugCensus() const;
+
  private:
   // Everything the meter thread touches, and nothing else. Shared with that
   // thread so it can be left to unwind on its own: what it still reads outlives
@@ -94,7 +101,7 @@ class InputMeter {
   LevelAccumulator* live_ = nullptr;
   LevelHandler on_level_;
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::shared_ptr<Tap> tap_;
 };
 

@@ -19,22 +19,23 @@ it decides. Where the two disagree, the ADR is current and the spec is stale.
 | [Overlay windows are native panels hosting secondary Flutter engines](2026-08-23-overlay-windows-as-secondary-flutter-engines.md) | Accepted |
 | [Telegram is the only upload destination](2026-08-23-telegram-only-destination.md) | Accepted — removed Google Drive |
 | [WebDAV is the second destination](2026-08-23-webdav-second-destination.md) | Accepted — amends the above |
-| [Overlay panels are sized once per show](2026-08-24-overlay-panels-are-sized-once-per-show.md) | Accepted |
+| [Overlay panels are sized once per show](2026-08-24-overlay-panels-are-sized-once-per-show.md) | Accepted — **headline rule superseded** by `2026-08-31-overlay-panels-never-shrink.md`; the rest still stands |
 | [A screen-recording answer is pending until the app reopens, and Relay reopens itself](2026-08-24-screen-recording-permission-applies-on-relaunch.md) | Accepted |
+| [Overlay panels never shrink](2026-08-31-overlay-panels-never-shrink.md) | Accepted — amends the 2026-08-24 sizing rule |
 
-## Accepted 2026-08-30, in delivery
+## Accepted 2026-08-30, shipped and folded
 
-Accepted together after the design review. `TECHNICAL_SPEC.md` §33 is the live
-specification for the scope they describe and tracks which stages have shipped;
-each part is folded into its numbered spec section as it lands, not before —
-so the numbered sections never describe behaviour that does not exist yet.
+Accepted together after the design review. All four shipped, and all four were
+folded into the numbered `TECHNICAL_SPEC.md` sections on 2026-08-31 — §2, §6,
+§7, §8, §20, §29 and §31 are what to build against. §33 remains for the reasons
+its §33.11 gives; it is no longer the live specification for this scope.
 
 | Decision | Status |
 |---|---|
-| [Inputs are chosen from a device list, before and during a recording](2026-08-30-input-device-selection.md) | Accepted — shipped, live swapping included |
-| [The control strip moves, and each input discloses its devices](2026-08-30-movable-control-strip-and-input-menus.md) | Accepted — shipped. `Reset position` exists on the wire but has no affordance on the strip |
-| [The camera picture-in-picture is dragged by hand and sized by preset](2026-08-30-user-adjustable-camera-pip.md) | Accepted — shipped; amends a core product invariant |
-| [The panel has a width range, and the layout answers to it](2026-08-30-responsive-panel.md) | Accepted — shipped |
+| [Inputs are chosen from a device list, before and during a recording](2026-08-30-input-device-selection.md) | Accepted — shipped and folded into §8, §20 |
+| [The control strip moves, and each input discloses its devices](2026-08-30-movable-control-strip-and-input-menus.md) | Accepted — shipped and folded into §6. `Reset position` and the nudge commands exist on the wire and have **no affordance at all** — no menu, no key binding, no button |
+| [The camera picture-in-picture is dragged by hand and sized by preset](2026-08-30-user-adjustable-camera-pip.md) | Accepted — shipped and folded into §7, §2; amends a core product invariant |
+| [The panel has a width range, and the layout answers to it](2026-08-30-responsive-panel.md) | Accepted — shipped and folded into §29 |
 
 ## Filename
 

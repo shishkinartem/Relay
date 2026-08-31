@@ -87,6 +87,10 @@ class RecordingControlStrip extends StatelessWidget {
   /// wants, and what a platform that cannot move a window has to fall back to.
   final VoidCallback? onMoveRequested;
 
+  /// design gap: `1f` and `1g` draw the strip with three plain toggles and no
+  /// caret. The caret, its hit target and its half-gap of slop are undrawn —
+  /// `design/README.md` → *The v0.5 interface has no design backing*.
+  ///
   /// Opens that input's device list. The argument is the caret's centre in the
   /// strip's own coordinates, which is the only thing the host cannot work out
   /// for itself — it knows where the window is, not where Flutter laid the

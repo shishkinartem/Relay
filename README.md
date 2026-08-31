@@ -28,9 +28,13 @@ recording ends you either send it or delete it, and the local file is never remo
 remote copy is confirmed.
 
 - One entire screen or one application window, cursor included.
-- Camera composited into the video as a picture-in-picture, at its own aspect ratio.
+- Camera composited into the video as a picture-in-picture — dragged where you want it,
+  shaped by one of three presets.
+- Pick the camera and microphone from your real devices, before **and during** a
+  recording; the microphone shows a live level so you can choose one by speaking.
 - Microphone and system audio mixed into one track.
-- The control strip is excluded from the capture — it never appears in the output.
+- The control strip goes wherever you drag it, and is excluded from the capture — it
+  never appears in the output.
 - Pause and resume; 720p or 1080p, 30 or 60 fps.
 - Send to **Telegram** or **WebDAV** — neither needs a developer account, an API console,
   or a payment method.

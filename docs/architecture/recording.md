@@ -58,14 +58,22 @@ Errors are typed states/results rather than arbitrary UI strings.
   overlay engine outlives a session and only reports a size when its own content
   changes, so a second recording would otherwise clip Pause and Stop outside the
   window;
-- **an overlay panel is driven through exactly one size per show, and is never
-  resized while it is off screen.** The last measured size is substituted into
-  the placement *before* it is applied, never applied after it. A window hosting
-  a Flutter view blocks the platform thread on each resize until that engine
-  commits a frame at the new size, so every distinct size is a real rendered
-  frame; alternating two sizes in one main-loop turn can hand the engine a back
-  buffer of the wrong size, and the render target that results has no colour
-  attachment. See `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md`;
+- **a panel's rendered size, in physical pixels, is non-decreasing for the
+  lifetime of its view, and never returns to a value it has held before.** A
+  window hosting a Flutter view blocks the platform thread on each resize until
+  that engine commits a frame at the new size, so every distinct size is a real
+  rendered frame; a cache holding two sizes whose *oldest* entry matches the
+  request hands back a surface of the other size, and the render target built
+  from it has no colour attachment. `OverlayPlacementGeometry.panelSizeAction`
+  is the one implementation and carries the sufficiency argument. See
+  `docs/adr/2026-08-31-overlay-panels-never-shrink.md`, which amends
+  `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md` — the earlier
+  "exactly one size per show" was necessary and not sufficient, and the
+  application crashed a second time under it;
+- **the camera preview is exempt**, deliberately: in display mode its window
+  frame *is* the tile the compositor draws, so holding it at a high-water size
+  would put a tile on screen that is not the tile in the file (design `1p`). It
+  keeps resizing and keeps the risk;
 - overlay placement is resolved against the display the main application window
   was on when the session started (§5). That window is hidden for the whole
   session, so the display is pinned at the first show rather than re-resolved
@@ -128,11 +136,19 @@ Double-clicks, retries, cancellation races, or repeated callbacks must not corru
 
 Idempotence alone is not enough for the teardown pair. `abort` and `dispose` must
 also **never overtake an in-flight `stop`**, and that is a separate property from
-being safe to call twice. Both arrive while a stop is still writing the file out
-— closing the window during finalization is an ordinary user action, and
-`RecorderViewModel.dispose` fires without awaiting the outstanding stop — and a
-teardown that reaches the writer first strands a finished recording as a `.part`
-needing §18 recovery.
+being safe to call twice. A teardown that reaches the writer first strands a
+finished recording as a `.part` needing §18 recovery.
+
+The reason is not that quitting is fire-and-forget — it is not. The quit path is
+`lib/main.dart`'s `AppLifecycleListener(onExitRequested:)` →
+`CompositionRoot.dispose()` → `RecorderViewModel.dispose()` and its `shutdown`,
+and every link of that chain **is** awaited before `AppExitResponse.exit` is
+returned, which is what §19.1's "before the process exits" requires. The reason
+is that `stop` and `dispose` are two independent calls into the platform:
+`RecorderViewModel.dispose()` does not join a `stop()` the user pressed a moment
+earlier, so closing the window during finalization — an ordinary user action —
+puts both on the platform at once. The ordering has to hold in the host, because
+nothing above it is holding it.
 
 The two platforms hold the line differently, and both are deliberate:
 

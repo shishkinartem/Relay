@@ -429,6 +429,11 @@ void MediaWriter::ResetForRetry() {
   writing_ = false;
 }
 
+bool MediaWriter::is_open() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return writer_ != nullptr;
+}
+
 void MediaWriter::Abort() {
   std::lock_guard<std::mutex> lock(mutex_);
   Close();

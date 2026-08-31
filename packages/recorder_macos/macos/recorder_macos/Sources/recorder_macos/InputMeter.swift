@@ -269,6 +269,23 @@ final class InputMeter {
     tap == nil ? .closed : .open(deviceId: tapDeviceId)
   }
 
+  /// The meter's rows of §19.1's census.
+  ///
+  /// Only a tap of the meter's *own* is counted. During a session the levels
+  /// come off the capture the recording already holds, which opens nothing —
+  /// counting that as a tap would report a leak for obeying §33.7.
+  var debugCensus: ResourceCensus {
+    lock.lock()
+    let subscribers = demand.subscribers
+    lock.unlock()
+    // On `queue`, because that is where `reconcile` writes `tap`. Reading a
+    // class reference across threads can over-release rather than merely read
+    // stale, and a synchronous hop from the platform thread costs one turn of a
+    // queue that is idle whenever nothing is metering.
+    let taps = queue.sync { self.tap == nil ? 0 : 1 }
+    return ResourceCensus(meteringTaps: taps, meterSubscriptions: subscribers)
+  }
+
   /// The lightest tap macOS offers outside a recording: one `AVCaptureSession`
   /// on the device the start named.
   ///

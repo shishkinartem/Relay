@@ -61,6 +61,7 @@ inspects a message string.
 | `cameraPreviewPosition` | — | `{x, y}` as a fraction of the canvas, or `null` in window mode where the preview is not the tile |
 | `recoverArtifact` | `path: String` | recording-file map, or `null` |
 | `releaseSession` | — | `null` |
+| `debugResourceCensus` | — | resource-census map — what the host is still holding (§19.1) |
 | `dispose` | — | `null` |
 | `relaunchApplication` | — | `null` |
 | `quitApplication` | — | `null` |
@@ -72,6 +73,17 @@ finalized; `dispose` ends the platform with the process. `releaseSession` means
 and everything it built, so an idle recorder holds no camera, no microphone and
 no capture. It is idempotent, a no-op where there is no session, and never
 touches a recording on disk (§18).
+
+**`debugResourceCensus` is an assertion surface, not an API.** It exists
+because §19.1's release requirements are otherwise unfalsifiable: "the session
+let go of the camera" is not something a test can assert against an object graph
+it cannot see. Nothing in the application may branch on the answer. It must
+never block, open, close or wait on anything — it is raised on the teardown path
+the tests are checking, and a census that could hang would be a new way to wedge
+it — and it must never fail: a host that cannot count a row answers zero for
+that row rather than raising, so the test fails on the row it expected instead of
+on the call. A host that has not implemented it at all is tolerated the same way:
+Dart decodes a `null` reply as an all-zero census.
 
 `kind` on the three input methods is a `MediaDeviceKind` name — `camera`,
 `microphone` or `systemAudio` (§33.2).
@@ -394,6 +406,39 @@ closes it. The user presses twice to reopen a menu that is not there.
 The host sends it whenever it closes the menu on its own — a click outside, the
 strip being dragged, a display change — and *not* when it closes in response to
 `hideInputMenu`, which the application already knows about.
+
+### resource-census map
+
+Every value an `Int`, `writers` and `compositors` included — one type for the
+whole map is what lets a test compare two censuses in a single equality, and a
+writer that somehow existed twice should read as `2` rather than as `true`. Every
+key is always present.
+
+| Key | Counts |
+|---|---|
+| `captureStreams` | live screen-capture streams and their content filters |
+| `cameraSessions` | camera capture sessions that still have a **device input** attached — a stopped capture that kept its input still counts, because that is the configured graph `releaseSession` exists to end |
+| `microphoneSessions` | the microphone's equivalent, on the same terms |
+| `meteringTaps` | taps the **meter** has open. Never a level read off a capture the session already holds, which opens nothing — counting that would report a leak for obeying §33.7 |
+| `meterSubscriptions` | outstanding metering references. Separate from the taps because a leaked reference with no tap is a meter that will re-open a device on the next start |
+| `registeredTextures` | platform textures registered against any engine — the camera preview's, today |
+| `overlayEngines` | secondary Flutter engines hosting overlay windows |
+| `eventMonitors` | event monitors, hooks and observers a **session** installed. Not the ones the host installs once for the life of the process |
+| `sessionTimers` | the tick, and anything else scheduled per session |
+| `powerAssertions` | power/sleep assertions held |
+| `writers` | `1` while an asset writer, its inputs and its buffer pool exist |
+| `compositors` | `1` while a compositor and its caches exist |
+
+Every row except `overlayEngines` must be zero once a session is over — §19.1's
+first table. `overlayEngines` is in its second table, "survives, because it is a
+setting and not state": **both lifetimes are lawful and the two platforms chose
+differently.** macOS builds an engine on first use and keeps it for the life of
+the process, so its count settles at three and stays there; Windows destroys each
+window and its engine on hide, so its count returns to zero — and its
+`registeredTextures` goes with it, because the preview's texture belongs to the
+window. What both owe is *stability*, which is why §19.1's equality census is
+taken after the first cycle rather than at launch. See
+`../development/compatibility-matrix.md`.
 
 ### recording-file map
 

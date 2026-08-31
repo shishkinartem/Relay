@@ -78,6 +78,10 @@ class CaptureEngine {
   uint32_t content_width() const { return content_width_.load(); }
   uint32_t content_height() const { return content_height_.load(); }
   uint64_t captured_frames() const { return captured_frames_.load(); }
+  // Whether a capture is live, for the census (spec 19.1). The row has to go
+  // to zero when Stop is pressed rather than when finalization ends, because
+  // that is when the user expects the recording indicator to go out.
+  bool is_running() const { return running_.load(); }
   bool cursor_capture_configurable() const { return cursor_configurable_; }
 
  private:

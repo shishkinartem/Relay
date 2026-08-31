@@ -67,6 +67,29 @@ SessionState RecordingSession::state() const {
   return state_;
 }
 
+ResourceCensus RecordingSession::DebugCensus() const {
+  ResourceCensus census;
+  census.capture_streams = capture_.is_running() ? 1 : 0;
+  {
+    std::lock_guard<std::mutex> lock(camera_mutex_);
+    census.camera_sessions = camera_ ? 1 : 0;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The two audio captures live under the session's own lock, like every
+    // other member the runtime toggles reach.
+    census.microphone_sessions = microphone_ ? 1 : 0;
+  }
+  census.writers = writer_.is_open() ? 1 : 0;
+  census.compositors = compositor_.is_initialized() ? 1 : 0;
+  census.session_timers = timers_.load() ? 1 : 0;
+  {
+    std::lock_guard<std::mutex> lock(awake_mutex_);
+    census.power_assertions = awake_taken_ ? 1 : 0;
+  }
+  return census;
+}
+
 bool RecordingSession::has_camera_frames() const {
   return camera_frames_seen_.load();
 }

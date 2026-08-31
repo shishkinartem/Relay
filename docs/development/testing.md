@@ -98,6 +98,25 @@ Changes affecting these areas require regression/integration coverage where tech
 
 Manual verification alone is insufficient for critical-path behavior.
 
+**Native resource cleanup has an executable definition**, and it is the one row
+here that used to be untestable. `TECHNICAL_SPEC.md` §19.1 says what a session
+must end holding and the recorder answers `debugResourceCensus` with integer
+counts of it, so "state is cleaned up" is a comparison rather than a hope. Two
+tests bind on it — a census after the first start → stop cycle against one after
+ten, and every row of §19.1's first table zero after one stop:
+
+```bash
+flutter test test/features/recorder/application/resource_census_test.dart
+flutter test test/app/quit_mid_recording_test.dart
+```
+
+Both run at the view-model level against a fake host that obeys §19.1, so what
+they prove is that the *application* drives it back to zero on every exit —
+Stop, a fatal error and a quit mid-recording included. What no Dart test can
+reach is the native object graph itself; that gap is stated in
+`compatibility-matrix.md` → *What a session ends holding* rather than left
+implied.
+
 ## Do not hide failures
 
 Never:

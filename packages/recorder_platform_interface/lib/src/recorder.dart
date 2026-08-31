@@ -9,6 +9,7 @@ import 'models/recorder_capabilities.dart';
 import 'models/recorder_event.dart';
 import 'models/recording_configuration.dart';
 import 'models/recording_file.dart';
+import 'models/resource_census.dart';
 import 'unsupported_recorder_platform.dart';
 
 /// Enumerates capture targets (§4.1).
@@ -159,6 +160,19 @@ abstract interface class Recorder
   Future<RecordingFile?> recoverArtifact(String artifactPath);
 
   Stream<RecorderEvent> get events;
+
+  /// What the host is still holding, counted (§19.1).
+  ///
+  /// Debug-only, and the reason it exists is that §19.1's release requirements
+  /// are otherwise unfalsifiable: "the session let go of the camera" is not
+  /// something a test can assert against an object graph it cannot see. Two
+  /// tests bind on it — census equality across ten start → stop cycles, and
+  /// every row zero after one stop.
+  ///
+  /// Never branched on by the application. A host that cannot count a row
+  /// answers zero for it rather than failing, because a census raised on the
+  /// teardown path must not be able to turn a leak into a crash.
+  Future<ResourceCensus> debugResourceCensus();
 
   Future<void> dispose();
 }

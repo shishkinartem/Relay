@@ -4,6 +4,10 @@ import '../icons/app_icon.dart';
 import '../icons/app_icons.dart';
 import '../tokens/app_colors.dart';
 
+/// design gap: `1c` draws each input as a single row with a toggle and nothing
+/// to open. The disclosure, its chevron and both of its states are undrawn —
+/// `design/README.md` → *The v0.5 interface has no design backing*.
+///
 /// A row whose detail settings are put away until asked for (§33.2).
 ///
 /// The row keeps its own primary control — the input's On / Off — outside the

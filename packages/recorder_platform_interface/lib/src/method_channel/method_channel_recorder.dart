@@ -12,6 +12,7 @@ import '../models/recorder_error.dart';
 import '../models/recorder_event.dart';
 import '../models/recording_configuration.dart';
 import '../models/recording_file.dart';
+import '../models/resource_census.dart';
 import '../recorder.dart';
 import 'channels.dart';
 
@@ -255,6 +256,18 @@ class MethodChannelRecorder implements Recorder {
   @override
   Future<void> releaseSession() =>
       _guard(() => _channel.invokeMethod<void>('releaseSession'));
+
+  @override
+  Future<ResourceCensus> debugResourceCensus() => _guard(() async {
+    final Map<Object?, Object?>? raw = await _channel
+        .invokeMethod<Map<Object?, Object?>>('debugResourceCensus');
+    // An empty census, not a failure: a host that does not answer this is one
+    // that holds nothing this side can see, and the test reading it should
+    // fail on the row it expected rather than on a missing method.
+    return ResourceCensus.fromMap(
+      (raw ?? const <Object?, Object?>{}).cast<String, Object?>(),
+    );
+  });
 
   @override
   Future<void> dispose() =>

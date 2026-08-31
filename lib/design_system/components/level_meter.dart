@@ -2,6 +2,11 @@ import 'package:flutter/widgets.dart';
 
 import '../tokens/app_colors.dart';
 
+/// design gap: the canvas draws no meter anywhere, in any state — not the live
+/// bar, not the dead one §33.7 requires, not the clipping mark. Every one of
+/// those is a decision taken here rather than read off a screen:
+/// `design/README.md` → *The v0.5 interface has no design backing*.
+///
 /// The live input level, drawn as a ticked bar (§33.2).
 ///
 /// Two values, not one: [level] fills the bar and is the sustained loudness a

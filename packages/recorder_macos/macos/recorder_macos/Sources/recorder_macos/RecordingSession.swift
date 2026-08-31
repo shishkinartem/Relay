@@ -77,13 +77,34 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
   private var droppedFrames = 0
 
   private var ticker: DispatchSourceTimer?
-  private var finished = false
+
+  /// What this session is holding, for `debugResourceCensus` (§19.1).
+  ///
+  /// Updated beside every assignment it mirrors. It exists because the census
+  /// is asked for on the platform thread while these fields are written on the
+  /// concurrency pool, and reading a class reference across that boundary can
+  /// over-release rather than merely read stale.
+  private let ledger = SessionResourceLedger()
 
   /// Held for exactly as long as a session is live. See `beginActivity()`.
   private var activityToken: NSObjectProtocol?
 
   /// Live camera frames for the preview texture.
   var cameraFrameProvider: CameraCapture { camera }
+
+  /// This session's rows of §19.1's census.
+  ///
+  /// The camera and the microphone are asked directly rather than mirrored:
+  /// both are `let` captures owned for the session's whole life, and what
+  /// counts is whether a *device input* is still attached — a stopped capture
+  /// that kept its input is exactly the configured graph `releaseSession`
+  /// exists to end.
+  var debugCensus: ResourceCensus {
+    ledger.census
+      + ResourceCensus(
+        cameraSessions: camera.isConfigured ? 1 : 0,
+        microphoneSessions: microphone.isConfigured ? 1 : 0)
+  }
 
   /// The encoded canvas, in pixels.
   ///
@@ -175,6 +196,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     canvasSize = configuration.canvasSize()
     compositor = VideoCompositor(
       canvasSize: canvasSize, overlay: configuration.cameraOverlay)
+    ledger.noteCompositor(true)
 
     let directory = URL(fileURLWithPath: configuration.outputDirectoryPath)
     try FileManager.default.createDirectory(
@@ -277,6 +299,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     activityToken = ProcessInfo.processInfo.beginActivity(
       options: [.userInitiated],
       reason: "Relay is recording the screen")
+    ledger.notePowerAssertion(true)
   }
 
   /// Idempotent: every session exit runs through `tearDown`, and a hold that
@@ -285,6 +308,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     guard let token = activityToken else { return }
     ProcessInfo.processInfo.endActivity(token)
     activityToken = nil
+    ledger.notePowerAssertion(false)
   }
 
   func pause() throws {
@@ -399,6 +423,11 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     if let stream {
       await Deadline.run(seconds: 5) { try? await stream.stopCapture() }
     }
+    // Noted here rather than in `tearDown`: §19.1 requires the capture to be
+    // released *before* finalization begins, so the screen-recording indicator
+    // goes out when Stop is pressed. A census taken during a long finalize has
+    // to agree with what the user can see in the menu bar.
+    ledger.noteCaptureStream(false)
     stopInputs()
   }
 
@@ -958,6 +987,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     self.videoInput = videoInput
     self.audioInput = audioInput
     self.adaptor = adaptor
+    ledger.noteWriter(true)
   }
 
   private func makeStream(
@@ -995,6 +1025,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     self.stream = stream
     self.streamConfiguration = streamConfiguration
+    ledger.noteCaptureStream(true)
   }
 
   private func startMicrophone() throws {
@@ -1144,11 +1175,13 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     timer.resume()
     ticker = timer
+    ledger.noteTimer(true)
   }
 
   private func stopTicker() {
     ticker?.cancel()
     ticker = nil
+    ledger.noteTimer(false)
   }
 
   private func emitStats() {
@@ -1211,7 +1244,6 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
       encodedFrames = 0
       droppedFrames = 0
     }
-    finished = false
   }
 
   private func tearDown() {
@@ -1227,6 +1259,7 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     audioInput = nil
     adaptor = nil
     compositor = nil
+    ledger.releaseAll()
   }
 
   /// Quality-oriented rates for screen content; not a user-facing setting (§11).

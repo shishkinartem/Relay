@@ -226,6 +226,55 @@ void main() {
         harness.recorder.cameraOverlays.single.preset,
         CameraPipPreset.square,
       );
+      // In effect immediately — the sheet has to draw the shape the tile is
+      // now — and not yet on disk. §33.5 persists the tile "when the session
+      // ends normally".
+      expect(harness.viewModel.cameraPreset, CameraPipPreset.square);
+      expect(harness.settings.settings.cameraPipPreset, CameraPipPreset.camera);
+    });
+
+    test('the preset is persisted when the session ends', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.settings.setCameraEnabled(true);
+      await harness.viewModel.requestStart();
+      await harness.viewModel.setCameraPreset(CameraPipPreset.circle);
+
+      await harness.viewModel.stop();
+
+      expect(harness.settings.settings.cameraPipPreset, CameraPipPreset.circle);
+      expect(harness.viewModel.cameraPreset, CameraPipPreset.circle);
+    });
+
+    /// §33.7: "crash mid-session → neither the position nor the preset is
+    /// persisted; the next session starts from the previous default". A crash
+    /// is the absence of a teardown, which is what a fresh view model over the
+    /// same stored settings stands for.
+    test('a preset tried mid-session does not survive a crash', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.settings.setCameraEnabled(true);
+      await harness.viewModel.requestStart();
+
+      await harness.viewModel.setCameraPreset(CameraPipPreset.square);
+
+      // Nothing tore down, so nothing was written: the process going away here
+      // leaves the stored preset exactly as the last completed session left it.
+      expect(harness.settings.settings.cameraPipPreset, CameraPipPreset.camera);
+    });
+
+    test('a preset chosen before recording is persisted at once', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      await harness.viewModel.setCameraPreset(CameraPipPreset.square);
+
+      // No session, so there is no experiment to survive: the user is setting
+      // the default, and it has to be there next launch whether or not they
+      // went on to record.
       expect(harness.settings.settings.cameraPipPreset, CameraPipPreset.square);
     });
 

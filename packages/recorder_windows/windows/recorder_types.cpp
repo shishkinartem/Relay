@@ -511,6 +511,62 @@ bool MeteringSubscriptions::AnyActive() const {
   return false;
 }
 
+int MeteringSubscriptions::Total() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  int total = 0;
+  for (const int count : counts_) {
+    total += count;
+  }
+  return total;
+}
+
+ResourceCensus& ResourceCensus::operator+=(const ResourceCensus& other) {
+  capture_streams += other.capture_streams;
+  camera_sessions += other.camera_sessions;
+  microphone_sessions += other.microphone_sessions;
+  metering_taps += other.metering_taps;
+  meter_subscriptions += other.meter_subscriptions;
+  registered_textures += other.registered_textures;
+  overlay_engines += other.overlay_engines;
+  event_monitors += other.event_monitors;
+  session_timers += other.session_timers;
+  power_assertions += other.power_assertions;
+  writers += other.writers;
+  compositors += other.compositors;
+  return *this;
+}
+
+bool ResourceCensus::session_resources_released() const {
+  return capture_streams == 0 && camera_sessions == 0 &&
+         microphone_sessions == 0 && metering_taps == 0 &&
+         meter_subscriptions == 0 && registered_textures == 0 &&
+         event_monitors == 0 && session_timers == 0 && power_assertions == 0 &&
+         writers == 0 && compositors == 0;
+}
+
+ResourceCensus operator+(ResourceCensus lhs, const ResourceCensus& rhs) {
+  lhs += rhs;
+  return lhs;
+}
+
+bool operator==(const ResourceCensus& lhs, const ResourceCensus& rhs) {
+  return lhs.capture_streams == rhs.capture_streams &&
+         lhs.camera_sessions == rhs.camera_sessions &&
+         lhs.microphone_sessions == rhs.microphone_sessions &&
+         lhs.metering_taps == rhs.metering_taps &&
+         lhs.meter_subscriptions == rhs.meter_subscriptions &&
+         lhs.registered_textures == rhs.registered_textures &&
+         lhs.overlay_engines == rhs.overlay_engines &&
+         lhs.event_monitors == rhs.event_monitors &&
+         lhs.session_timers == rhs.session_timers &&
+         lhs.power_assertions == rhs.power_assertions &&
+         lhs.writers == rhs.writers && lhs.compositors == rhs.compositors;
+}
+
+bool operator!=(const ResourceCensus& lhs, const ResourceCensus& rhs) {
+  return !(lhs == rhs);
+}
+
 bool MeteringSubscriptions::Clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   bool any = false;

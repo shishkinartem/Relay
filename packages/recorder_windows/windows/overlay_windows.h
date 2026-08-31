@@ -188,6 +188,18 @@ class OverlayWindows {
   void PushCameraPreviewFrame(const uint8_t* bgra, uint32_t width, uint32_t height,
                               uint32_t stride);
 
+  // The overlay layer's rows of spec 19.1's census.
+  //
+  // This host destroys each window and its engine on hide, so both the
+  // engines and the preview's texture return to zero after a session — a
+  // different lifetime from macOS's, and 19.1's second table permits either.
+  // `docs/development/compatibility-matrix.md` records which is which.
+  //
+  // The low-level hooks are counted as event monitors: they are installed for
+  // exactly as long as a menu is open and are what 19.1 means by "low-level
+  // input hooks".
+  ResourceCensus DebugCensus() const;
+
   std::vector<std::string> ExcludedWindowIds() const;
   std::vector<HWND> ExcludedWindows() const;
 
@@ -217,6 +229,9 @@ class OverlayWindows {
                 std::function<void(double, double)> on_content_size, bool wants_texture,
                 std::string* error);
     void Destroy();
+    // Whether this window has a platform texture registered against its engine
+    // — the camera preview's, today (spec 19.1).
+    bool has_texture() const { return texture_ != nullptr; }
     void SetFrame(const RECT& frame);
     // Records where the strip is now as the spot to re-resolve it to when the
     // ground moves under it, as a fraction of the usable area (spec 33.3).

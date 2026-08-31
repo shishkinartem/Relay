@@ -9,6 +9,13 @@ import 'app_text.dart';
 import 'camera_preset_tiles.dart';
 import 'level_meter.dart';
 
+/// design gap: the connected design has no device sheet — not the window, and
+/// none of the six states drawn below (loading, empty, a device lost, no
+/// permission, a level running, silent). The v0.5 screens were never drawn:
+/// see `design/README.md` → *The v0.5 interface has no design backing*. What
+/// is here is built from existing components and tokens rather than invented,
+/// which is the most the rule in `docs/development/design-system.md` allows.
+///
 /// The device list a chevron opens (§33.4, design's device sheet).
 ///
 /// A presentation component: it renders a snapshot and raises one intent. It
@@ -144,6 +151,10 @@ class InputMenuSheet extends StatelessWidget {
   );
 
   /// Window mode's placement row (§33.5).
+  ///
+  /// design gap: the four-corner grid appears on no screen. `1e` draws the
+  /// window-mode preview and says nothing about choosing where the tile lands —
+  /// `design/README.md` → *The v0.5 interface has no design backing*.
   ///
   /// Four named corners rather than a drag, because in window mode the preview
   /// is a separate captioned object and not the tile (design `1e`): there is

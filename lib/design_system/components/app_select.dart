@@ -5,6 +5,10 @@ import '../icons/app_icons.dart';
 import '../tokens/app_colors.dart';
 import '../tokens/app_typography.dart';
 
+/// design gap: no field of this kind appears on the canvas. Modelled on the
+/// hairline rows `1c` and `1m` do draw, rather than invented — see
+/// `design/README.md` → *The v0.5 interface has no design backing*.
+///
 /// The closed state of a choice: what is chosen, and a chevron to change it
 /// (§33.2).
 ///

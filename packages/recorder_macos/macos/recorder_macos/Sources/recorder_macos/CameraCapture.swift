@@ -163,6 +163,14 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
   /// outlives its recording sits on a fully configured camera graph until the
   /// next `prepare` happens to reuse it. Releasing is what makes "the recording
   /// is over" true of the object graph and not only of the file.
+  /// Whether a device input is still attached (§19.1).
+  ///
+  /// Deliberately not `isRunning`: a *stopped* capture that kept its input is
+  /// still a configured graph holding a device, which is the thing
+  /// `releaseSession` exists to end and the thing the census has to be able to
+  /// see. `release()` is what makes this false.
+  var isConfigured: Bool { !session.inputs.isEmpty }
+
   func release() {
     stop()
     session.beginConfiguration()
@@ -318,6 +326,14 @@ final class MicrophoneCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
   }
 
   /// Detaches the device as well as stopping it. See `CameraCapture.release()`.
+  /// Whether a device input is still attached (§19.1).
+  ///
+  /// Deliberately not `isRunning`: a *stopped* capture that kept its input is
+  /// still a configured graph holding a device, which is the thing
+  /// `releaseSession` exists to end and the thing the census has to be able to
+  /// see. `release()` is what makes this false.
+  var isConfigured: Bool { !session.inputs.isEmpty }
+
   func release() {
     stop()
     session.beginConfiguration()

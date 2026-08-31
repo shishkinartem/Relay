@@ -853,6 +853,29 @@ std::vector<HWND> OverlayWindows::ExcludedWindows() const {
   return windows;
 }
 
+ResourceCensus OverlayWindows::DebugCensus() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ResourceCensus census;
+  if (control_strip_) {
+    ++census.overlay_engines;
+  }
+  if (camera_preview_) {
+    ++census.overlay_engines;
+    if (camera_preview_->has_texture()) {
+      ++census.registered_textures;
+    }
+  }
+  if (input_menu_) {
+    ++census.overlay_engines;
+  }
+  // Read without `mutex_`, because they are installed, removed and read only on
+  // the platform thread — which is the same thread this is answered on, and the
+  // reason the hooks deliberately take no lock of their own.
+  census.event_monitors = (mouse_hook_ != nullptr ? 1 : 0) +
+                          (keyboard_hook_ != nullptr ? 1 : 0);
+  return census;
+}
+
 std::vector<std::string> OverlayWindows::ExcludedWindowIds() const {
   std::vector<std::string> ids;
   for (const HWND window : ExcludedWindows()) {

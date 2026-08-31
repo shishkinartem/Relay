@@ -57,8 +57,11 @@ class TestHarness {
     final FakeRecorder fakeRecorder = recorder ?? FakeRecorder();
     final FakeRecorderPermissions fakePermissions =
         permissions ?? FakeRecorderPermissions();
+    // One resource model behind both fakes, so `debugResourceCensus` counts the
+    // overlays' engines, texture and monitors alongside the session's own
+    // capture, writer and timers — which is what §19.1 asks for in one answer.
     final FakeOverlayWindowController fakeOverlays =
-        FakeOverlayWindowController();
+        FakeOverlayWindowController(resources: fakeRecorder.resources);
     final AppLogger logger = AppLogger(sinks: <LogSink>[MemoryLogSink()]);
     final SettingsController settingsController = SettingsController(
       repository: InMemorySettingsRepository(settings),
@@ -123,6 +126,24 @@ class TestHarness {
 
   Future<void> initialize() => viewModel.initialize();
 
+  /// What `main.dart`'s `onExitRequested` does, through
+  /// `CompositionRoot.dispose()`: start the teardown, then wait for the
+  /// platform to finish it before the process would exit (§19.1).
+  ///
+  /// Recorded, so [dispose] does not dispose the view model a second time —
+  /// `ChangeNotifier` treats that as an error, and a harness that hit it would
+  /// fail every test that quits rather than stops.
+  Future<void> quit() async {
+    if (_quit) {
+      return;
+    }
+    _quit = true;
+    viewModel.dispose();
+    await viewModel.shutdown;
+  }
+
+  bool _quit = false;
+
   Widget wrap(Widget child) => RelayTheme(
     child: AppScope(
       recorder: viewModel,
@@ -137,7 +158,9 @@ class TestHarness {
   Future<void> dispose() async {
     await overlays.dispose();
     await uploads.dispose();
-    viewModel.dispose();
+    if (!_quit) {
+      viewModel.dispose();
+    }
     if (directory.existsSync()) {
       directory.deleteSync(recursive: true);
     }

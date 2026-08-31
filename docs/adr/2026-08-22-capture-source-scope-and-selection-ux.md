@@ -54,12 +54,19 @@ and §28 already forbade booleans such as `isFullScreen`. This is a scope change
 not an architecture change. `CaptureSourceType` remains a value object.
 
 **Overlay exclusion becomes safety-critical rather than defense-in-depth.** With a
-window source, `SCContentFilter(window:)` scopes the control strip and the camera
-preview out of capture regardless. With a display source, both overlays sit inside
-the captured bounds by definition, and `SCContentFilter(display:excludingWindows:)`
-/ `WDA_EXCLUDEFROMCAPTURE` are the *only* mechanism preventing them from being
+window source, `SCContentFilter(window:)` scopes every overlay out of capture
+regardless. With a display source, they all sit inside the captured bounds by
+definition, and `SCContentFilter(display:excludingWindows:)` /
+`WDA_EXCLUDEFROMCAPTURE` are the *only* mechanism preventing them from being
 recorded. §6 is updated to say so, and overlay-exclusion integration tests must
 run against a display source.
+
+There were two overlays when this was written — the control strip and the camera
+preview. **There are three:** the input menu a chevron opens is a third
+always-on-top window on exactly these terms (§6, §33.4). The rule was never about
+a count, and is stated here without one so the next overlay is covered by it
+rather than by an amendment: *every* application-owned always-on-top surface a
+session puts on screen reaches the exclusion list.
 
 **Capture volume rises.** A display source is typically larger than a window, so
 downscaling to the 720p/1080p canvas does more work per frame. The §24 soak tests

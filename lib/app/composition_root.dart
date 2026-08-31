@@ -182,7 +182,14 @@ class CompositionRoot {
     }
     _disposed = true;
 
-    await _quietly('recorder', () async => recorder.dispose());
+    // Both halves: `dispose()` starts the teardown and `shutdown` is when the
+    // platform has finished it. Only the first was awaited before, so a quit
+    // during a recording could return `AppExitResponse.exit` while the native
+    // abort was still closing the camera and finalizing the `.part` (§19.1).
+    await _quietly('recorder', () async {
+      recorder.dispose();
+      await recorder.shutdown;
+    });
     await Future.wait<void>(<Future<void>>[
       _quietly('uploads', uploads.dispose),
       for (final UploadDestination destination in destinations.all)

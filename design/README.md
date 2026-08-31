@@ -87,18 +87,48 @@ product decision, record it in `../TECHNICAL_SPEC.md` and an ADR under
 | `1m` | Settings — destination and storage | §15 |
 | `1n` | Startup recovery | §18 |
 
-## Proposed v0.5 screens live outside this directory, for now
+## The v0.5 interface has no design backing
 
-The screens proposed on 2026-08-30 — the fixed source picker, the movable
-control strip with device sheets, the adjustable camera picture-in-picture and
-the wide breakpoint — were drafted as a separate review canvas rather than
-pushed into the Claude Design project, because they are a **proposal**: they
-correspond to `TECHNICAL_SPEC.md` §33 and four ADRs that are all still
-`Proposed`.
+**Corrected 2026-08-31.** This section previously said the v0.5 screens "were
+drafted as a separate review canvas" that was not pushed into the Claude Design
+project because the work was "a **proposal**: they correspond to
+`TECHNICAL_SPEC.md` §33 and four ADRs that are all still `Proposed`."
 
-Nothing in this directory has changed. On acceptance the screens are added to
-the Claude Design project, this directory is re-pulled, and `preview.html` is
-regenerated — the one-way rule below is unaffected.
+Every part of that is now wrong, and two parts were wrong when written:
+
+- **The four ADRs all read `Accepted`**, and have since 2026-08-30 — the same
+  day they were written. None was ever `Proposed` in the repository.
+- **All six delivery stages have shipped**, and §33 was folded into the numbered
+  spec sections on 2026-08-31.
+- **No separate review canvas exists.** Confirmed with the product owner on
+  2026-08-31: there is none, and anything that existed would be vendored here.
+  The connected design below is stamped 2026-08-24 and contains zero occurrences
+  of `caret`, `chevron`, `preset`, `Reset position` or `System default`.
+
+So this is not a vendoring gap. **Eight pieces of shipped interface were built
+without a designed screen**, and `../CLAUDE.md`'s rule — "where the design has no
+state for something, surface the gap; do not invent polished UX for it" — was
+satisfied by none of them until now. Each is marked `design gap:` at its source:
+
+| Undrawn | Where |
+|---|---|
+| The input-menu window, and all six of its states — loading, empty, device lost, no permission, level running, silent | `lib/design_system/components/input_menu_sheet.dart` |
+| The three carets on the control strip | `lib/design_system/components/recording_control_strip.dart` |
+| The launch screen's per-input disclosure, and its chevron | `lib/design_system/components/app_disclosure.dart` |
+| The device select field | `lib/design_system/components/app_select.dart` |
+| The level meter — live, dead and clipping | `lib/design_system/components/level_meter.dart` |
+| The camera preset picker | `lib/design_system/components/camera_preset_tiles.dart` |
+| The four-corner grid, window mode only | `lib/design_system/components/input_menu_sheet.dart` |
+| The preset's shape drawn *inside* the window-mode preview | `lib/design_system/components/camera_preview_surface.dart` |
+
+What is built is assembled from the existing components and tokens rather than
+invented, which is the most the rule allows once something has to ship. It is
+not a substitute for the screens. **The remedy is to draw them in the Claude
+Design project, re-pull this directory and regenerate `preview.html`** — at
+which point each marker above is removed by the change that implements the real
+screen, not before.
+
+Nothing in this directory has changed.
 
 ## Design decisions adopted into the spec
 
@@ -124,7 +154,9 @@ polished UX for them — see the "Missing states" rule in
 - Telegram credential configuration (§16)
 - a muted state for the system-audio glyph — `1f` and `1g` only ever draw it on.
   The implementation reuses the system's own slash treatment from mic-off and
-  camera-off (`AppIcons.systemAudioOff`, marked `design gap:` in the source).
+  camera-off (`AppIcons.systemAudioOff`, marked `design gap:` in the source);
+- the whole of the v0.5 interface — eight pieces, listed in *The v0.5 interface
+  has no design backing* above.
 
 `1d`'s annotation also no longer matches the implemented behaviour. It describes
 a blocking screen for any explicitly enabled source whose permission is refused;

@@ -85,7 +85,14 @@ all three surfaces, against a display source.
 | Kind not selectable on this platform | no chevron is drawn; the control stays a plain toggle |
 
 The strip's own menu — reached from the strip background, not from an input —
-carries `Reset position` and nothing else for now.
+would carry `Reset position` and nothing else.
+
+**It has not been built.** `OverlayCommand.resetStripPosition` is declared, both
+hosts answer it and the Dart side dispatches it; there is no menu, no key
+binding and no button that raises it, so the command is unreachable in the
+shipped application. The same is true of the eight nudge commands. Recorded as an
+open gap in `../development/compatibility-matrix.md` → *The movable control
+strip*, and in `TECHNICAL_SPEC.md` §33.3 — not as a shipped affordance.
 
 ## Alternatives considered
 

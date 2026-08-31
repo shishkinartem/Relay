@@ -23,6 +23,11 @@ import 'hatched_surface.dart';
 /// box it is given. A platform texture has no intrinsic size and would
 /// otherwise be stretched to fill the window — which is what made a 16:9
 /// camera look squeezed in a square preview.
+/// design gap: `1e` draws the window-mode preview as a captioned rectangle
+/// holding a whole camera frame, from before presets existed. How a `Square` or
+/// `Circle` preset is shown *inside* that rectangle — the tile's shape drawn on
+/// the picture while the panel stays a captioned rectangle — is undrawn.
+/// `design/README.md` → *The v0.5 interface has no design backing*.
 class CameraPreviewSurface extends StatelessWidget {
   const CameraPreviewSurface({
     super.key,

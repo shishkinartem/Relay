@@ -615,6 +615,11 @@ class MeteringSubscriptions {
   bool Release(MediaDeviceKind kind);
   bool IsActive(MediaDeviceKind kind) const;
   bool AnyActive() const;
+  // How many references are outstanding across every kind, for the census
+  // (spec 19.1). Counted rather than "is anything active", because a leaked
+  // reference with no tap open is a meter that will re-open a device on the
+  // next start.
+  int Total() const;
   // Drops every reference, reporting whether anything was open. A tap must not
   // outlive the recorder that owns it.
   bool Clear();
@@ -623,6 +628,54 @@ class MeteringSubscriptions {
   mutable std::mutex mutex_;
   int counts_[kMediaDeviceKindCount] = {0, 0, 0};
 };
+
+// What the host is still holding, counted (spec 19.1).
+//
+// Spec 19.1 observes that "state is cleaned up" cannot be a requirement,
+// because nothing can fail it. This is what makes it falsifiable: every row is
+// an integer, and the two tests it names — census equality across ten start →
+// stop cycles, and every row of its first table zero after one stop — are both
+// equality comparisons on this.
+//
+// Here rather than in the plugin so the C++ suite can reach the arithmetic, and
+// so the three things that answer it — the session, the overlay windows and the
+// meter — each report their own rows and are summed once. The field names are
+// the wire keys, and match ResourceCensus in recorder_platform_interface and in
+// RecorderCore one for one
+// (docs/architecture/platform-channel-contract.md).
+struct ResourceCensus {
+  int capture_streams = 0;
+  int camera_sessions = 0;
+  int microphone_sessions = 0;
+  int metering_taps = 0;
+  int meter_subscriptions = 0;
+  int registered_textures = 0;
+  int overlay_engines = 0;
+  int event_monitors = 0;
+  int session_timers = 0;
+  int power_assertions = 0;
+  int writers = 0;
+  int compositors = 0;
+
+  // Row-wise addition. Each contributor counts only what it owns, so the sum is
+  // the whole census and nothing is counted twice.
+  ResourceCensus& operator+=(const ResourceCensus& other);
+
+  // True when every row of spec 19.1's *first* table is zero.
+  //
+  // `overlay_engines` is excluded deliberately: 19.1's second table lets a host
+  // keep its overlay engines for the life of the process. This host does not —
+  // it destroys each window and its engine on hide — so the row happens to be
+  // zero here too, and the exclusion is about the rule rather than about
+  // Windows. What every host owes instead is stability, which the census
+  // *equality* test is what checks.
+  bool session_resources_released() const;
+};
+
+ResourceCensus operator+(ResourceCensus lhs, const ResourceCensus& rhs);
+
+bool operator==(const ResourceCensus& lhs, const ResourceCensus& rhs);
+bool operator!=(const ResourceCensus& lhs, const ResourceCensus& rhs);
 
 // The device a meter is pointed at (spec 33.2).
 //

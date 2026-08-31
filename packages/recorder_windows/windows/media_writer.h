@@ -69,6 +69,10 @@ class MediaWriter {
   // for startup recovery; nothing is deleted here (spec 18).
   void Abort();
 
+  // Whether a sink writer, its inputs and its buffers still exist, for the
+  // census (spec 19.1). Both Finalize and Abort drop it.
+  bool is_open() const;
+
   bool hardware_encoding() const { return hardware_encoding_; }
   const std::string& encoder_name() const { return encoder_name_; }
   uint64_t encoded_video_frames() const { return encoded_video_frames_.load(); }
@@ -89,7 +93,7 @@ class MediaWriter {
   void Close();
 
   Config config_;
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   bool media_foundation_started_ = false;
   bool writing_ = false;
   bool finalized_ = false;

@@ -69,6 +69,10 @@ class VideoCompositor {
   void SetCameraEnabled(bool enabled);
   bool camera_enabled() const;
 
+  // Whether the compositor still holds its device, its processor and its
+  // canvas pool, for the census (spec 19.1). Shutdown drops all three.
+  bool is_initialized() const;
+
   // Re-points the tile mid-session (spec 33.5).
   //
   // Applied between frames, for the next frame: Compose takes its own copy of

@@ -147,6 +147,9 @@ class RecorderWindowsPlugin : public flutter::Plugin {
 
   HWND MainWindow() const;
   flutter::EncodableMap Capabilities() const;
+  // The census as the wire carries it (spec 19.1). Static: it reads nothing
+  // but its argument.
+  static flutter::EncodableMap CensusMap(const ResourceCensus& census);
   void RunOnPlatformThread(std::function<void()> work);
   // Replies to `result` on the platform thread, whichever thread produced it.
   void ReplySuccess(const MethodResultPtr& result, flutter::EncodableValue value);

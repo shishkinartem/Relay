@@ -857,6 +857,32 @@ void RecorderWindowsPlugin::WireSessionEvents() {
   session_ = std::make_shared<RecordingSession>(std::move(events));
 }
 
+flutter::EncodableMap RecorderWindowsPlugin::CensusMap(const ResourceCensus& census) {
+  // Every value an int32_t, `writers` and `compositors` included: one type for
+  // the whole map is what lets Dart compare it in a single equality
+  // (docs/architecture/platform-channel-contract.md).
+  flutter::EncodableMap map;
+  const std::pair<const char*, int> rows[] = {
+      {"captureStreams", census.capture_streams},
+      {"cameraSessions", census.camera_sessions},
+      {"microphoneSessions", census.microphone_sessions},
+      {"meteringTaps", census.metering_taps},
+      {"meterSubscriptions", census.meter_subscriptions},
+      {"registeredTextures", census.registered_textures},
+      {"overlayEngines", census.overlay_engines},
+      {"eventMonitors", census.event_monitors},
+      {"sessionTimers", census.session_timers},
+      {"powerAssertions", census.power_assertions},
+      {"writers", census.writers},
+      {"compositors", census.compositors},
+  };
+  for (const auto& row : rows) {
+    map[flutter::EncodableValue(row.first)] =
+        flutter::EncodableValue(static_cast<int32_t>(row.second));
+  }
+  return map;
+}
+
 // Runs on the serial worker: the camera and microphone probes are COM calls.
 flutter::EncodableMap RecorderWindowsPlugin::Capabilities() const {
   flutter::EncodableMap map;
@@ -1356,6 +1382,21 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
       return;
     }
     shared->Success();
+    return;
+  }
+  if (method == "debugResourceCensus") {
+    // Answered synchronously on the platform thread, which is where the overlay
+    // windows and the hooks may be read at all. Nothing here opens, closes or
+    // waits on anything: a census that could block would be a new way for a
+    // test to hang the very teardown it is checking.
+    ResourceCensus census = overlays_.DebugCensus() + meter_.DebugCensus();
+    // The shared_ptr is copied first so a release on the worker cannot drop the
+    // session between the test and the call, which is the pattern every other
+    // arm here uses.
+    if (const std::shared_ptr<RecordingSession> session = session_) {
+      census += session->DebugCensus();
+    }
+    shared->Success(flutter::EncodableValue(CensusMap(census)));
     return;
   }
   if (method == "releaseSession") {

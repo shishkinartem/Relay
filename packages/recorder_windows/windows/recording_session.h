@@ -121,6 +121,14 @@ class RecordingSession {
 
   SessionState state() const;
   bool has_camera_frames() const;
+
+  // This session's rows of spec 19.1's census.
+  //
+  // Every row is read from the thing that owns it rather than from a flag
+  // kept beside it, so a resource released without the flag being cleared
+  // still reads as released. Safe from any thread: each predicate takes the
+  // lock its own object already uses, and `camera_` takes `camera_mutex_`.
+  ResourceCensus DebugCensus() const;
   double camera_aspect_ratio() const;
   uint32_t camera_frame_width() const;
   uint32_t camera_frame_height() const;
@@ -239,7 +247,7 @@ class RecordingSession {
   // thread has done about it; `awake_thread_` is joinable exactly while
   // `awake_held_` is true. All three are read and written only under
   // `awake_mutex_`.
-  std::mutex awake_mutex_;
+  mutable std::mutex awake_mutex_;
   std::condition_variable awake_cv_;
   std::thread awake_thread_;
   bool awake_held_ = false;

@@ -236,6 +236,27 @@ final class OverlayWindowController {
     endLeftMouseWatch()
   }
 
+  /// The overlay layer's rows of §19.1's census.
+  ///
+  /// The engines are *expected* to be non-zero: this host keeps them for the
+  /// life of the process, which §19.1's second table permits explicitly and
+  /// `docs/development/compatibility-matrix.md` records. What must not move is
+  /// the number, and the census-equality test is what holds it still.
+  ///
+  /// `screenObserver` is not counted. It is installed once in `init`, before
+  /// any session exists, so it belongs to the launch census rather than to
+  /// anything a session installed — and §19.1 counts only the latter.
+  ///
+  /// Main thread only, like every other read of these windows.
+  var debugCensus: ResourceCensus {
+    ResourceCensus(
+      registeredTextures: previewTextureId == nil ? 0 : 1,
+      overlayEngines: [stripEngine, previewEngine, menuEngine]
+        .compactMap { $0 }.count,
+      eventMonitors: dragEndMonitors.count + menuDismissMonitors.count
+        + (leftMouseMonitor == nil ? 0 : 1))
+  }
+
   /// Raised by the control strip and forwarded to the application engine.
   var onCommand: ((String) -> Void)?
 
@@ -422,17 +443,6 @@ final class OverlayWindowController {
       ?? makePanel(
         for: engine, contentRect: frame, acceptsMouse: true, movable: true)
     previewPanel = panel
-    place(panel, at: frame)
-    announceOverlayWindow(panel, wasOnScreen: wasOnScreen)
-
-    // Armed only once the panel is on screen. The signal drives the preview
-    // engine's raster thread, and there is nothing for it to draw into until
-    // the window exists.
-    if let previewTextureId {
-      previewSignalLock.lock()
-      previewSignal = (engine: engine, textureId: previewTextureId)
-      previewSignalLock.unlock()
-    }
 
     // The crop and the mask travel with the shape, because the preview has to
     // draw what the compositor draws: design `1p` promises they are the same
@@ -459,7 +469,26 @@ final class OverlayWindowController {
       "fit": presentation.fit.rawValue,
       "cornerRadiusRatio": presentation.cornerRadiusRatio,
     ]
+    // Pushed *before* the panel comes back, for the reason the strip's snapshot
+    // is: the first frame the user sees has to be this session's. The preview
+    // carries a second copy of the same hazard — the texture id — which is why
+    // `hideCameraPreview` unregisters it and this registers a fresh one above.
+    // Placed after a push that carried no texture, the window would come back
+    // holding the previous session's last camera frame until the new camera
+    // delivered, which is exactly the row §19.1 puts under "the last composited
+    // camera frame".
     previewChannel?.invokeMethod("cameraPreviewState", arguments: lastPreviewState)
+    place(panel, at: frame)
+    announceOverlayWindow(panel, wasOnScreen: wasOnScreen)
+
+    // Armed only once the panel is on screen. The signal drives the preview
+    // engine's raster thread, and there is nothing for it to draw into until
+    // the window exists.
+    if let previewTextureId {
+      previewSignalLock.lock()
+      previewSignal = (engine: engine, textureId: previewTextureId)
+      previewSignalLock.unlock()
+    }
   }
 
   func hideCameraPreview() {
@@ -475,6 +504,36 @@ final class OverlayWindowController {
     previewSignalLock.lock()
     previewSignal = nil
     previewSignalLock.unlock()
+
+    // The texture goes with the window, and this is the whole of the fix for
+    // "the preview shows the previous session's last frame". A registered
+    // texture keeps whatever was last uploaded into it: `copyPixelBuffer`
+    // returning nil does not blank it, it leaves the engine drawing the frame
+    // it already has. Re-showing then re-attached the same id and the user saw
+    // the end of the last recording until the camera delivered — §19.1's "the
+    // preview is blank the moment it is next shown, before any new frame
+    // arrives". Unregistering drops those contents; `showCameraPreview`
+    // registers a fresh one.
+    //
+    // Ordered after the signal is disarmed, so the camera queue cannot be
+    // marking this texture available while it is being unregistered. Both this
+    // and the push below run on the main thread, where every path that shows or
+    // hides a panel already runs.
+    if let previewTextureId {
+      previewEngine?.unregisterTexture(previewTextureId)
+      self.previewTextureId = nil
+    }
+    // Rewound and pushed, not merely cleared. The preview's engine, its widget
+    // and its last rendered frame all outlive the session — the same three
+    // things `hideControlStrip` has to rewind — so forgetting the snapshot on
+    // this side tells the window nothing. Without a texture id the widget drops
+    // its `Texture` and draws nothing, which is what makes the window blank
+    // before it goes rather than at some point after it comes back.
+    if !lastPreviewState.isEmpty {
+      lastPreviewState["textureId"] = nil
+      previewChannel?.invokeMethod(
+        "cameraPreviewState", arguments: lastPreviewState)
+    }
     lastPreviewState = [:]
   }
 

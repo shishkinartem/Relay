@@ -652,6 +652,19 @@ void main() {
       await pumpEventQueue();
 
       expect(harness.recorder.calls, contains('abort'));
+      // And the release, which this test's name always promised and did not
+      // check. An abort stops the capture; it does not detach the camera's and
+      // the microphone's device inputs — §19.1's first table gives that to
+      // `releaseSession`, and lists "a fatal capture error" among the exits it
+      // applies to. Found by the census in
+      // `resource_census_test.dart`, which reported both inputs still
+      // configured after this exact sequence.
+      expect(harness.recorder.calls, contains('releaseSession'));
+      expect(
+        harness.recorder.calls.indexOf('abort'),
+        lessThan(harness.recorder.calls.indexOf('releaseSession')),
+        reason: 'a release must find a session that is no longer live',
+      );
     });
 
     test('a non-fatal error leaves the platform session alone', () async {

@@ -464,6 +464,16 @@ bool InputMeter::IsMetering(MediaDeviceKind kind) const {
   return subscriptions_.IsActive(kind);
 }
 
+ResourceCensus InputMeter::DebugCensus() const {
+  ResourceCensus census;
+  census.meter_subscriptions = subscriptions_.Total();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    census.metering_taps = tap_ ? 1 : 0;
+  }
+  return census;
+}
+
 void InputMeter::CloseTap() {
   std::shared_ptr<Tap> tap;
   {

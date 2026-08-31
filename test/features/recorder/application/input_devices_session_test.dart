@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import 'package:relay/core/settings/app_settings.dart';
+import 'package:relay/features/recorder/domain/session_state.dart';
 
 import '../../../support/fakes.dart';
 import '../../../support/harness.dart';
@@ -132,6 +133,152 @@ void main() {
         'getInputDevices(microphone)',
       ]),
     );
+  });
+
+  group('a device that goes away mid-recording (§33.7)', () {
+    /// Chooses a named microphone, starts recording, then unplugs it. What the
+    /// platform reports afterwards is the list without it.
+    Future<TestHarness> recordingWithMicrophoneUnplugged() async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.selectInputDevice(
+        MediaDeviceKind.microphone,
+        harness.viewModel
+            .devicesFor(MediaDeviceKind.microphone)
+            .firstWhere((MediaDevice d) => d.id == 'mic:mv7'),
+      );
+      await harness.viewModel.requestStart();
+      harness.recorder.calls.clear();
+
+      harness.recorder.devices = <MediaDeviceKind, List<MediaDevice>>{
+        ...harness.recorder.devices,
+        MediaDeviceKind.microphone: <MediaDevice>[
+          const MediaDevice(
+            id: 'mic:builtin',
+            kind: MediaDeviceKind.microphone,
+            label: 'MacBook Pro Microphone',
+            isSystemDefault: true,
+          ),
+        ],
+      };
+      harness.recorder.emit(
+        const RecorderDevicesChangedEvent(MediaDeviceKind.microphone),
+      );
+      await pumpEventQueue();
+      return harness;
+    }
+
+    test('the running capture falls back to the system default', () async {
+      final TestHarness harness = await recordingWithMicrophoneUnplugged();
+
+      // The catalogue demoting the choice fixes what the *next* session opens.
+      // §33.7's row is present tense — "fall back to the system default" — so
+      // the capture that is running now has to be re-pointed too.
+      expect(
+        harness.recorder.liveDevices[MediaDeviceKind.microphone],
+        isNull,
+        reason: 'null is the platform default on the wire',
+      );
+      expect(
+        harness.recorder.calls,
+        contains('selectInputDevice(microphone, default)'),
+      );
+    });
+
+    test('the choice is remembered so replugging restores it', () async {
+      final TestHarness harness = await recordingWithMicrophoneUnplugged();
+
+      expect(
+        harness.viewModel.unresolvedDevices[MediaDeviceKind.microphone],
+        'Shure MV7',
+      );
+    });
+
+    test('a device still present is not re-pointed for nothing', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.selectInputDevice(
+        MediaDeviceKind.microphone,
+        harness.viewModel
+            .devicesFor(MediaDeviceKind.microphone)
+            .firstWhere((MediaDevice d) => d.id == 'mic:mv7'),
+      );
+      await harness.viewModel.requestStart();
+      harness.recorder.calls.clear();
+
+      // Something else was plugged in. The microphone the session holds is
+      // still there, so nothing about the live capture may change: a swap costs
+      // a gap in the audio (§33.7, "no-op; no gap in the audio").
+      harness.recorder.emit(
+        const RecorderDevicesChangedEvent(MediaDeviceKind.microphone),
+      );
+      await pumpEventQueue();
+
+      expect(
+        harness.recorder.calls.where((String c) => c.startsWith('selectInput')),
+        isEmpty,
+      );
+    });
+
+    test('the last device of a kind turns that input off', () async {
+      // "If there is none, that input turns off and the strip shows it off."
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.selectInputDevice(
+        MediaDeviceKind.microphone,
+        harness.viewModel
+            .devicesFor(MediaDeviceKind.microphone)
+            .firstWhere((MediaDevice d) => d.id == 'mic:mv7'),
+      );
+      await harness.viewModel.requestStart();
+
+      harness.recorder.devices = <MediaDeviceKind, List<MediaDevice>>{
+        ...harness.recorder.devices,
+        MediaDeviceKind.microphone: const <MediaDevice>[],
+      };
+      harness.recorder.emit(
+        const RecorderDevicesChangedEvent(MediaDeviceKind.microphone),
+      );
+      await pumpEventQueue();
+
+      expect(harness.recorder.calls, contains('setMicrophoneEnabled(false)'));
+      expect(
+        (harness.viewModel.state as SessionActive).microphoneEnabled,
+        isFalse,
+      );
+    });
+
+    test('nothing is re-pointed when no session is running', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.selectInputDevice(
+        MediaDeviceKind.microphone,
+        harness.viewModel
+            .devicesFor(MediaDeviceKind.microphone)
+            .firstWhere((MediaDevice d) => d.id == 'mic:mv7'),
+      );
+      harness.recorder.calls.clear();
+
+      harness.recorder.devices = <MediaDeviceKind, List<MediaDevice>>{
+        ...harness.recorder.devices,
+        MediaDeviceKind.microphone: const <MediaDevice>[],
+      };
+      harness.recorder.emit(
+        const RecorderDevicesChangedEvent(MediaDeviceKind.microphone),
+      );
+      await pumpEventQueue();
+
+      // There is no live capture to re-point, and what the next recording opens
+      // is `RecordingConfiguration`'s business.
+      expect(
+        harness.recorder.calls.where((String c) => c.startsWith('selectInput')),
+        isEmpty,
+      );
+    });
   });
 
   test('a level event reaches the meter that asked for it', () async {

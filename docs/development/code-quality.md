@@ -14,8 +14,8 @@ Create an abstraction when at least one is true:
 
 ## Enforced, not just stated
 
-`test/architecture_test.dart` runs on every `flutter test` and checks six of the rules
-below against the source. Breaking one is a failing test, not a review comment:
+`test/architecture_test.dart` runs on every `flutter test` and checks seven of the
+rules below against the source. Breaking one is a failing test, not a review comment:
 
 1. no `Platform.isMacOS` / `isWindows` / `isLinux` / `operatingSystem` anywhere in `lib/`,
    including the composition root;
@@ -23,15 +23,25 @@ below against the source. Breaking one is a failing test, not a review comment:
 3. `dart:io` only from the six files in the test's allowlist;
 4. `lib/design_system/` never references `features/`;
 5. no Flutter widget imports in any `/domain/` file;
-6. every collaborator an `/application/` class holds is an interface, not a concrete type.
+6. every collaborator an `/application/` class holds is an interface, not a concrete type;
+7. **no file in `lib/` can reach itself through imports** — the *Modularity* rule
+   below, made executable. Dart compiles an import cycle without complaint and
+   `flutter analyze` does not report one, so a cycle is otherwise found only by
+   the person who cannot work out where to start reading.
 
 Both allowlists — the `dart:io` file list and the substitutability `values` set — are
 meant to be extended, by name and with a stated reason in the change that adds it.
 Weakening a rule should cost more than satisfying it.
 
+Two of the seven carry a **self-check**: a test asserting the rule has something
+to reason about at all. Rule 6 checks that the application classes it inspects
+were found, and rule 7 that the import graph is non-empty. A gate that silently
+matches nothing passes forever, which is the one failure mode an executable rule
+shares with a written one.
+
 ## Modularity
 
-Keep dependencies acyclic.
+Keep dependencies acyclic. **[gate]** — rule 7 above.
 
 Avoid catch-all `utils`, `helpers`, `common`, or god-service modules.
 

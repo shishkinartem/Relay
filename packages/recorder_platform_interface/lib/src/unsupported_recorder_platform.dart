@@ -11,6 +11,7 @@ import 'models/recorder_error.dart';
 import 'models/recorder_event.dart';
 import 'models/recording_configuration.dart';
 import 'models/recording_file.dart';
+import 'models/resource_census.dart';
 import 'recorder.dart';
 
 /// The platform used when no native implementation is registered.
@@ -51,6 +52,10 @@ class _UnsupportedRecorder implements Recorder {
 
   @override
   Future<void> dispose() async {}
+
+  /// Nothing was ever opened, so nothing is held.
+  @override
+  Future<ResourceCensus> debugResourceCensus() async => const ResourceCensus();
 
   @override
   Stream<RecorderEvent> get events => const Stream<RecorderEvent>.empty();

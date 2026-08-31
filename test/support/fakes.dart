@@ -7,12 +7,167 @@ import 'package:relay/features/recorder/domain/local_recording_store.dart';
 import 'package:relay/features/recorder/domain/session_events.dart';
 import 'package:upload_core/upload_core.dart';
 
+/// What a host is holding, modelled well enough for §19.1's two census tests to
+/// be able to fail.
+///
+/// A fake that answered `debugResourceCensus` with a constant would make both
+/// tests vacuous — they would pass against a view model that tore nothing down.
+/// So this behaves like a host that obeys §19.1, and the tests assert that the
+/// *application* drives it back to zero: a `releaseSession` that is not sent, a
+/// meter that is not stopped, an overlay that is not hidden all show up as a
+/// non-zero row.
+///
+/// What it cannot prove is that macOS and Windows hold the same discipline in
+/// their own object graphs. That belongs to the native suites and to a real
+/// integration run, and `docs/development/compatibility-matrix.md` records the
+/// gap rather than this file pretending to cover it.
+class FakeHostResources {
+  bool _sessionPrepared = false;
+  int _captureStreams = 0;
+  int _cameraSessions = 0;
+  int _microphoneSessions = 0;
+  int _writers = 0;
+  int _compositors = 0;
+  int _sessionTimers = 0;
+  int _powerAssertions = 0;
+
+  /// Counted per kind, the way the contract says nested starts are counted.
+  final Map<MediaDeviceKind, int> _meterSubscriptions =
+      <MediaDeviceKind, int>{};
+
+  /// Engines are created once and kept for the life of the process — the macOS
+  /// choice, which §19.1's second table permits. Their *number* is what the
+  /// equality test holds still.
+  final Set<String> _engines = <String>{};
+
+  bool _stripShown = false;
+  bool _menuShown = false;
+  bool _previewShown = false;
+
+  int get _subscriberCount =>
+      _meterSubscriptions.values.fold(0, (int a, int b) => a + b);
+
+  /// The meter opens a tap of its own only when no recording already holds the
+  /// microphone: during a session the levels come off the live capture, and
+  /// §33.7 forbids opening that device a second time.
+  int get _meteringTaps =>
+      _subscriberCount > 0 && _microphoneSessions == 0 ? 1 : 0;
+
+  ResourceCensus get census => ResourceCensus(
+    captureStreams: _captureStreams,
+    cameraSessions: _cameraSessions,
+    microphoneSessions: _microphoneSessions,
+    meteringTaps: _meteringTaps,
+    meterSubscriptions: _subscriberCount,
+    registeredTextures: _previewShown ? 1 : 0,
+    overlayEngines: _engines.length,
+    eventMonitors: (_stripShown ? 1 : 0) + (_menuShown ? 1 : 0),
+    sessionTimers: _sessionTimers,
+    powerAssertions: _powerAssertions,
+    writers: _writers,
+    compositors: _compositors,
+  );
+
+  void prepared({required bool camera, required bool microphone}) {
+    _sessionPrepared = true;
+    _captureStreams = 1;
+    _writers = 1;
+    _compositors = 1;
+    _cameraSessions = camera ? 1 : 0;
+    _microphoneSessions = microphone ? 1 : 0;
+  }
+
+  void started() {
+    if (!_sessionPrepared) {
+      return;
+    }
+    _sessionTimers = 1;
+    _powerAssertions = 1;
+  }
+
+  /// The capture, the tick and the assertion go with the stop — §19.1 puts them
+  /// *before* finalization, so the recording indicator goes out when Stop is
+  /// pressed. The writer and the compositor survive it and are dropped by the
+  /// release.
+  void stopped() {
+    _captureStreams = 0;
+    _sessionTimers = 0;
+    _powerAssertions = 0;
+  }
+
+  void released() {
+    _sessionPrepared = false;
+    _cameraSessions = 0;
+    _microphoneSessions = 0;
+    _writers = 0;
+    _compositors = 0;
+  }
+
+  void disposed() {
+    stopped();
+    released();
+    _meterSubscriptions.clear();
+    _stripShown = false;
+    _menuShown = false;
+    _previewShown = false;
+  }
+
+  void inputEnabled(MediaDeviceKind kind, bool enabled) {
+    if (!_sessionPrepared) {
+      return;
+    }
+    switch (kind) {
+      case MediaDeviceKind.camera:
+        _cameraSessions = enabled ? 1 : 0;
+      case MediaDeviceKind.microphone:
+        _microphoneSessions = enabled ? 1 : 0;
+      case MediaDeviceKind.systemAudio:
+        break;
+    }
+  }
+
+  void meteringStarted(MediaDeviceKind kind) =>
+      _meterSubscriptions[kind] = (_meterSubscriptions[kind] ?? 0) + 1;
+
+  /// Idempotent, like the contract's `stopInputMetering`: a stop with nothing
+  /// running must not drive the count negative and hide a real leak.
+  void meteringStopped(MediaDeviceKind kind) =>
+      _meterSubscriptions.remove(kind);
+
+  void stripShown() {
+    _engines.add('controlStrip');
+    _stripShown = true;
+  }
+
+  /// The sheet closes with the strip and with the window it is anchored to
+  /// (§33.7), so the monitor it installed goes with it too.
+  void stripHidden() {
+    _stripShown = false;
+    _menuShown = false;
+  }
+
+  void previewShown() {
+    _engines.add('cameraPreview');
+    _previewShown = true;
+  }
+
+  void previewHidden() => _previewShown = false;
+
+  void menuShown() {
+    _engines.add('inputMenu');
+    _menuShown = true;
+  }
+
+  void menuHidden() => _menuShown = false;
+}
+
 /// A scripted [Recorder] with no native side.
 ///
 /// Records every call so a test can assert *what the application asked the
 /// platform to do*, which is the part of the contract that must not regress.
 class FakeRecorder implements Recorder {
   FakeRecorder({
+    FakeHostResources? resources,
     this.capabilities = const RecorderCapabilities(
       qualities: <RecordingQuality>{
         RecordingQuality.hd720,
@@ -39,7 +194,16 @@ class FakeRecorder implements Recorder {
     List<CaptureSource>? sources,
     Map<MediaDeviceKind, List<MediaDevice>>? devices,
   }) : sources = sources ?? defaultSources,
-       devices = devices ?? defaultDevices;
+       devices = devices ?? defaultDevices,
+       resources = resources ?? FakeHostResources();
+
+  /// The host's object graph, as §19.1 counts it. Shared with
+  /// [FakeOverlayWindowController] so the engines, the texture and the monitors
+  /// the overlays own are in the same census as the session's own resources.
+  final FakeHostResources resources;
+
+  @override
+  Future<ResourceCensus> debugResourceCensus() async => resources.census;
 
   static final List<CaptureSource> defaultSources = <CaptureSource>[
     const CaptureSource(
@@ -154,7 +318,10 @@ class FakeRecorder implements Recorder {
   void emit(RecorderEvent event) => _events.add(event);
 
   @override
-  Future<void> abort() async => calls.add('abort');
+  Future<void> abort() async {
+    calls.add('abort');
+    resources.stopped();
+  }
 
   /// Makes `releaseSession` fail the way a platform mid-teardown does.
   bool failOnReleaseSession = false;
@@ -162,6 +329,7 @@ class FakeRecorder implements Recorder {
   @override
   Future<void> releaseSession() async {
     calls.add('releaseSession');
+    resources.released();
     if (failOnReleaseSession) {
       throw const RecorderException(
         RecorderErrorCode.invalidState,
@@ -174,9 +342,15 @@ class FakeRecorder implements Recorder {
   /// away does.
   bool failOnDispose = false;
 
+  /// Held open by a test to keep the platform's teardown in flight, so the quit
+  /// path can be caught resolving before the platform has.
+  Completer<void>? holdDispose;
+
   @override
   Future<void> dispose() async {
     calls.add('dispose');
+    await holdDispose?.future;
+    resources.disposed();
     await _events.close();
     if (failOnDispose) {
       throw const RecorderException(
@@ -222,6 +396,7 @@ class FakeRecorder implements Recorder {
     calls.add('startInputMetering(${kind.name}, ${deviceId ?? 'default'})');
     metering.add(kind);
     meteredDevices[kind] = deviceId;
+    resources.meteringStarted(kind);
   }
 
   @override
@@ -229,6 +404,7 @@ class FakeRecorder implements Recorder {
     calls.add('stopInputMetering(${kind.name})');
     metering.remove(kind);
     meteredDevices.remove(kind);
+    resources.meteringStopped(kind);
   }
 
   /// The device each input was swapped to while a session was running.
@@ -308,6 +484,10 @@ class FakeRecorder implements Recorder {
     if (failure != null) {
       throw failure;
     }
+    resources.prepared(
+      camera: configuration.cameraEnabled,
+      microphone: configuration.microphoneEnabled,
+    );
   }
 
   @override
@@ -324,8 +504,10 @@ class FakeRecorder implements Recorder {
   Future<void> resume() async => calls.add('resume');
 
   @override
-  Future<void> setCameraEnabled(bool enabled) =>
-      _record('setCameraEnabled($enabled)');
+  Future<void> setCameraEnabled(bool enabled) async {
+    calls.add('setCameraEnabled($enabled)');
+    resources.inputEnabled(MediaDeviceKind.camera, enabled);
+  }
 
   @override
   Future<void> setMicrophoneEnabled(bool enabled) async {
@@ -335,6 +517,7 @@ class FakeRecorder implements Recorder {
     if (failure != null) {
       throw failure;
     }
+    resources.inputEnabled(MediaDeviceKind.microphone, enabled);
   }
 
   @override
@@ -351,12 +534,17 @@ class FakeRecorder implements Recorder {
     if (failure != null) {
       throw failure;
     }
+    resources.started();
   }
 
   @override
   Future<RecordingFile> stop() async {
     calls.add('stop');
     stopCount++;
+    // Before the failure check, and before the file is returned: §19.1 puts the
+    // capture's release *before* finalization, so a stop that then fails to
+    // finalize has still put the recording indicator out.
+    resources.stopped();
     final RecorderException? failure = failOnStop;
     if (failure != null) {
       throw failure;
@@ -460,6 +648,14 @@ class FakeRecorderPermissions implements RecorderPermissions {
 }
 
 class FakeOverlayWindowController implements OverlayWindowController {
+  FakeOverlayWindowController({FakeHostResources? resources})
+    : resources = resources ?? FakeHostResources();
+
+  /// Shared with [FakeRecorder], because the engines, the preview's texture and
+  /// the monitors these windows install are all rows of the one census §19.1
+  /// asks the recorder for.
+  final FakeHostResources resources;
+
   final List<String> calls = <String>[];
   final List<RecordingOverlayState> pushed = <RecordingOverlayState>[];
   final List<OverlayPlacement> cameraPlacements = <OverlayPlacement>[];
@@ -510,6 +706,7 @@ class FakeOverlayWindowController implements OverlayWindowController {
   ) async {
     calls.add('showInputMenu(${state.kind.name})');
     menuStates.add(state);
+    resources.menuShown();
   }
 
   /// Held open by a test to keep a push "in flight" while more samples arrive.
@@ -540,6 +737,7 @@ class FakeOverlayWindowController implements OverlayWindowController {
   @override
   Future<void> hideInputMenu() async {
     calls.add('hideInputMenu');
+    resources.menuHidden();
     if (hangOnHideInputMenu) {
       await Completer<void>().future;
     }
@@ -557,10 +755,16 @@ class FakeOverlayWindowController implements OverlayWindowController {
   Future<List<String>> excludedWindowIds() async => excluded;
 
   @override
-  Future<void> hideCameraPreview() async => calls.add('hideCameraPreview');
+  Future<void> hideCameraPreview() async {
+    calls.add('hideCameraPreview');
+    resources.previewHidden();
+  }
 
   @override
-  Future<void> hideControlStrip() async => calls.add('hideControlStrip');
+  Future<void> hideControlStrip() async {
+    calls.add('hideControlStrip');
+    resources.stripHidden();
+  }
 
   @override
   Future<void> setMainWindowVisible(bool visible) async {
@@ -584,6 +788,7 @@ class FakeOverlayWindowController implements OverlayWindowController {
     CameraOverlayConfiguration? cameraOverlay,
   }) async {
     calls.add('showCameraPreview');
+    resources.previewShown();
     cameraPlacements.add(placement);
     cameraOverlays.add(cameraOverlay);
     cameraPipModes.add(matchesCompositedPip);
@@ -592,6 +797,7 @@ class FakeOverlayWindowController implements OverlayWindowController {
   @override
   Future<void> showControlStrip(OverlayPlacement placement) async {
     calls.add('showControlStrip');
+    resources.stripShown();
     stripPlacements.add(placement);
   }
 

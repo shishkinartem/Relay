@@ -178,7 +178,15 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── the camera tile: three presets and a place to put it (§33.5) ─────────
 
-  CameraPipPreset get cameraPreset => settings.cameraPipPreset;
+  /// The preset a running session is trying out, before it has been persisted.
+  ///
+  /// Null outside a session, and null once teardown has written it down. It is
+  /// what makes `cameraPreset` the preset in *effect* rather than the preset on
+  /// disk, which are the same thing everywhere except mid-session.
+  CameraPipPreset? _pendingCameraPreset;
+
+  CameraPipPreset get cameraPreset =>
+      _pendingCameraPreset ?? settings.cameraPipPreset;
 
   /// The tile as the compositor and the preview both resolve it.
   ///
@@ -187,20 +195,56 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// the same answer that could disagree with it.
   CameraOverlayConfiguration get cameraOverlay =>
       CameraOverlayConfiguration.forPreset(
-        settings.cameraPipPreset,
+        cameraPreset,
         position: settings.cameraPipPosition,
         corner: settings.cameraPipCorner,
       );
 
   /// Chooses the tile's shape and size. Applied to a live recording between
   /// frames; the encoder's canvas never changes (§33.5).
+  ///
+  /// Persisted immediately before a recording and **at teardown** during one,
+  /// exactly as the dragged position is and for the same reason: §33.5 says the
+  /// tile is persisted "when the session ends normally, so a mid-session
+  /// experiment does not survive a crash", and §33.7 spells the consequence out
+  /// — "crash mid-session → neither the position nor the preset is persisted".
+  /// Before a session there is no experiment to survive: the user is setting
+  /// the default, and a preset chosen on the launch screen has to still be
+  /// there next launch whether or not they went on to record.
   Future<void> setCameraPreset(CameraPipPreset preset) async {
-    if (preset == settings.cameraPipPreset) {
+    if (preset == cameraPreset) {
       return;
     }
-    await _settings.update(settings.copyWith(cameraPipPreset: preset));
+    if (_state is SessionActive) {
+      _pendingCameraPreset = preset;
+    } else {
+      _pendingCameraPreset = null;
+      await _settings.update(settings.copyWith(cameraPipPreset: preset));
+    }
     notifyListeners();
     await _pushCameraOverlay();
+  }
+
+  /// Writes down the preset the session settled on (§33.5).
+  ///
+  /// Runs beside `_rememberCameraPipPosition` on the teardown path, so the two
+  /// halves of the tile are persisted together or not at all. Clearing the
+  /// pending preset first means a teardown that fails to write still leaves the
+  /// next session reading the stored one rather than an experiment nothing owns.
+  Future<void> _rememberCameraPreset() async {
+    final CameraPipPreset? pending = _pendingCameraPreset;
+    _pendingCameraPreset = null;
+    if (pending == null || pending == settings.cameraPipPreset) {
+      return;
+    }
+    try {
+      await _settings.update(settings.copyWith(cameraPipPreset: pending));
+    } on Object catch (e) {
+      _logger.warn(
+        'camera_preset_not_persisted',
+        fields: <String, Object?>{'error': e.runtimeType.toString()},
+      );
+    }
   }
 
   /// Puts the tile in a named corner (§33.5).
@@ -476,6 +520,43 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Re-reads [kinds] and re-points a **running** capture that lost its device
+  /// (§33.7).
+  ///
+  /// Re-reading alone is not the requirement. The catalogue demotes a selection
+  /// whose device has gone, which fixes what the *next* session opens — but the
+  /// session already running goes on holding a device that is not there, and
+  /// §33.7's row is "fall back to the system default", present tense. Nothing
+  /// else re-points it: a swap is otherwise only ever raised by the user
+  /// choosing a row.
+  ///
+  /// Only an explicit choice can be lost this way. A user on `System default`
+  /// has no id for the catalogue to demote, and the platform moves that default
+  /// underneath the capture itself.
+  Future<void> _reloadAndRepointDevices(Set<MediaDeviceKind> kinds) async {
+    final Map<MediaDeviceKind, String?> before = <MediaDeviceKind, String?>{
+      for (final MediaDeviceKind kind in kinds)
+        kind: _devices.deviceIdFor(kind),
+    };
+    await loadInputDevices(kinds: kinds);
+    if (_state is! SessionActive) {
+      return;
+    }
+    for (final MediaDeviceKind kind in kinds) {
+      if (_devices.deviceIdFor(kind) == before[kind]) {
+        continue;
+      }
+      if (_devices.effectiveDeviceFor(kind) == null) {
+        // "If there is none, that input turns off and the strip shows it off"
+        // (§33.7). Falling back to a default that does not exist would leave a
+        // control saying on over an input with nothing behind it.
+        await _setInputEnabled(kind, false);
+        continue;
+      }
+      await _swapLiveDevice(kind);
+    }
+  }
+
   /// Chooses the device an input will open. Null means the system default.
   ///
   /// Persisted immediately: the choice outlives the session, and a user who
@@ -678,9 +759,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       emptyMessage: devices.isEmpty && !_devices.isLoading
           ? _nothingFound(kind)
           : null,
-      notice: unresolved == null
-          ? null
-          : '“$unresolved” was not found · using the default',
+      // The failed swap wins over the missing device: it is the newer news, and
+      // it is the one the user is waiting to hear after a choice that did not
+      // take (§33.7).
+      notice:
+          _swapFailures[kind] ??
+          (unresolved == null
+              ? null
+              : '“$unresolved” was not found · using the default'),
       // Null only for a kind that is never metered. A kind that *can* be
       // metered but is not reporting gets a level of silence, so the sheet
       // draws the bar dead rather than removing it: §33.7 requires "off" and
@@ -1179,6 +1265,23 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Best-effort abort. Never throws: it runs on the failure path, where a
   /// second exception would replace the real one.
+  /// The fatal-error exit: stop the capture, then drop the session (§19.1).
+  ///
+  /// An abort stops the capture but leaves the camera's and the microphone's
+  /// *device inputs* attached — detaching them is `releaseSession`'s job, and
+  /// §19.1's first table says so in as many words. Without the release, a
+  /// recording that failed left the process holding a fully configured camera
+  /// graph until the next `prepare` or until the process exited, which is the
+  /// same leak `releaseSession` was added for on the ordinary path. §19.1 lists
+  /// "a fatal capture error" among the exits it applies to.
+  ///
+  /// Sequenced, not raced: the release has to find a session that is no longer
+  /// live, or Windows refuses it as "a recording is still in progress".
+  Future<void> _abortAndRelease() async {
+    await _abortQuietly();
+    await _releaseSessionQuietly();
+  }
+
   Future<void> _abortQuietly() async {
     try {
       await _recorder.abort().timeout(platformCallTimeout);
@@ -1315,6 +1418,13 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       // A successful stop consumed its own .part; re-scan so the recovery
       // list does not keep offering an artefact that no longer exists.
       await _recovery.scan();
+      // And forget the id, for the same reason. It is only ever read to name a
+      // retained `.part` on the failure path below, and a finalized recording
+      // has none — so an id left over from a finished session would let the
+      // *next* session's failure offer recovery of a file that was renamed away
+      // minutes ago. Cleared here rather than only on the deletion path, which
+      // is where it used to be cleared and is the rarer of the two exits.
+      _activeRecordingId = null;
       _dispatch(
         RecordingFinalized(recording, RecordingNaming.defaultName(_clock())),
       );
@@ -1397,6 +1507,11 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     // to ask is not the user having dragged it back (§33.3).
     await _rememberStripPosition();
     await _rememberCameraPipPosition();
+    await _rememberCameraPreset();
+    // A swap that failed belongs to the session it failed in. Carried over, the
+    // first sheet of the next recording would open explaining a device that is
+    // no longer the one being used (§19.1: nothing session-scoped survives).
+    _swapFailures.clear();
     // Inside the guarded loop, not before it. `closeInputMenu` awaits a meter
     // stop and a channel round trip, neither of which had a deadline; a hang in
     // either left the main window hidden and never restored, because
@@ -1699,7 +1814,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           // rely on: an abort here is idempotent on both platforms and is the
           // difference between a failed session and a camera light that stays
           // on for the life of the process.
-          unawaited(_abortQuietly());
+          unawaited(_abortAndRelease());
           unawaited(_teardownOverlays());
           _dispatch(CaptureFailed(code: code, message: message));
         } else {
@@ -1727,8 +1842,8 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         // Something was plugged in or pulled out. Re-reading is the only way to
         // find out what, and a null kind means the platform could not say.
         unawaited(
-          loadInputDevices(
-            kinds: kind == null
+          _reloadAndRepointDevices(
+            kind == null
                 ? _selectableKinds
                 : <MediaDeviceKind>{kind}.intersection(_selectableKinds),
           ),
@@ -1861,15 +1976,37 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     }
     await selectInputDevice(selection.kind, device);
     // The choice is only half applied until the *running* capture is using it.
-    await _swapLiveDevice(selection.kind);
+    await _swapLiveDevice(selection.kind, announce: true);
   }
+
+  /// A swap that would not open, by kind, until the next one is attempted.
+  ///
+  /// §33.7 requires a failed swap to be *shown*, and during a recording the
+  /// main window is hidden — so the only surface left is the sheet the choice
+  /// was made in. It already has a line for exactly this kind of thing
+  /// (`InputMenuOverlayState.notice`: "the device that was lost, the permission
+  /// that is missing"), which is why the answer is a notice on the sheet rather
+  /// than a new field on the strip: the strip presents one size in every
+  /// session state (§6), and a panel's rendered size never returns to a value
+  /// it has held before (`OverlayPlacementGeometry.PanelSizeAction`), so a line
+  /// that appeared for a few seconds would grow the strip permanently.
+  final Map<MediaDeviceKind, String> _swapFailures =
+      <MediaDeviceKind, String>{};
 
   /// Points a live capture at the device the user just chose (§33.2).
   ///
   /// Guarded per control like every other strip command: a swap issued while
   /// another is in flight is dropped rather than queued, because two of them
   /// would both read the session state before either wrote it.
-  Future<void> _swapLiveDevice(MediaDeviceKind kind) async {
+  ///
+  /// [announce] re-opens the sheet on failure, and is true only when the *user*
+  /// asked for this swap. The automatic re-point after a device disappears
+  /// records the same notice but opens nothing: a menu appearing over the
+  /// application being recorded, unasked, is worse than the message is worth.
+  Future<void> _swapLiveDevice(
+    MediaDeviceKind kind, {
+    bool announce = false,
+  }) async {
     if (_state is! SessionActive) {
       return;
     }
@@ -1877,13 +2014,16 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     if (control == null || !_inFlight.add(control)) {
       return;
     }
+    // Cleared before the attempt, not after it: the notice belongs to the last
+    // swap that was tried, and a stale one would outlive the choice it was
+    // about.
+    _swapFailures.remove(kind);
     try {
       await _recorder
           .selectInputDevice(kind, deviceId: _devices.deviceIdFor(kind))
           .timeout(platformCallTimeout);
     } on Object catch (e) {
-      // Degrades, never stops: the previous device keeps running and the user
-      // is told through the ordinary non-fatal path (§33.2).
+      // Degrades, never stops: the previous device keeps running (§33.2).
       _logger.warn(
         'live_device_swap_failed',
         fields: <String, Object?>{
@@ -1891,10 +2031,43 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           'error': e.runtimeType.toString(),
         },
       );
+      _swapFailures[kind] = _swapFailureNotice(kind);
     } finally {
       _inFlight.remove(control);
     }
+    // Guarded on its own: showing the sheet is a channel round trip to another
+    // engine, and a swap that already failed must not turn a message about it
+    // into a second, uncaught failure.
+    try {
+      if (_swapFailures.containsKey(kind) && announce) {
+        await openInputMenu(kind);
+      } else {
+        await refreshInputMenu();
+      }
+    } on Object catch (e) {
+      _logger.warn(
+        'device_notice_not_shown',
+        fields: <String, Object?>{
+          'kind': kind.name,
+          'error': e.runtimeType.toString(),
+        },
+      );
+    }
   }
+
+  /// What the sheet says when a chosen device would not open.
+  ///
+  /// It names what is still running rather than what failed, because that is
+  /// the part the user cannot see: the recording did not stop, and the audio or
+  /// the picture in the file is still the previous device's.
+  static String _swapFailureNotice(MediaDeviceKind kind) => switch (kind) {
+    MediaDeviceKind.camera =>
+      'That camera would not open · still using the previous one',
+    MediaDeviceKind.microphone =>
+      'That microphone would not open · still using the previous one',
+    MediaDeviceKind.systemAudio =>
+      'That output would not open · still using the previous one',
+  };
 
   static StripControl? _controlFor(MediaDeviceKind kind) => switch (kind) {
     MediaDeviceKind.camera => StripControl.camera,
@@ -2024,14 +2197,31 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     unawaited(_overlayCommands?.cancel());
     unawaited(_menuSelections?.cancel());
     unawaited(_uploadEvents?.cancel());
-    // A metering tap outlives this object too, and it holds a real device.
-    unawaited(_meter.stopAll());
-    // The platform session outlives this object unless it is told not to.
-    // Cancelling the event subscriptions above only stops us hearing from a
-    // capture that is still running.
-    unawaited(_disposeRecorderQuietly());
+    // Kept rather than dropped: quitting mid-recording is not fire-and-forget.
+    // A metering tap holds a real device, and the platform session outlives
+    // this object unless it is told not to — cancelling the subscriptions above
+    // only stops us hearing from a capture that is still running.
+    _shutdown = Future.wait<void>(<Future<void>>[
+      _meter.stopAll(),
+      _disposeRecorderQuietly(),
+    ]);
     super.dispose();
   }
+
+  Future<void>? _shutdown;
+
+  /// Completes when the platform teardown [dispose] began has finished.
+  ///
+  /// [dispose] is `ChangeNotifier`'s and so is `void`, which left the quit path
+  /// with nothing to wait on: `CompositionRoot.dispose()` is awaited by
+  /// `main.dart`'s `onExitRequested` precisely so §19.1's "the application stops
+  /// the capture, closes the devices and finalizes the artefact for §18 recovery
+  /// **before the process exits**" can be true, and awaiting a `void` made the
+  /// last step of that a race between a native abort and process exit.
+  ///
+  /// Never throws — every step it covers swallows its own failure — and safe
+  /// before [dispose], where there is nothing to wait for.
+  Future<void> get shutdown => _shutdown ?? Future<void>.value();
 
   Future<void> _disposeRecorderQuietly() async {
     try {
