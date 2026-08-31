@@ -158,6 +158,24 @@ public enum OverlayPlacementGeometry {
     return .move
   }
 
+  /// The size [panelSizeAction] actually applies, read out of its case.
+  ///
+  /// Split out so a caller that has to *place* a panel can resolve the size it
+  /// will really be given before deciding where the window goes. Placing for
+  /// the requested size and then being handed a held one is what put the input
+  /// menu on top of the control strip; `inputMenuFrame(content:window:)` above
+  /// carries that story.
+  public static func appliedSize(
+    _ action: PanelSizeAction, requested: CGSize, highWater: CGSize?
+  ) -> CGSize {
+    switch action {
+    case .move:
+      return highWater ?? requested
+    case .grow(let size), .hold(let size), .rebuild(let size):
+      return size
+    }
+  }
+
   /// The slack `needsResize` already uses, restated so `panelSizeAction` reads
   /// in one unit.
   public static let sizeTolerance: CGFloat = 0.5
@@ -469,14 +487,49 @@ public enum OverlayPlacementGeometry {
     size: CGSize, anchorX: CGFloat?, stripFrame: CGRect, gap: Double,
     inVisibleFrame visible: CGRect
   ) -> CGRect {
+    inputMenuFrame(
+      content: size, window: size, anchorX: anchorX, stripFrame: stripFrame,
+      gap: gap, inVisibleFrame: visible)
+  }
+
+  /// The same placement for a window that is **larger than the sheet in it**.
+  ///
+  /// `panelSizeAction` holds a panel at the tallest size it has ever rendered,
+  /// so a short sheet opened after a tall one gets a window with surplus in it,
+  /// and `InputMenuWindow` draws the sheet at that window's top-left and leaves
+  /// the rest transparent. Placing the *window* as though it were the sheet
+  /// therefore put the surplus between the two: AppKit's origin is bottom-left,
+  /// so a height held larger than the request grows the window **upward**, and
+  /// the sheet — pinned to its top — rode up over the strip it hangs from. The
+  /// camera sheet opened after the microphone's was drawn across the controls.
+  ///
+  /// So the sheet is placed first and the window is hung from it: the window's
+  /// top edge *is* the sheet's, and the surplus falls below, where it is
+  /// transparent and dismisses on a press. Every decision that can be seen —
+  /// which side of the strip, the centring, the clamp — is made about the
+  /// sheet, because the sheet is the thing the user is looking at.
+  public static func inputMenuFrame(
+    content: CGSize, window: CGSize, anchorX: CGFloat?, stripFrame: CGRect,
+    gap: Double, inVisibleFrame visible: CGRect
+  ) -> CGRect {
     let center = anchorX.flatMap { $0.isFinite ? $0 : nil } ?? stripFrame.midX
-    let below = stripFrame.minY - gap - size.height
-    let above = stripFrame.maxY + gap
-    let y = below >= visible.minY ? below : above
-    return clamped(
+    // The sheet's own top edge, on each side of the strip. Above it, the sheet
+    // hangs *up* from the gap, so its top clears its own height as well.
+    let below = stripFrame.minY - gap
+    let above = stripFrame.maxY + gap + content.height
+    let top = below - content.height >= visible.minY ? below : above
+    let sheet = clamped(
       CGRect(
-        x: center - size.width / 2, y: y, width: size.width,
-        height: size.height), inVisibleFrame: visible)
+        x: center - content.width / 2, y: top - content.height,
+        width: content.width, height: content.height),
+      inVisibleFrame: visible)
+    // Hung from the sheet's top-left, which is where the sheet is drawn. The
+    // window is deliberately *not* clamped: pulling its surplus back onto the
+    // display would drag the sheet with it, and a transparent edge hanging off
+    // the bottom is invisible where a displaced list is not.
+    return CGRect(
+      x: sheet.minX, y: sheet.maxY - window.height,
+      width: window.width, height: window.height)
   }
 
   /// The nearest candidate within `distance`, or the value unchanged.

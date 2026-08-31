@@ -540,6 +540,199 @@ final class OverlayPlacementGeometryTests: XCTestCase {
     XCTAssertLessThanOrEqual(frame.maxY, visible.maxY + 0.001)
   }
 
+  // MARK: - a menu window held larger than its sheet
+
+  /// The defect: the microphone sheet is measured tall, the camera sheet that
+  /// follows it is shorter, and `panelSizeAction` holds the panel at the taller
+  /// size. Placed for the size it asked for, the window's extra height grew
+  /// upward — AppKit's origin is bottom-left — and the sheet, drawn at the
+  /// window's top-left, was rendered across the control strip.
+  func testAHeldWindowStillHangsItsSheetUnderTheStrip() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+    let sheet = CGSize(width: 268, height: 120)
+    let held = CGSize(width: 268, height: 235)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      content: sheet, window: held, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    // The window's top edge is the sheet's top edge, so the sheet clears the
+    // strip by exactly the gap however much surplus is under it.
+    XCTAssertEqual(frame.maxY, strip.minY - 7, accuracy: 0.001)
+    XCTAssertEqual(frame.height, held.height, accuracy: 0.001)
+    // And the sheet does not reach the strip.
+    XCTAssertLessThanOrEqual(frame.maxY, strip.minY)
+  }
+
+  /// The surplus falls below the sheet, never above it: a press in it dismisses,
+  /// and a dismissing region laid over the strip would eat the chevrons.
+  func testTheSurplusHangsBelowTheSheetRatherThanAboveIt() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+    let sheet = CGSize(width: 268, height: 120)
+    let held = CGSize(width: 268, height: 235)
+
+    let held_frame = OverlayPlacementGeometry.inputMenuFrame(
+      content: sheet, window: held, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+    let exact = OverlayPlacementGeometry.inputMenuFrame(
+      size: sheet, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    // Same top edge; the extra height is all under it.
+    XCTAssertEqual(held_frame.maxY, exact.maxY, accuracy: 0.001)
+    XCTAssertLessThan(held_frame.minY, exact.minY)
+  }
+
+  /// The centring is the sheet's too. `InputMenuWindow` draws it at the window's
+  /// **left**, so centring the wider window would push the sheet off the anchor.
+  func testAHeldWindowCentresItsSheetOnTheControl() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+    let sheet = CGSize(width: 268, height: 120)
+    let held = CGSize(width: 320, height: 235)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      content: sheet, window: held, anchorX: 760, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.minX + sheet.width / 2, 760, accuracy: 0.001)
+  }
+
+  /// The flip is decided by the sheet, not by the window: a window held tall
+  /// enough to overflow the display would otherwise send a sheet that fits
+  /// perfectly well below the strip to the other side of it.
+  func testTheFlipIsDecidedByTheSheetRatherThanByItsWindow() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 200, width: 372, height: 50)
+    let sheet = CGSize(width: 268, height: 120)
+    let held = CGSize(width: 268, height: 600)
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      content: sheet, window: held, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    // 200 - 7 - 120 = 73, which is on the display: it stays below.
+    XCTAssertEqual(frame.maxY, strip.minY - 7, accuracy: 0.001)
+  }
+
+  /// A window the same size as its sheet places exactly as it always did.
+  func testAnUnheldWindowPlacesExactlyAsBefore() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    for strip in [
+      CGRect(x: 500, y: 800, width: 372, height: 50),
+      CGRect(x: 500, y: 100, width: 372, height: 50),
+      CGRect(x: 1040, y: 800, width: 372, height: 50),
+    ] {
+      for anchorX in [nil, CGFloat(760), CGFloat(1400)] as [CGFloat?] {
+        XCTAssertEqual(
+          OverlayPlacementGeometry.inputMenuFrame(
+            content: menu, window: menu, anchorX: anchorX, stripFrame: strip,
+            gap: 7, inVisibleFrame: visible),
+          OverlayPlacementGeometry.inputMenuFrame(
+            size: menu, anchorX: anchorX, stripFrame: strip, gap: 7,
+            inVisibleFrame: visible))
+      }
+    }
+  }
+
+  // MARK: - the size a panel is actually given
+
+  /// `appliedSize` is what lets a caller place a window before it is sized. It
+  /// has to agree with the action it reads, in every case.
+  func testAppliedSizeReadsEachActionsSize() {
+    let requested = CGSize(width: 268, height: 120)
+    let highWater = CGSize(width: 268, height: 235)
+
+    XCTAssertEqual(
+      OverlayPlacementGeometry.appliedSize(
+        .move, requested: requested, highWater: highWater),
+      highWater)
+    XCTAssertEqual(
+      OverlayPlacementGeometry.appliedSize(
+        .hold(highWater), requested: requested, highWater: highWater),
+      highWater)
+    XCTAssertEqual(
+      OverlayPlacementGeometry.appliedSize(
+        .grow(requested), requested: requested, highWater: nil),
+      requested)
+    XCTAssertEqual(
+      OverlayPlacementGeometry.appliedSize(
+        .rebuild(requested), requested: requested, highWater: highWater),
+      requested)
+    // A panel that has rendered nothing is sized as asked.
+    XCTAssertEqual(
+      OverlayPlacementGeometry.appliedSize(
+        .move, requested: requested, highWater: nil),
+      requested)
+  }
+
+  /// The whole path, as the host walks it: a tall sheet, then a short one.
+  func testAShortSheetAfterATallOneIsStillPlacedUnderTheStrip() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+    let tall = CGSize(width: 268, height: 235)
+    let short = CGSize(width: 268, height: 120)
+
+    // The microphone sheet renders first and sets the high-water mark.
+    let first = OverlayPlacementGeometry.panelSizeAction(
+      requested: tall, highWater: nil, scale: 2, renderedScale: nil)
+    let highWater = OverlayPlacementGeometry.appliedSize(
+      first, requested: tall, highWater: nil)
+    XCTAssertEqual(highWater, tall)
+
+    // The camera sheet is shorter, and the panel is held at the taller size.
+    let second = OverlayPlacementGeometry.panelSizeAction(
+      requested: short, highWater: highWater, scale: 2, renderedScale: 2)
+    XCTAssertEqual(second, .hold(tall))
+
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      content: short,
+      window: OverlayPlacementGeometry.appliedSize(
+        second, requested: short, highWater: highWater),
+      anchorX: nil, stripFrame: strip, gap: 7, inVisibleFrame: visible)
+
+    XCTAssertEqual(frame.height, tall.height, accuracy: 0.001)
+    XCTAssertEqual(frame.maxY, strip.minY - 7, accuracy: 0.001)
+  }
+
+  /// The round trip `place` actually walks: the frame is resolved, then handed
+  /// to the panel-size rule, which substitutes the size and **keeps the
+  /// origin**. A placement that used the requested size came back through this
+  /// with the origin of a short window and the height of a tall one, which is
+  /// the whole defect. Resolving the size first makes this step a no-op.
+  func testPlacingAHeldMenuAndThenApplyingTheSizeRuleChangesNothing() {
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let strip = CGRect(x: 500, y: 800, width: 372, height: 50)
+    let short = CGSize(width: 268, height: 120)
+    let highWater = CGSize(width: 268, height: 235)
+
+    let planned = OverlayPlacementGeometry.appliedSize(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: short, highWater: highWater, scale: 2, renderedScale: 2),
+      requested: short, highWater: highWater)
+    let frame = OverlayPlacementGeometry.inputMenuFrame(
+      content: short, window: planned, anchorX: nil, stripFrame: strip, gap: 7,
+      inVisibleFrame: visible)
+
+    // What `apply` does to that frame on the way into `place`.
+    let applied = CGRect(
+      origin: frame.origin,
+      size: OverlayPlacementGeometry.appliedSize(
+        OverlayPlacementGeometry.panelSizeAction(
+          requested: frame.size, highWater: highWater, scale: 2,
+          renderedScale: 2),
+        requested: frame.size, highWater: highWater))
+
+    XCTAssertEqual(applied, frame)
+    XCTAssertEqual(applied.maxY, strip.minY - 7, accuracy: 0.001)
+    // And it is a move, not a resize: the surface is never recreated.
+    XCTAssertFalse(
+      OverlayPlacementGeometry.needsResize(
+        from: CGRect(origin: .zero, size: highWater), to: applied))
+  }
+
   // MARK: - the menu's content key (flutter/flutter#185394)
 
   /// The sheet is opened at an estimate and corrected to its measurement. Doing

@@ -988,8 +988,12 @@ final class OverlayWindowController {
   private func menuFrame(size: NSSize, strip: NSPanel) -> NSRect {
     let screen =
       screenHoldingCenter(of: strip.frame) ?? strip.screen ?? currentScreen()
+    // Two sizes, deliberately: `size` is the sheet, and the window carrying it
+    // may be held larger by the no-shrink rule. The sheet is what has to land
+    // under the strip — see `inputMenuFrame(content:window:)`.
     return OverlayPlacementGeometry.inputMenuFrame(
-      size: size, anchorX: menuAnchorX, stripFrame: strip.frame, gap: menuGap,
+      content: size, window: plannedSize(for: menuPanel, requested: size),
+      anchorX: menuAnchorX, stripFrame: strip.frame, gap: menuGap,
       inVisibleFrame: screen.visibleFrame)
   }
 
@@ -1338,26 +1342,32 @@ final class OverlayWindowController {
   private func apply(_ panel: NSPanel, frame: NSRect) -> NSRect {
     let key = ObjectIdentifier(panel)
     let scale = panel.backingScaleFactor
+    let highWater = panelHighWaterSizes[key]
     let action = OverlayPlacementGeometry.panelSizeAction(
       requested: frame.size,
-      highWater: panelHighWaterSizes[key],
+      highWater: highWater,
       scale: scale,
       renderedScale: panelRenderedScales[key])
+    // One reading of the action's size, shared with `plannedSize` below. A
+    // caller that placed a window for one size and had it applied at another
+    // put the input menu on top of the strip, and two readings of the same
+    // switch is how that gap opened.
+    let size = OverlayPlacementGeometry.appliedSize(
+      action, requested: frame.size, highWater: highWater)
 
     switch action {
     case .move:
-      return NSRect(origin: frame.origin, size: panelHighWaterSizes[key] ?? frame.size)
-    case .grow(let size):
+      break
+    case .grow:
       panelHighWaterSizes[key] = size
       panelRenderedScales[key] = scale
-      return NSRect(origin: frame.origin, size: size)
-    case .hold(let size):
+    case .hold:
       // The panel is left larger than its content asked for. That is the whole
       // trade: a sheet with a little unused room below it, against a raster
       // thread reading a null texture. The Dart side draws its content at its
       // own size inside the window and dismisses on a press in the surplus.
-      return NSRect(origin: frame.origin, size: size)
-    case .rebuild(let size):
+      break
+    case .rebuild:
       // The backing scale changed, so the pixel history says nothing about this
       // panel any more. There is no way to rebuild a hosted `FlutterView`
       // without tearing down its engine, which costs more than it saves — so
@@ -1369,8 +1379,28 @@ final class OverlayWindowController {
       )
       panelHighWaterSizes[key] = size
       panelRenderedScales[key] = scale
-      return NSRect(origin: frame.origin, size: size)
     }
+    return NSRect(origin: frame.origin, size: size)
+  }
+
+  /// The size `place` will give this panel for `requested`, without applying it.
+  ///
+  /// Pure — the ledger is written by `apply`, on the way in. This exists so a
+  /// window whose content is pinned to one of its edges can be placed for the
+  /// size it will really be given rather than the size it asked for.
+  ///
+  /// A panel that does not exist yet has rendered nothing and may be sized
+  /// freely, which is the same answer `panelSizeAction` gives for a nil ledger.
+  private func plannedSize(for panel: NSPanel?, requested: NSSize) -> NSSize {
+    guard let panel else { return requested }
+    let key = ObjectIdentifier(panel)
+    let highWater = panelHighWaterSizes[key]
+    return OverlayPlacementGeometry.appliedSize(
+      OverlayPlacementGeometry.panelSizeAction(
+        requested: requested, highWater: highWater,
+        scale: panel.backingScaleFactor,
+        renderedScale: panelRenderedScales[key]),
+      requested: requested, highWater: highWater)
   }
 
   /// The largest size each panel has rendered, and the scale it rendered it at.

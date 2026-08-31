@@ -397,6 +397,7 @@ moves and no resize.
 | the host's estimate matches what the sheet measures | `flutter test test/features/recorder/presentation/input_menu_size_test.dart` — it fails when a section is added to the sheet without a term in the estimate |
 | one window size holds every camera preset, and where it goes | `swift test` — `CameraPreviewWindowGeometryTests` |
 | the preview draws its tile at the rectangle it was given, and takes no press outside it | `flutter test test/features/recorder/presentation/camera_preview_window_test.dart` |
+| a sheet placed for a size the panel is then held at still lands under the strip | `swift test` — `OverlayPlacementGeometryTests`, which walks `panelSizeAction → appliedSize → inputMenuFrame` and then re-applies the rule to the frame that produced |
 | the panel is actually driven through one size | **nothing** |
 | a press in the preview window's transparent surplus reaches the application underneath | **nothing** — see below |
 

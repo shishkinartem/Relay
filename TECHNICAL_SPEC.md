@@ -507,7 +507,7 @@ toggle.
 |---|---|
 | Window | its own always-on-top panel, **not** part of the strip, because the strip keeps one size in every state |
 | Exclusion | a third overlay kind, in the capture filter's exclusion list; "must never appear in the captured video" below applies in full |
-| Placement | below the strip when there is room, above it otherwise; aligned to the chevron; clamped to the usable area |
+| Placement | below the strip when there is room, above it otherwise; aligned to the chevron; clamped to the usable area. Every one of those decisions is made about **the sheet**, not about the window carrying it: a window held larger than its sheet (`docs/adr/2026-08-31-overlay-panels-never-shrink.md`) hangs the surplus below it |
 | Focus | non-activating: opening it must not take key focus from the application being recorded |
 | Contents | `System default`, then devices, current one checked, then `Off` — which is the existing toggle |
 | Microphone sheet | carries the level meter for the selected device, under the list, **fed live** — the sheet renders in its own engine and holds no state, so a level that is not pushed to it is a bar that never moves |
@@ -2146,7 +2146,7 @@ a labelled device list, the pattern a Zoom user already knows.
 |---|---|
 | Window | its own always-on-top panel, **not** part of the strip, because the strip keeps one size in every state (§6) |
 | Exclusion | a third overlay kind, in the capture filter's exclusion list; §6's "must never appear in the captured video" applies in full |
-| Placement | below the strip when there is room, above it otherwise; aligned to the chevron; clamped to the usable area |
+| Placement | below the strip when there is room, above it otherwise; aligned to the chevron; clamped to the usable area. Every one of those decisions is made about **the sheet**, not about the window carrying it: a window held larger than its sheet (`docs/adr/2026-08-31-overlay-panels-never-shrink.md`) hangs the surplus below it |
 | Focus | non-activating: opening it must not take key focus from the application being recorded |
 | Contents | `System default`, then devices, current one checked, then `Off` — which is the existing toggle |
 | Microphone sheet | carries the level meter for the selected device, under the list, **fed live** — the sheet renders in its own engine and holds no state, so a level that is not pushed to it is a bar that never moves |

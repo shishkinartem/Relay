@@ -116,6 +116,16 @@ resized more than once in a show, provided every resize grows.
   invisible region that silently ate clicks would be worse than the resize it
   replaced. The control strip's window stopped painting a ground for the same
   reason; its frame is drawn by the strip itself.
+- **A held panel has to be *placed* for the size it is held at, not for the size
+  it asked for.** The sheet is drawn at its window's top-left, AppKit's origin is
+  bottom-left, and the surplus is therefore added at the top: a window placed for
+  a 120-point sheet and then held at 235 put its extra 115 points above the sheet,
+  which walked the sheet up over the control strip. Opening the microphone sheet
+  and then the shorter camera sheet was enough to see it. `inputMenuFrame` now
+  takes the sheet and the window as two sizes, decides everything visible about
+  the sheet, and hangs the window from the sheet's top edge so the surplus falls
+  below. `appliedSize` is the one reading of what a panel will be given, shared
+  by the placement and by `apply`.
 - The camera preview remains a feeder of the same class, mitigated but not
   fixed. Recorded in `../development/compatibility-matrix.md`.
 - `../architecture/recording.md` states the current rule; a reader who finds
