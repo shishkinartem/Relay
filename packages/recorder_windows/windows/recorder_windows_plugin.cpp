@@ -56,16 +56,21 @@ std::string StringAt(const flutter::EncodableMap& map, const char* key) {
   return text == nullptr ? std::string() : *text;
 }
 
+// `narrow`/`wide` rather than `small`/`big`: `small` is a **macro** on this
+// platform — `rpcndr.h`, reached through `windows.h`, does `#define small char`
+// — so a variable of that name expands to a type and the file stops parsing.
+// It is the kind of collision that only ever appears on the host that has the
+// header, which is why it survived to a CI build log.
 int64_t IntAt(const flutter::EncodableMap& map, const char* key, int64_t fallback) {
   const flutter::EncodableValue* value = Find(map, key);
   if (value == nullptr) {
     return fallback;
   }
-  if (const auto* small = std::get_if<int32_t>(value)) {
-    return *small;
+  if (const auto* narrow = std::get_if<int32_t>(value)) {
+    return *narrow;
   }
-  if (const auto* big = std::get_if<int64_t>(value)) {
-    return *big;
+  if (const auto* wide = std::get_if<int64_t>(value)) {
+    return *wide;
   }
   if (const auto* real = std::get_if<double>(value)) {
     return static_cast<int64_t>(*real);
@@ -81,11 +86,11 @@ double DoubleAt(const flutter::EncodableMap& map, const char* key, double fallba
   if (const auto* real = std::get_if<double>(value)) {
     return *real;
   }
-  if (const auto* small = std::get_if<int32_t>(value)) {
-    return static_cast<double>(*small);
+  if (const auto* narrow = std::get_if<int32_t>(value)) {
+    return static_cast<double>(*narrow);
   }
-  if (const auto* big = std::get_if<int64_t>(value)) {
-    return static_cast<double>(*big);
+  if (const auto* wide = std::get_if<int64_t>(value)) {
+    return static_cast<double>(*wide);
   }
   return fallback;
 }

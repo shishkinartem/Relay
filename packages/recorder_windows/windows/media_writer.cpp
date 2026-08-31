@@ -8,6 +8,13 @@
 #include <cmath>
 #include <cstring>
 
+// `kMixSampleRate` and `kMixChannels` — the format every audio sample reaching
+// this writer is already in. Included here rather than leaned on transitively:
+// `recording_session.h` happens to include both this header and `audio_mixer.h`,
+// which is why the plugin built at all before the mixer moved, and it left this
+// translation unit compiling only when something else had gone first.
+#include "audio_mixer.h"
+
 namespace relay {
 
 namespace {
