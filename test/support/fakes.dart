@@ -699,6 +699,15 @@ class FakeOverlayWindowController implements OverlayWindowController {
   @override
   Stream<InputMenuSelection> get menuSelections => menuController.stream;
 
+  /// Drags the host reports, as the event channel would (§33.5).
+  // ignore: close_sinks
+  final StreamController<CameraPreviewMove> cameraMoveController =
+      StreamController<CameraPreviewMove>.broadcast();
+
+  @override
+  Stream<CameraPreviewMove> get cameraPreviewMoves =>
+      cameraMoveController.stream;
+
   @override
   Future<void> showInputMenu(
     OverlayPlacement placement,

@@ -38,6 +38,10 @@ abstract interface class SessionOverlays {
   /// Choices made in the menu.
   Stream<InputMenuSelection> get menuSelections;
 
+  /// Where the tile was dragged to, once the host has clamped and snapped it
+  /// (§33.5). Silent on a host whose preview is not the tile.
+  Stream<CameraPreviewMove> get cameraPreviewMoves;
+
   /// Pushes a snapshot for the strip to draw.
   Future<void> push(RecordingOverlayState state);
 
@@ -161,7 +165,6 @@ class OverlayPresenter implements SessionOverlays {
     const double presets = 99;
     // `Position`: a kicker, a gap and two rows of corner tiles.
     const double corners = 107;
-    const double resetRow = 34;
     final int rows = state.loading || state.items.isEmpty
         ? 1
         : state.items.length;
@@ -172,7 +175,6 @@ class OverlayPresenter implements SessionOverlays {
           (state.level == null ? 0 : meter) +
           (state.presets.isEmpty ? 0 : presets) +
           (state.corners.isEmpty ? 0 : corners) +
-          (state.canResetPosition ? resetRow : 0) +
           (state.notice == null ? 0 : notice),
     );
   }
@@ -189,6 +191,10 @@ class OverlayPresenter implements SessionOverlays {
 
   @override
   Stream<InputMenuSelection> get menuSelections => _overlays.menuSelections;
+
+  @override
+  Stream<CameraPreviewMove> get cameraPreviewMoves =>
+      _overlays.cameraPreviewMoves;
 
   @override
   Future<void> nudgeControlStrip(double dx, double dy) =>

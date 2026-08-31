@@ -257,6 +257,21 @@ abstract interface class OverlayWindowController {
   /// names working untouched.
   Stream<InputMenuSelection> get menuSelections;
 
+  /// The camera preview was dragged into a new place (§33.5).
+  ///
+  /// Raised only where the preview *is* the tile — display mode, design `1p`.
+  /// A host that never lets its preview be dragged, or that answers the
+  /// question another way, simply never emits it; the application then keeps
+  /// whatever position it already had.
+  ///
+  /// The host has already applied the drag to the running compositor by the
+  /// time this arrives: the gesture ran inside the platform's own drag loop,
+  /// and a preview that has moved while the file has not is the disagreement
+  /// design `1p` forbids. This is what tells the *application* about it, so a
+  /// preset chosen afterwards is applied around where the tile is rather than
+  /// around where it was when the session started.
+  Stream<CameraPreviewMove> get cameraPreviewMoves;
+
   /// Moves the control strip by [dx], [dy] logical points (§33.3).
   ///
   /// The keyboard path, for a strip that cannot be reached with a pointer. The

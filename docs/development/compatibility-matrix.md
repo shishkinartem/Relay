@@ -381,19 +381,41 @@ estimate and being corrected to its measurement on every show. It now remembers
 a measured size per content shape, so only the first sheet of a shape is ever
 corrected.
 
+The camera preview was the last panel still alternating, and was exempted from
+the rule on purpose: its window frame *was* the tile rect, so holding it at a
+high-water size would have drawn a tile that is not the tile in the file. It is
+no longer exempt. The window is sized once to the bounding size of all three
+presets (`CameraOverlayConfiguration.boundingTileSize`) and the tile is drawn as
+a rectangle inside it, which the preview engine is told through
+`cameraPreviewState`'s `content*` keys; `Camera → Square → Camera` is now three
+moves and no resize.
+
 | | Covered by |
 |---|---|
 | the shape key changes with every section that changes the height | `swift test` — `OverlayPlacementGeometryTests` |
 | a remembered shape needs no resize | `swift test`, same file |
 | the host's estimate matches what the sheet measures | `flutter test test/features/recorder/presentation/input_menu_size_test.dart` — it fails when a section is added to the sheet without a term in the estimate |
+| one window size holds every camera preset, and where it goes | `swift test` — `CameraPreviewWindowGeometryTests` |
+| the preview draws its tile at the rectangle it was given, and takes no press outside it | `flutter test test/features/recorder/presentation/camera_preview_window_test.dart` |
 | the panel is actually driven through one size | **nothing** |
+| a press in the preview window's transparent surplus reaches the application underneath | **nothing** — see below |
 
-The last row cannot be closed here. `swift test` links `RecorderCore` against
-Foundation only; it cannot open an `NSPanel`, host a `FlutterViewController` or
-reach the engine's surface cache. `flutter build macos` compiles and does not
-run. The AppKit half of these windows — `place`, `move`, `performDrag`, the
-mouse-up watch, the back-buffer cache — has no automated coverage on this
-machine and should not be claimed to have any.
+The last two rows cannot be closed here. `swift test` links `RecorderCore`
+against Foundation only; it cannot open an `NSPanel`, host a
+`FlutterViewController` or reach the engine's surface cache. `flutter build
+macos` compiles and does not run. The AppKit half of these windows — `place`,
+`move`, `performDrag`, the mouse-up watch, the back-buffer cache — has no
+automated coverage on this machine and should not be claimed to have any.
+
+The surplus row is new with the fixed-size preview window and is worth stating
+plainly. The panel is `isOpaque = false` over a `FlutterViewController` whose
+`backgroundColor` is `.clear`, and macOS routes mouse events past fully
+transparent parts of such a window — so a press in the surplus should reach
+whatever is underneath. The Dart side no longer mounts any hit-testable widget
+there, which is the half that *is* covered. Whether the window server actually
+lets the press through has been verified by eye on neither this machine nor any
+other; if it does not, the symptom is a rectangle beside the camera tile that
+swallows clicks during a recording.
 
 Two related facts, both verified by disassembly on macOS 26.6.2 and worth
 keeping because they are not documented anywhere else:
@@ -424,6 +446,20 @@ keeping because they are not documented anywhere else:
 - **`getInputDevices` can fail on Windows**, where the contract says it always
   answers: an absent or unrecognised `kind` and a full COM worker queue are both
   rejections there and empty lists (or impossible) on macOS.
+- **`cameraPreviewMoved` is written on both hosts and compiled on one.** The
+  application no longer pulls the tile's position back at teardown, so a host
+  that does not raise this event stops remembering drags (§33.5). macOS raises
+  it from `OverlayWindowController.onCameraPreviewMoved`; Windows raises it from
+  `SetCameraMovedHandler`, four lines beside the compositor call that was
+  already there — read off the source, compiled nowhere.
+- **The camera preview's window is larger than its tile on macOS only.** The
+  fixed-size window and the `content*` keys it needs exist to remove a
+  `Camera → Square → Camera` resize on a hosted `FlutterView`
+  (flutter/flutter#185394). Windows sends none of the four keys and its preview
+  window stays the tile: its overlay windows are a different mechanism —
+  child-HWND ANGLE surfaces masked with `SetWindowRgn`, deliberately not layered
+  — so it has no alternation to remove. The Dart reader defaults to *the window
+  is the picture*, which is what Windows means.
 - **Open specification decisions** are implemented conservatively and marked in
   code rather than silently resolved: §30.3 (non-16:9 sources), §30.4 (pause
   timeline — implemented as "paused time is excluded", the recommendation),

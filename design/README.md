@@ -118,7 +118,7 @@ satisfied by none of them until now. Each is marked `design gap:` at its source:
 | The device select field | `lib/design_system/components/app_select.dart` |
 | The level meter — live, dead and clipping | `lib/design_system/components/level_meter.dart` |
 | The camera preset picker | `lib/design_system/components/camera_preset_tiles.dart` |
-| The four-corner grid, window mode only | `lib/design_system/components/input_menu_sheet.dart` |
+| The four-corner grid — the camera sheet's, window mode only, and the launch screen's, both modes | `lib/design_system/components/camera_corner_tiles.dart` |
 | The preset's shape drawn *inside* the window-mode preview | `lib/design_system/components/camera_preview_surface.dart` |
 
 What is built is assembled from the existing components and tokens rather than

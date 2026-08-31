@@ -42,7 +42,6 @@ void main() {
               onChoose: (_) {},
               onChoosePreset: (_) {},
               onChooseCorner: (_) {},
-              onResetPosition: () {},
             ),
           ),
         ),
@@ -111,14 +110,6 @@ void main() {
           presets: CameraPipPreset.values,
           selectedPreset: CameraPipPreset.circle,
         ),
-        'a camera sheet with a dragged tile to put back':
-            const InputMenuOverlayState(
-              kind: MediaDeviceKind.camera,
-              title: 'Camera',
-              items: <InputMenuItem>[InputMenuItem(label: 'Camera off')],
-              presets: CameraPipPreset.values,
-              canResetPosition: true,
-            ),
         'a camera sheet in window mode': const InputMenuOverlayState(
           kind: MediaDeviceKind.camera,
           title: 'Camera',

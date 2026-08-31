@@ -619,7 +619,6 @@ void main() {
           // the menu engine untouched and the menu reads one shape.
           'presets': <Object?>[],
           'selectedPreset': null,
-          'canResetPosition': false,
           'corners': <Object?>[],
           'selectedCorner': null,
         },

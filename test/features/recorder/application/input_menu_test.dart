@@ -427,27 +427,10 @@ void main() {
       );
     });
 
-    test('Reset position is offered only once the tile has moved', () async {
-      final TestHarness harness = await recording();
-      expect(
-        harness.viewModel.menuStateFor(MediaDeviceKind.camera).canResetPosition,
-        isFalse,
-        reason: 'before a drag it would put the tile where it already is',
-      );
-
-      await harness.settings.update(
-        harness.settings.settings.copyWith(
-          cameraPipPosition: const Offset(0.3, 0.2),
-        ),
-      );
-
-      expect(
-        harness.viewModel.menuStateFor(MediaDeviceKind.camera).canResetPosition,
-        isTrue,
-      );
-    });
-
-    test('Reset position puts the tile back in its corner', () async {
+    test('a corner chosen in the sheet puts a dragged tile back', () async {
+      // The sheet has no `Reset position` row: choosing a corner clears the
+      // free position, so a separate row was a second way to say the same
+      // thing — and it named `lower right` whichever corner was actually set.
       final TestHarness harness = await recording();
       await harness.settings.update(
         harness.settings.settings.copyWith(
@@ -457,7 +440,10 @@ void main() {
       harness.recorder.cameraOverlays.clear();
 
       harness.overlays.menuController.add(
-        const InputMenuSelection.resetTilePosition(MediaDeviceKind.camera),
+        const InputMenuSelection.corner(
+          MediaDeviceKind.camera,
+          CameraOverlayCorner.bottomRight,
+        ),
       );
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);

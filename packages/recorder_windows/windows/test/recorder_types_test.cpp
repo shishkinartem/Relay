@@ -595,27 +595,19 @@ TEST(ResolveCameraPreviewDraw, ATileWithNoExtentStillReportsADrawableShape) {
 TEST(MenuChoiceClosesMenu, ADeviceRowClosesTheSheet) {
   // Including `System default` and `Off`, which carry none of the camera
   // sheet's extra keys either.
-  EXPECT_TRUE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/false,
-                                   /*resets_position=*/false));
+  EXPECT_TRUE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/false));
 }
 
 TEST(MenuChoiceClosesMenu, AShapePresetLeavesTheSheetOpen) {
   // The tile changes shape on screen underneath it, and comparing the three
   // presets must not cost a reopen each time.
-  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/true, /*has_corner=*/false,
-                                    /*resets_position=*/false));
+  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/true, /*has_corner=*/false));
 }
 
 TEST(MenuChoiceClosesMenu, ACornerLeavesTheSheetOpen) {
   // Window mode's placement row: the tile moves under the sheet exactly as a
   // preset reshapes it.
-  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/true,
-                                    /*resets_position=*/false));
-}
-
-TEST(MenuChoiceClosesMenu, ResetPositionLeavesTheSheetOpen) {
-  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/false,
-                                    /*resets_position=*/true));
+  EXPECT_FALSE(MenuChoiceClosesMenu(/*has_preset=*/false, /*has_corner=*/true));
 }
 
 TEST(ResolveCameraFrameMask, TheDefaultPresetMasksNothing) {

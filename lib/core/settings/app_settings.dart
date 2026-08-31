@@ -123,6 +123,13 @@ class AppSettings {
   /// Null is a live reference to the corner rather than an absence: a canvas
   /// that changes shape keeps the tile in the corner instead of at whatever
   /// fraction that corner used to be.
+  ///
+  /// **Written only when the user actually dragged the tile** (§33.5). It used
+  /// to be read back from the preview window at teardown, which answers a
+  /// different question — the window is at the tile's rectangle whether it was
+  /// dragged there or the corner rule put it there — so the first session with
+  /// the camera on filled this in and the corner above stopped being consulted
+  /// for good.
   final Offset? cameraPipPosition;
 
   /// Which corner the tile sits in when [cameraPipPosition] is null (§33.5).

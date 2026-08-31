@@ -59,14 +59,45 @@ class _CameraPreviewWindowState extends State<CameraPreviewWindow> {
       // Dragging it would move a thing that is not the picture-in-picture, so
       // it does not drag at all (§33.5). It keeps its ground because it is a
       // panel in its own right rather than a stand-in for something in the file.
-      return RelayTheme(child: surface);
+      return RelayTheme(child: _placed(surface));
     }
-    // Display mode: no ground. This window is the composited tile, and the
-    // compositor leaves everything outside the tile untouched — so a ground
-    // here paints a square over the user's screen around a circular tile.
+    // Display mode: no ground, and nothing painted outside the tile. This
+    // window carries the composited tile, and the compositor leaves every pixel
+    // around it untouched — so a ground here paints a square over the user's
+    // screen around a circular tile.
     return RelayTheme(
       ground: null,
-      child: _Draggable(onMove: _client.beginMove, child: surface),
+      child: _placed(_Draggable(onMove: _client.beginMove, child: surface)),
+    );
+  }
+
+  /// Puts [child] where the host says the picture goes inside this window.
+  ///
+  /// The window can be larger than the picture — on macOS in display mode it
+  /// always is, because a panel sized to the tile would be driven through
+  /// `Camera → Square → Camera` and a hosted Flutter view handed a surface of
+  /// the wrong size crashes its raster thread (flutter/flutter#185394). The
+  /// surplus is left empty and untouched: nothing is painted in it, and nothing
+  /// in it takes a press, so it is neither visible over the user's screen nor a
+  /// drag handle for a tile that is not there.
+  ///
+  /// A host that sends no rectangle means its window *is* the picture, which is
+  /// the case in window mode on both platforms and everywhere on Windows.
+  Widget _placed(Widget child) {
+    final Rect? content = _state.content;
+    if (content == null) {
+      return child;
+    }
+    return Stack(
+      children: <Widget>[
+        Positioned(
+          left: content.left,
+          top: content.top,
+          width: content.width,
+          height: content.height,
+          child: child,
+        ),
+      ],
     );
   }
 }
@@ -76,7 +107,13 @@ class _CameraPreviewWindowState extends State<CameraPreviewWindow> {
 ///
 /// The same threshold and the same handoff as the control strip: past 4 px the
 /// host takes the gesture and the operating system's own window-drag loop runs
-/// it. Where the tile ends up comes back through `cameraPreviewPosition`.
+/// it. Where the tile ends up is reported on the events channel as a
+/// `cameraPreviewMoved`.
+///
+/// Mounted **inside the tile's rectangle**, never around the whole window: the
+/// window is larger than the tile, and a press in the transparent surplus is a
+/// press on the user's own screen — not a request to drag a picture that is not
+/// under the pointer.
 class _Draggable extends StatefulWidget {
   const _Draggable({required this.onMove, required this.child});
 

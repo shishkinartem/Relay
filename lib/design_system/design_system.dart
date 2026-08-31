@@ -23,6 +23,7 @@ export 'components/app_text.dart';
 export 'components/app_text_field.dart';
 export 'components/app_tooltip.dart';
 export 'components/blueprint_frame.dart';
+export 'components/camera_corner_tiles.dart';
 export 'components/camera_preset_tiles.dart';
 export 'components/camera_preview_surface.dart';
 export 'components/destination_card.dart';

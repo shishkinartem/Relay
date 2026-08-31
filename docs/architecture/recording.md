@@ -70,10 +70,14 @@ Errors are typed states/results rather than arbitrary UI strings.
   `docs/adr/2026-08-24-overlay-panels-are-sized-once-per-show.md` — the earlier
   "exactly one size per show" was necessary and not sufficient, and the
   application crashed a second time under it;
-- **the camera preview is exempt**, deliberately: in display mode its window
-  frame *is* the tile the compositor draws, so holding it at a high-water size
-  would put a tile on screen that is not the tile in the file (design `1p`). It
-  keeps resizing and keeps the risk;
+- the camera preview **obeys that rule** rather than being exempt from it. Its
+  window takes the bounding size of all three presets
+  (`CameraOverlayConfiguration.boundingTileSize`), is never resized, and the
+  tile is drawn as a rectangle inside it, sent on `cameraPreviewState`. Sizing
+  the window to the tile made `Camera → Square → Camera` — one press each way —
+  a literal A → B → A, which is why the preview was the last panel still
+  alternating. The transparent surplus takes no press, and a drag reads and
+  reports the tile rather than the window;
 - overlay placement is resolved against the display the main application window
   was on when the session started (§5). That window is hidden for the whole
   session, so the display is pinned at the first show rather than re-resolved

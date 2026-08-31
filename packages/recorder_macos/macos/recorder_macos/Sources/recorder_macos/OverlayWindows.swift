@@ -71,6 +71,13 @@ struct CameraTileSource {
 /// `OverlayPlacementGeometry`, and applied once. This is not tidiness: driving
 /// a panel through size A → B → A inside one main-loop turn is what crashed the
 /// second recording of every session. See `docs/architecture/recording.md`.
+///
+/// The camera preview obeys the rule the same way the other two do, by being
+/// sized for **every** shape it can hold rather than for the one it is showing:
+/// its window takes the bounding size of all three presets and the tile is
+/// drawn as a rectangle inside it. Sizing it to the tile made `Camera → Square
+/// → Camera` — one press each way — a literal A → B → A, which is why it was
+/// the last panel still alternating.
 final class OverlayWindowController {
   private var stripEngine: FlutterEngine?
   private var stripChannel: FlutterMethodChannel?
@@ -129,6 +136,20 @@ final class OverlayWindowController {
   private var previewOverlay: CameraOverlayConfiguration?
   private var previewSource = CameraTileSource()
   private var previewMatchesPip = false
+
+  /// Where the preview draws, inside its own window: top-left origin, in the
+  /// window's own points.
+  ///
+  /// The window is deliberately **larger than the tile** and is never resized
+  /// (`OverlayPlacementGeometry.previewWindowFrame`), so "where is the tile" is
+  /// no longer answered by the window's frame. It is answered here, and by the
+  /// `content` rectangle the preview engine is pushed — which is the same
+  /// rectangle, because both come from this one value.
+  ///
+  /// Held rather than recomputed at each use because a drag needs it: AppKit's
+  /// drag loop moves the *window*, and where the tile ended up is the window's
+  /// new origin plus this. Nil before the first placement.
+  private var previewContentRect: CGRect?
 
   /// The chevron the open menu belongs under, in screen coordinates, and the
   /// gap the placement asked for.
@@ -432,17 +453,29 @@ final class OverlayWindowController {
     previewMatchesPip = matchesCompositedPip
 
     let wasOnScreen = previewPanel?.isVisible ?? false
-    let frame =
+    // What the preview has to *draw*, and the window that carries it. In
+    // display mode the two differ: the window is sized for every preset at once
+    // and never resized, and the tile is a rectangle inside it (§33.5,
+    // `previewWindowFrame`). In window mode the preview is a captioned object
+    // in its own right (design `1e`) and the placement is the whole of it.
+    let content =
       compositedTileFrame()
       ?? self.frame(for: placement, defaultSize: NSSize(width: 200, height: 140))
+    let window = previewWindowFrame(holding: content)
     // Interactive in both modes, and non-activating in both: the preview is
     // dragged by hand (§33.5), and opening or moving it must never take key
     // focus from the application being recorded.
     let panel =
       previewPanel
       ?? makePanel(
-        for: engine, contentRect: frame, acceptsMouse: true, movable: true)
+        for: engine, contentRect: window, acceptsMouse: true, movable: true)
     previewPanel = panel
+    // Resolved against the frame that is *about* to be applied, so the snapshot
+    // below can carry it. `place` may hold the panel larger than the request —
+    // the no-shrink rule — so it is read back from the panel afterwards and
+    // re-pushed only if that moved the tile.
+    previewContentRect = OverlayPlacementGeometry.contentRect(
+      of: content, inWindow: window)
 
     // The crop and the mask travel with the shape, because the preview has to
     // draw what the compositor draws: design `1p` promises they are the same
@@ -469,6 +502,7 @@ final class OverlayWindowController {
       "fit": presentation.fit.rawValue,
       "cornerRadiusRatio": presentation.cornerRadiusRatio,
     ]
+    applyPreviewContentRect()
     // Pushed *before* the panel comes back, for the reason the strip's snapshot
     // is: the first frame the user sees has to be this session's. The preview
     // carries a second copy of the same hazard — the texture id — which is why
@@ -478,7 +512,18 @@ final class OverlayWindowController {
     // delivered, which is exactly the row §19.1 puts under "the last composited
     // camera frame".
     previewChannel?.invokeMethod("cameraPreviewState", arguments: lastPreviewState)
-    place(panel, at: frame)
+
+    let requestedContent = previewContentRect
+    place(panel, at: window)
+    rememberPreviewContent(content, in: panel)
+    // Only when the panel was actually held larger than the request. Then the
+    // tile is not where the pushed snapshot said it was, and a preview drawing
+    // it there would disagree with the file (design `1p`).
+    if previewContentRect != requestedContent {
+      applyPreviewContentRect()
+      previewChannel?.invokeMethod(
+        "cameraPreviewState", arguments: lastPreviewState)
+    }
     announceOverlayWindow(panel, wasOnScreen: wasOnScreen)
 
     // Armed only once the panel is on screen. The signal drives the preview
@@ -496,6 +541,7 @@ final class OverlayWindowController {
     previewPanel?.orderOut(nil)
     previewOverlay = nil
     previewMatchesPip = false
+    previewContentRect = nil
     // Disarmed with the window. The camera capture queue calls
     // `markCameraFrameAvailable()` for every frame it receives, and a texture
     // marked dirty makes the preview engine schedule a frame — into a panel
@@ -549,8 +595,15 @@ final class OverlayWindowController {
     if let configuration { previewOverlay = configuration }
     previewSource = source
     guard let panel = previewPanel, panel.isVisible else { return }
-    if let frame = compositedTileFrame() {
-      place(panel, at: frame)
+    if let content = compositedTileFrame() {
+      // A `move`, not a `place`: the window was sized for every preset at once
+      // when it was shown, so a preset, a swap or a re-place changes only which
+      // rectangle inside it the tile occupies. That is the whole point — this
+      // call used to resize the panel on every press, which is the A → B → A a
+      // hosted `FlutterView` can be handed the wrong surface for (§33.5,
+      // flutter/flutter#185394).
+      move(panel, to: previewWindowFrame(holding: content))
+      rememberPreviewContent(content, in: panel)
     }
     guard !lastPreviewState.isEmpty else { return }
     // Through the same rule the first push took: a window-mode preview is not
@@ -565,7 +618,52 @@ final class OverlayWindowController {
       ?? source.aspectRatio
     lastPreviewState["fit"] = presentation.fit.rawValue
     lastPreviewState["cornerRadiusRatio"] = presentation.cornerRadiusRatio
+    applyPreviewContentRect()
     previewChannel?.invokeMethod("cameraPreviewState", arguments: lastPreviewState)
+  }
+
+  /// The window that carries a preview drawing `content`.
+  ///
+  /// Sized once, to what every preset needs, and moved from then on. In window
+  /// mode the preview *is* its window, so the content is the frame and nothing
+  /// is added around it (design `1e`).
+  private func previewWindowFrame(holding content: NSRect) -> NSRect {
+    guard let overlay = resolvedTileOverlay() else { return content }
+    let canvas = currentScreen().frame
+    guard canvas.width > 0, canvas.height > 0 else { return content }
+    let size = overlay.boundingTileSize(
+      canvasWidth: canvas.width, canvasHeight: canvas.height,
+      encoderCanvasWidth: previewSource.canvasWidth,
+      sourceAspectRatio: previewSource.aspectRatio,
+      sourceWidth: previewSource.pixelWidth)
+    guard OverlayPlacementGeometry.isDrawable(size) else { return content }
+    return OverlayPlacementGeometry.previewWindowFrame(
+      tile: content, size: size, inDisplayFrame: canvas)
+  }
+
+  /// Records where the tile sits inside the window that was actually applied.
+  ///
+  /// The panel's own frame, not the one that was requested: the no-shrink rule
+  /// may hold a panel larger than the request, and the tile has to be drawn
+  /// where it really is rather than where the request would have put it.
+  private func rememberPreviewContent(_ content: NSRect, in panel: NSPanel) {
+    previewContentRect = OverlayPlacementGeometry.contentRect(
+      of: content, inWindow: panel.frame)
+  }
+
+  /// Puts the content rectangle into the snapshot the preview engine draws.
+  ///
+  /// Always present once there is one, in both modes: the window can be larger
+  /// than the picture in either, and a preview that assumed it filled its
+  /// window would stretch the tile across the transparent surplus — a tile on
+  /// screen that is not the tile in the file, which is the disagreement design
+  /// `1p` exists to forbid.
+  private func applyPreviewContentRect() {
+    guard let rect = previewContentRect else { return }
+    lastPreviewState["contentX"] = Double(rect.minX)
+    lastPreviewState["contentY"] = Double(rect.minY)
+    lastPreviewState["contentWidth"] = Double(rect.width)
+    lastPreviewState["contentHeight"] = Double(rect.height)
   }
 
   /// Where the preview is now, as a fraction of the canvas (§33.5).
@@ -574,13 +672,26 @@ final class OverlayWindowController {
   /// is deliberately not the tile (design `1e`) — dragging it there moves the
   /// preview and nothing else — and nil when there is no preview to read.
   func cameraPreviewPosition() -> [String: Any]? {
-    guard previewMatchesPip, let panel = previewPanel, panel.isVisible else {
-      return nil
-    }
+    guard previewMatchesPip, let tile = previewTileFrame() else { return nil }
     let canvas = currentScreen().frame
     guard canvas.width > 0, canvas.height > 0 else { return nil }
-    let ratio = canvasPosition(of: panel.frame, in: canvas)
+    let ratio = canvasPosition(of: tile, in: canvas)
     return ["x": Double(ratio.x), "y": Double(ratio.y)]
+  }
+
+  /// The tile's own rectangle on screen, which is no longer the window's.
+  ///
+  /// The window is sized for every preset at once and the tile is drawn inside
+  /// it, so the two differ by however much surplus that preset leaves. Reading
+  /// `panel.frame` here reported the surplus as part of the tile: a drag would
+  /// have settled the picture-in-picture somewhere the user did not drop it.
+  private func previewTileFrame() -> NSRect? {
+    guard let panel = previewPanel, panel.isVisible else { return nil }
+    guard let content = previewContentRect else { return panel.frame }
+    return NSRect(
+      x: panel.frame.minX + content.minX,
+      y: panel.frame.maxY - content.minY - content.height,
+      width: content.width, height: content.height)
   }
 
   /// The composited tile, as a window frame on the session's display.
@@ -684,13 +795,27 @@ final class OverlayWindowController {
     }
     let canvas = currentScreen().frame
     guard canvas.width > 0, canvas.height > 0 else { return }
-    let dropped = canvasPosition(of: panel.frame, in: canvas)
+    // Where the *tile* was dropped. AppKit's drag loop moved the window, and
+    // the window is larger than the tile by however much surplus this preset
+    // leaves — so the tile is the window's new origin plus the offset the last
+    // placement recorded, and reading the window's own frame here would settle
+    // the picture-in-picture somewhere the user did not drop it.
+    guard let dragged = previewTileFrame() else { return }
+    let dropped = canvasPosition(of: dragged, in: canvas)
     let settled = overlay.moved(to: dropped).rect(
       canvasWidth: canvas.width, canvasHeight: canvas.height,
       sourceAspectRatio: previewSource.aspectRatio)
-    move(
-      panel,
-      to: OverlayPlacementGeometry.absoluteFrame(settled, inDisplayFrame: canvas))
+    let content = OverlayPlacementGeometry.absoluteFrame(
+      settled, inDisplayFrame: canvas)
+    move(panel, to: previewWindowFrame(holding: content))
+    rememberPreviewContent(content, in: panel)
+    // The tile moved inside the window, so the engine drawing it has to be told
+    // where it is now — the same push a preset change makes.
+    if !lastPreviewState.isEmpty {
+      applyPreviewContentRect()
+      previewChannel?.invokeMethod(
+        "cameraPreviewState", arguments: lastPreviewState)
+    }
     // Read back off the settled rectangle rather than off the drop, so what is
     // reported is where the tile actually is once the margin and the corner
     // snap have had their say.
@@ -813,8 +938,7 @@ final class OverlayWindowController {
       hasLevel: state["level"] != nil && !(state["level"] is NSNull),
       hasNotice: state["notice"] != nil && !(state["notice"] is NSNull),
       presetCount: (state["presets"] as? [Any])?.count ?? 0,
-      cornerCount: (state["corners"] as? [Any])?.count ?? 0,
-      canResetPosition: state["canResetPosition"] as? Bool ?? false)
+      cornerCount: (state["corners"] as? [Any])?.count ?? 0)
   }
 
   /// Closes the menu because the application asked it to. Idempotent.
@@ -1073,7 +1197,7 @@ final class OverlayWindowController {
       result(nil)
     case "chooseInputDevice":
       // Every choice the sheet raises, on one call: a device row, and the
-      // camera sheet's shape presets and `Reset position`. The choice reaches
+      // camera sheet's shape presets and corners. The choice reaches
       // the application on the events channel as a map — beside the bare
       // command names that channel already emits, which is how Dart tells the
       // two apart (§33.4).
@@ -1084,14 +1208,13 @@ final class OverlayWindowController {
         let deviceId = arguments["deviceId"] as? String
         let preset = arguments["preset"] as? String
         let corner = arguments["corner"] as? String
-        let resetPosition = arguments["resetPosition"] as? Bool ?? false
-        // A shape preset, a corner and `Reset position` leave the sheet where
-        // it is: the tile changes on screen underneath it, and comparing the
-        // choices should not cost a reopen each time (§33.5). Only a device row
-        // — `off` included — closes it, and that close is not a dismissal: the
-        // map below is the report the application gets, so a `dismissed` beside
-        // it would be the same event told twice.
-        if preset == nil, corner == nil, !resetPosition {
+        // A shape preset and a corner leave the sheet where it is: the tile
+        // changes on screen underneath it, and comparing the choices should not
+        // cost a reopen each time (§33.5). Only a device row — `off` included —
+        // closes it, and that close is not a dismissal: the map below is the
+        // report the application gets, so a `dismissed` beside it would be the
+        // same event told twice.
+        if preset == nil, corner == nil {
           hideInputMenu()
         }
         // Read through rather than rebuilt from the fields this build happens
@@ -1105,7 +1228,6 @@ final class OverlayWindowController {
           "dismissed": false,
           "preset": preset as Any,
           "corner": corner as Any,
-          "resetPosition": resetPosition,
         ])
       }
     case "dismissInputMenu":
@@ -1159,11 +1281,12 @@ final class OverlayWindowController {
     panel.hasShadow = false
     panel.hidesOnDeactivate = false
     // `performDrag(with:)` does nothing on a window AppKit considers immovable,
-    // so the strip has to be movable for §33.3's drag to run at all; the camera
-    // preview stays fixed. `isMovableByWindowBackground` is left off in both
-    // cases: the only drag is the one the strip asks for once its own 4 px
-    // threshold is crossed, and AppKit's background drag would start one under
-    // it without that threshold, eating slow clicks on the controls.
+    // so both the strip (§33.3) and the display-mode camera preview (§33.5) are
+    // built movable; the input menu is not, and never asks.
+    // `isMovableByWindowBackground` is left off in every case: the only drag is
+    // the one the window's own Dart side asks for once its 4 px threshold is
+    // crossed, and AppKit's background drag would start one under it without
+    // that threshold, eating slow clicks on the controls.
     panel.isMovable = movable
     panel.isMovableByWindowBackground = false
     panel.ignoresMouseEvents = !acceptsMouse
@@ -1183,7 +1306,7 @@ final class OverlayWindowController {
   /// to commit into. When the size genuinely did change, the panel is ordered
   /// front *first* so the commit has somewhere to land.
   private func place(_ panel: NSPanel, at frame: NSRect) {
-    let target = apply(panel, frame: frame, sizeIsTheContent: panel === previewPanel)
+    let target = apply(panel, frame: frame)
     if OverlayPlacementGeometry.needsResize(from: panel.frame, to: target) {
       panel.orderFrontRegardless()
       panel.setFrame(target, display: true)
@@ -1203,20 +1326,16 @@ final class OverlayWindowController {
   /// Returns the frame that may actually be applied: the requested origin
   /// always, and a size that never shrinks and never returns to one the panel
   /// has already rendered.
-  /// [sizeIsTheContent] exempts a panel whose size *is* what the user sees.
   ///
-  /// The camera preview in display mode is the composited picture-in-picture
-  /// (design `1p`): its window frame is the tile rect, so holding it at a
-  /// high-water size would draw a tile that is not the tile in the file — the
-  /// exact disagreement `1p` exists to forbid. It therefore keeps resizing, and
-  /// keeps the crash risk that comes with it. The proper answer is a fixed
-  /// window with the tile drawn inside it, which is a larger change than this
-  /// one and is not attempted here; until then this is a stated trade, not an
-  /// oversight. Neither crash was on this engine.
-  private func apply(
-    _ panel: NSPanel, frame: NSRect, sizeIsTheContent: Bool = false
-  ) -> NSRect {
-    guard !sizeIsTheContent else { return frame }
+  /// **Every panel, the camera preview included.** The preview used to be
+  /// exempt, because in display mode its window frame *was* the tile rect and
+  /// holding it at a high-water size would have drawn a tile that is not the
+  /// tile in the file — the disagreement design `1p` exists to forbid. That
+  /// exemption is gone: the window is now sized once to what every preset needs
+  /// and the tile is drawn as a rectangle inside it
+  /// (`OverlayPlacementGeometry.previewWindowFrame`), so a window larger than
+  /// the picture is exactly what is wanted and `1p` still holds to the pixel.
+  private func apply(_ panel: NSPanel, frame: NSRect) -> NSRect {
     let key = ObjectIdentifier(panel)
     let scale = panel.backingScaleFactor
     let action = OverlayPlacementGeometry.panelSizeAction(
@@ -1518,7 +1637,7 @@ final class OverlayWindowController {
   /// resize as far as the engine's surface cache is concerned. That is why this
   /// goes through `apply` too, rather than trusting its own name.
   private func move(_ panel: NSPanel, to frame: NSRect) {
-    let target = apply(panel, frame: frame, sizeIsTheContent: panel === previewPanel)
+    let target = apply(panel, frame: frame)
     guard panel.frame != target else { return }
     panel.setFrame(target, display: true)
   }

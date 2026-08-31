@@ -110,6 +110,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<RecorderEvent>? _recorderEvents;
   StreamSubscription<OverlayCommand>? _overlayCommands;
   StreamSubscription<InputMenuSelection>? _menuSelections;
+  StreamSubscription<CameraPreviewMove>? _cameraPreviewMoves;
   StreamSubscription<UploadEvent>? _uploadEvents;
 
   SessionState _state = const SessionIdle();
@@ -188,6 +189,37 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   CameraPipPreset get cameraPreset =>
       _pendingCameraPreset ?? settings.cameraPipPreset;
 
+  /// The corner the tile falls back to, and the one a placement control draws
+  /// as chosen while no free position is stored (§33.5).
+  CameraOverlayCorner get cameraCorner => settings.cameraPipCorner;
+
+  /// Whether the tile is at a position it was dragged to rather than on one of
+  /// the four corners (§33.5).
+  ///
+  /// A placement control draws no corner as chosen while this is true: the tile
+  /// is in none of them, and marking one would say it is. Choosing any corner
+  /// is what puts it back — there is no separate `Reset position`, because with
+  /// the four corners on screen that would be a fifth way to say "lower right".
+  bool get hasFreeCameraPipPosition => _cameraPipPosition != null;
+
+  /// Where the tile was dragged to during *this* session (§33.5).
+  ///
+  /// The stored position is written once, at teardown, so through the whole
+  /// session `settings.cameraPipPosition` still says where the tile started.
+  /// Rebuilding [cameraOverlay] from it alone is what threw the drag away on
+  /// every preset change: the host had moved the tile, nothing had told the
+  /// application, and the next configuration it pushed put the tile back where
+  /// the session began. §33.7's "preset changed mid-drag" row forbids that.
+  ///
+  /// Null means "no drag has been reported", which is *not* the same as "the
+  /// tile is on its corner": a corner is a live rule, and this only ever holds
+  /// a position the user actually put the tile at.
+  Offset? _livePipPosition;
+
+  /// The tile's free position, dragged or stored — null for its corner.
+  Offset? get _cameraPipPosition =>
+      _livePipPosition ?? settings.cameraPipPosition;
+
   /// The tile as the compositor and the preview both resolve it.
   ///
   /// Built from the preset every time rather than stored: the preset *is* the
@@ -196,12 +228,36 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   CameraOverlayConfiguration get cameraOverlay =>
       CameraOverlayConfiguration.forPreset(
         cameraPreset,
-        position: settings.cameraPipPosition,
+        position: _cameraPipPosition,
         corner: settings.cameraPipCorner,
       );
 
+  /// The host says the tile was dragged, and where it landed (§33.5).
+  ///
+  /// Nothing is pushed back: the host applied the drag to the running
+  /// compositor itself, because the gesture ran inside the platform's own drag
+  /// loop and a preview that has moved while the file has not is the
+  /// disagreement design `1p` forbids. This only records it, so the next preset
+  /// change is applied around the tile's real place rather than around where
+  /// the session started.
+  void _onCameraPreviewMoved(CameraPreviewMove move) {
+    if (move.position == _livePipPosition) {
+      return;
+    }
+    _livePipPosition = move.position;
+    notifyListeners();
+  }
+
   /// Chooses the tile's shape and size. Applied to a live recording between
   /// frames; the encoder's canvas never changes (§33.5).
+  ///
+  /// A preset changes the size, and the new size is applied around the tile's
+  /// existing **anchor** rather than around its top-left: a tile flush to a
+  /// corner stays flush, and a centred one stays centred
+  /// ([CameraOverlayConfiguration.repositionedForSize]). Holding the top-left
+  /// would pull a lower-right tile 115 points inside the right margin on a
+  /// 1920-wide canvas, which reads as the position having been reset — the
+  /// defect this whole path exists to remove.
   ///
   /// Persisted immediately before a recording and **at teardown** during one,
   /// exactly as the dragged position is and for the same reason: §33.5 says the
@@ -215,11 +271,34 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     if (preset == cameraPreset) {
       return;
     }
+    // Re-anchored before anything is stored, and read while `cameraOverlay`
+    // still describes the *outgoing* preset — that is what the new size is
+    // placed around.
+    final Offset? repositioned = _presetPosition(preset);
+    if (repositioned != _cameraPipPosition) {
+      _livePipPosition = repositioned;
+    }
     if (_state is SessionActive) {
+      // Held, not written: during a session both halves of the tile are
+      // persisted together at teardown, by `_rememberCameraPreset` and
+      // `_rememberCameraPipPosition`.
       _pendingCameraPreset = preset;
     } else {
       _pendingCameraPreset = null;
-      await _settings.update(settings.copyWith(cameraPipPreset: preset));
+      await _settings.update(
+        settings.copyWith(
+          cameraPipPreset: preset,
+          // A *stored* position moves with the preset it is stored beside: the
+          // two describe one tile, and leaving the position behind would make
+          // the pair describe a tile the user never put there — which is what
+          // the next launch would then draw. A position that is only live is
+          // left live, so §33.5's "persisted when the session ends normally"
+          // still holds for a mid-session experiment.
+          cameraPipPosition: settings.cameraPipPosition == null
+              ? null
+              : repositioned,
+        ),
+      );
     }
     notifyListeners();
     await _pushCameraOverlay();
@@ -247,6 +326,33 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// The free position [preset]'s tile should take, or null for the corner.
+  ///
+  /// Unchanged whenever there is nothing to re-anchor *with* — no display to
+  /// measure the canvas by, which is every state before one has been resolved.
+  /// Handing the position back untouched is the honest answer there: without a
+  /// canvas the anchor is not computable, and the host re-clamps and re-snaps
+  /// whatever reaches it. Null in, null out: that is the corner, and a corner
+  /// already survives a size change on its own.
+  Offset? _presetPosition(CameraPipPreset preset) {
+    final Offset? position = _cameraPipPosition;
+    final DisplayGeometry? display = _currentDisplay;
+    if (position == null || display == null) {
+      return position;
+    }
+    return CameraOverlayConfiguration.forPreset(
+          preset,
+          position: position,
+          corner: settings.cameraPipCorner,
+        )
+        .repositionedForSize(
+          previous: cameraOverlay,
+          canvasWidth: display.logicalWidth,
+          canvasHeight: display.logicalHeight,
+        )
+        .position;
+  }
+
   /// Puts the tile in a named corner (§33.5).
   ///
   /// The window-mode answer to the drag: there the preview is a separate
@@ -259,23 +365,16 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// the same question, and a stored fraction would silently win over the
   /// corner the user just picked.
   Future<void> setCameraCorner(CameraOverlayCorner corner) async {
-    if (corner == settings.cameraPipCorner &&
-        settings.cameraPipPosition == null) {
+    if (corner == settings.cameraPipCorner && _cameraPipPosition == null) {
       return;
     }
+    // The live drag goes with the stored one. Both are the same answer to the
+    // question the corner has just answered differently, and a drag left
+    // standing here would silently win over the corner just chosen.
+    _livePipPosition = null;
     await _settings.update(
       settings.copyWith(cameraPipCorner: corner, cameraPipPosition: null),
     );
-    notifyListeners();
-    await _pushCameraOverlay();
-  }
-
-  /// Puts the tile back in its corner (§33.5).
-  Future<void> resetCameraPipPosition() async {
-    if (settings.cameraPipPosition == null) {
-      return;
-    }
-    await _settings.update(settings.copyWith(cameraPipPosition: null));
     notifyListeners();
     await _pushCameraOverlay();
   }
@@ -300,23 +399,31 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Persists where the user dragged the tile.
   ///
-  /// Read at teardown, like the strip's position and for the same reason: a
+  /// Written at teardown, like the strip's position and for the same reason: a
   /// mid-session experiment that ends in a crash does not become the next
-  /// recording's default (§33.5). Null in window mode, where the preview is not
-  /// the tile — there is nothing to remember from a drag that moved a captioned
-  /// object.
+  /// recording's default (§33.5).
+  ///
+  /// **Only a reported drag is persisted.** This used to read the preview
+  /// window's position back from the host instead, which answers a different
+  /// question: the window is at the tile's rectangle whether the user dragged
+  /// it or the corner rule put it there, so the first session with the camera
+  /// on stored the corner's own spot as a *free* position. From then on
+  /// `resolveRect` never took its corner branch again and `cameraPipCorner` was
+  /// dead in display mode, so a corner chosen before the next recording did
+  /// nothing at all. A corner is a live rule and must stay one.
+  ///
+  /// Nothing to do in window mode, where the preview is not the tile (design
+  /// `1e`) and no drag is ever reported.
   Future<void> _rememberCameraPipPosition() async {
+    final Offset? dragged = _livePipPosition;
+    if (dragged == null || dragged == settings.cameraPipPosition) {
+      return;
+    }
     try {
-      final Offset? position = await _recorder.cameraPreviewPosition().timeout(
-        platformCallTimeout,
-      );
-      if (position == null || position == settings.cameraPipPosition) {
-        return;
-      }
-      await _settings.update(settings.copyWith(cameraPipPosition: position));
+      await _settings.update(settings.copyWith(cameraPipPosition: dragged));
     } on Object catch (e) {
       _logger.warn(
-        'camera_pip_position_not_read',
+        'camera_pip_position_not_stored',
         fields: <String, Object?>{'error': e.runtimeType.toString()},
       );
     }
@@ -370,6 +477,9 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     );
     _overlayCommands = _overlays.commands.listen(_onOverlayCommand);
     _menuSelections = _overlays.menuSelections.listen(_onMenuSelection);
+    _cameraPreviewMoves = _overlays.cameraPreviewMoves.listen(
+      _onCameraPreviewMoved,
+    );
     _uploadEvents = _uploads.events.listen(_onUploadEvent);
 
     WidgetsBinding.instance.addObserver(this);
@@ -784,14 +894,10 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           ? CameraPipPreset.values
           : const <CameraPipPreset>[],
       selectedPreset: kind == MediaDeviceKind.camera ? cameraPreset : null,
-      // Offered only once there is something to undo. The tile starts in its
-      // corner, so before a drag this row would put it where it already is.
-      canResetPosition:
-          kind == MediaDeviceKind.camera && settings.cameraPipPosition != null,
       // Window mode only: with a display source the tile is dragged, and the
       // preview *is* the tile, so a corner list would be a second, worse answer
       // to a question already answered better (design `1e` vs `1p`, §33.5).
-      corners: kind == MediaDeviceKind.camera && !_tileIsDraggable
+      corners: kind == MediaDeviceKind.camera && !cameraTileIsDraggable
           ? CameraOverlayCorner.values
           : const <CameraOverlayCorner>[],
       selectedCorner: kind == MediaDeviceKind.camera
@@ -826,10 +932,15 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// Whether the tile can be dragged, which is the same question as whether the
   /// preview stands for it (design `1p`).
   ///
+  /// Public because the launch screen says so in words: where a drag is
+  /// possible, the corner chosen before recording is where the tile *starts*
+  /// rather than where it is stuck.
+  ///
   /// A window source composites the tile over a captured window while the
   /// preview sits somewhere else on screen entirely, so nothing on screen is
   /// the tile and there is nothing to drag.
-  bool get _tileIsDraggable => selectedSource?.type != CaptureSourceType.window;
+  bool get cameraTileIsDraggable =>
+      selectedSource?.type != CaptureSourceType.window;
 
   static String _menuTitle(MediaDeviceKind kind) => switch (kind) {
     MediaDeviceKind.camera => 'Camera',
@@ -1943,11 +2054,6 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       await refreshInputMenu();
       return;
     }
-    if (selection.resetPosition) {
-      await resetCameraPipPosition();
-      await refreshInputMenu();
-      return;
-    }
     if (selection.dismissed) {
       // The window is already gone — the host closed it. Nothing is applied;
       // this only stops the application believing it is still there, which is
@@ -2196,6 +2302,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     unawaited(_recorderEvents?.cancel());
     unawaited(_overlayCommands?.cancel());
     unawaited(_menuSelections?.cancel());
+    unawaited(_cameraPreviewMoves?.cancel());
     unawaited(_uploadEvents?.cancel());
     // Kept rather than dropped: quitting mid-recording is not fire-and-forget.
     // A metering tap holds a real device, and the platform session outlives
