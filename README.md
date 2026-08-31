@@ -70,9 +70,10 @@ flutter pub get
 flutter build windows --release
 ```
 
-Not compiled here — there is no Windows host. CI does build it under MSVC, but its
-unit-test job has failed on every run so far, so treat the Windows half as written and
-compiled, **not** as tested. The [compatibility matrix](docs/development/compatibility-matrix.md)
+Not compiled here — there is no Windows host. CI builds it under MSVC on every push and
+its native unit tests pass there, so the Windows half is compiled and unit-tested — but
+**nobody has ever run the application on Windows**, and a compiler cannot tell you a
+recording comes out. The [compatibility matrix](docs/development/compatibility-matrix.md)
 is the authority on what is actually verified.
 
 ## Documentation
@@ -86,8 +87,8 @@ is the authority on what is actually verified.
 
 ## Status
 
-macOS is built, run and tested. Windows is fully written and compiles in CI, but its
-unit tests have never passed there and nobody has run the application — see the
+macOS is built, run and tested. Windows compiles under MSVC in CI and its native unit
+tests pass there, but nobody has run the application — see the
 [compatibility matrix](docs/development/compatibility-matrix.md) for exactly what is and
 is not verified. Linux is deferred by design.
 

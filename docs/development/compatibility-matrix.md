@@ -6,7 +6,7 @@
 | Platform | Minimum version | Display capture | Window capture | System audio | Microphone | Camera | Cursor | 30 FPS | 60 FPS |
 |---|---|---|---|---|---|---|---|---|---|
 | macOS | 13.5 *(provisional, §30.8)* | built + run | built + run | built | built | built | built | built | built |
-| Windows | 10 build 19041 *(provisional, §30.9)* | not built | not built | not built | not built | not built | not built | not built | not built |
+| Windows | 10 build 19041 *(provisional, §30.9)* | built, not run | built, not run | built, not run | built, not run | built, not run | built, not run | built, not run | built, not run |
 | Linux | — | deferred (§2) | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
 
 ## What "built + run" covers on macOS
@@ -100,8 +100,8 @@ platform, not a second reading of the contract.
 | The standalone meter's tap after a default change | re-points, but only off a connect/disconnect: `deviceListChanged()` compares the tap's device against the current default and re-opens. A default switched in System Settings with nothing replugged never reaches it | **keeps the endpoint it opened.** Nothing tells `InputMeter` to re-read; the tap re-opens only once `GetPeakValue` starts failing |
 
 Neither platform's `devicesChanged` is exercised by an automated test: macOS's
-observers need real hardware to arrive or leave, and the Windows half has not
-been compiled.
+observers need real hardware to arrive or leave, and the Windows half — which
+compiles in CI since 2026-08-31 — has never been run.
 
 ## Provisional minimum versions
 
@@ -123,7 +123,8 @@ is recompiled, which is also why an Xcode build failed while an incremental
 | `SCStreamConfiguration.captureMicrophone` | not used — microphone comes from AVFoundation, which works on 13 | 15.0 |
 
 Windows 10 build 19041 is what `Windows.Graphics.Capture` with
-`IsCursorCaptureEnabled` requires. Nothing on Windows has been compiled.
+`IsCursorCaptureEnabled` requires. Windows compiles under MSVC in CI, but that
+minimum has never been checked against a running application.
 
 ## Native unit tests
 
@@ -134,7 +135,7 @@ the Flutter- and OS-bound half so it can be executed on its own.
 | Platform | Where | How to run | State |
 |---|---|---|---|
 | macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | green — **run the command for the count**, do not quote one from here. It has been hand-copied to three files and drifted three ways |
-| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | **never compiled on this host** — `cmake`, `ctest` and `cl` are all absent. CI *does* configure and build it under MSVC; what fails there is `ctest`, which is the row below |
+| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | **never compiled on this host** — `cmake`, `ctest` and `cl` are all absent. CI configures, builds and runs it under MSVC on windows-2022, and it has been **green since `d187db7`** (2026-08-31); before that it had failed on every run the repository had |
 
 Both suites assert the same properties on purpose. The two platforms hand-write
 the same wire spellings and re-implement the same geometry, and nothing in the
@@ -147,39 +148,41 @@ on the default 16:9.
 ## Not verified
 
 ```text
-NOT RUN: Windows native build (packages/recorder_windows/windows/CMakeLists.txt)
-Reason: no MSVC toolchain, no Windows SDK and no cmake on the development host (macOS).
-That is no longer the whole reason. `.github/workflows/ci.yml` already carries the two
-jobs that would compile all of this on a real Windows host — `native-windows` runs the
-cmake/ctest suite and `build-windows` runs `flutter build windows`, both on
-`windows-2022`. Neither has ever seen this work: checked 2026-08-30, the branch carrying
-it has never been pushed and the commit is not on `main`, so no CI run exists for it.
-The compile half is therefore a push away rather than a hardware problem. The DPI
-question under *The movable control strip* is the part that genuinely still needs a
+VERIFIED IN CI 2026-08-31: the Windows native build and the native unit tests
+Both jobs are green on `d187db7` — the first time either has ever passed. Recorded at
+length because this file confidently said the opposite, and was wrong in both directions.
+
+- `build-windows` (`flutter build windows --release`, MSVC on windows-2022) had failed on
+  **every run this repository has ever had**. The entry that stood here guessed the cause
+  and guessed it wrong: it said the compile was "a push away" and that CI had simply never
+  seen the work. CI had seen it, five times, and it did not compile. Two first-compile
+  defects, both fixed in `d187db7` — `media_writer.cpp` never included `audio_mixer.h`,
+  where `kMixSampleRate` and `kMixChannels` are defined, and `IntAt`/`DoubleAt` in
+  `recorder_windows_plugin.cpp` declared a variable named `small`, which `rpcndr.h` —
+  reached through `windows.h` — defines as `char`.
+- `native-windows` (cmake + ctest) now passes too. `SessionClock.PausedIntervalsAreSubtracted`
+  was the cause and was the only one: it asserted 5 s where `capture - start - paused_total`
+  gives 6 s (10 s of wall time, 4 s of it paused). The expectation was wrong, not the clock
+  — §9 and every sibling case subtract the pause, as does the macOS `SessionClock`. The
+  strip-geometry and device cases added since compile and pass.
+
+**What this settles, and what it does not.** The Windows half now compiles, links and
+passes its pure-arithmetic suite against a real MSVC toolchain and Windows SDK, which is
+more than this file could claim before. It remains true that **nobody has run the
+application on Windows**: every runtime row in this section stays unverified, and no
+amount of green CI reaches them. A compiler proves the code is well-formed, not that a
+recording comes out. The DPI question under *The movable control strip* still needs a
 physical two-monitor machine, which CI's single virtual display cannot provide.
 
-RED IN CI: Windows native unit tests (packages/recorder_windows/windows/test)
-Reason: not the development host's gap. CI's `native-windows` job configures and
-builds this suite successfully under MSVC on windows-2022 — so it is compiled,
-just not here — and then `ctest` fails. It has failed on all five CI runs to
-date, including HEAD `fe023e7`. The job is not `continue-on-error` and the
-workflow is not path-filtered: the red was visible all along and was read as the
-known "Windows is written but not built" gap rather than as a real failure.
-
-One cause is identified and fixed: `SessionClock.PausedIntervalsAreSubtracted`
-asserted 5 s where `capture - start - paused_total` gives 6 s (10 s of wall time,
-4 s of it paused). The expectation was wrong, not the clock — §9 and every
-sibling case in the suite subtract the pause, as does the macOS SessionClock.
-Reproduced on macOS 2026-08-30 by extracting `SessionClock` verbatim from
-recorder_types.{h,cpp} into a standalone TU; the other eleven SessionClock cases
-pass before and after. Whether it was the *only* failure is unknown from here,
-and the suite has since grown the strip-geometry and device cases, which have
-never been compiled at all. The next CI run is the verdict.
+NOT RUN: the Windows native build on the development host
+Reason: no MSVC toolchain, no Windows SDK and no cmake on this machine (macOS). Unchanged,
+and now the lesser gap — CI covers the compile on every push.
 
 NOT RUN: fragmented MP4 output on Windows
 Reason: same. docs/adr/2026-08-23-fragmented-mp4-on-both-platforms.md changes
 the sink writer's container type so an aborted `.part` is recoverable; it must
-be compiled and a mid-session abort confirmed recoverable before release.
+now be confirmed on a Windows host: it compiles, but no mid-session abort has been
+taken and no `.part` recovered there.
 
 NOT RUN: Windows native input-device enumeration and metering (§33.2)
 Reason: same. input_devices.cpp/.h and the plugin arms that call them have never
@@ -187,20 +190,20 @@ been through a compiler on this host, so the endpoint enumeration, the camera
 enumeration through Media Foundation, the default-first ordering, the
 reference-counted meter, the IMMNotificationClient watcher and every divergence
 listed under *Where the two halves actually diverge* are read off the source and
-not measured. windows/test/recorder_types_test.cpp covers the pure half only, and
-it has not been compiled here — run it with
+not measured. windows/test/recorder_types_test.cpp covers the pure half only; it is
+green in CI and has not been compiled here — run it with
 `ctest --test-dir build/win-tests -C Debug --output-on-failure` on a Windows host.
 The count is deliberately not quoted: it has been hand-copied into three files
 before and drifted three ways.
 
 NOT RUN: Windows debugResourceCensus (spec 19.1)
-Reason: same — never compiled. `RecordingSession::DebugCensus()`,
+Reason: same — compiled in CI, never run. `RecordingSession::DebugCensus()`,
 `OverlayWindows::DebugCensus()`, `InputMeter::DebugCensus()`, the `ResourceCensus`
 struct in recorder_types.{h,cpp} and the plugin's `debugResourceCensus` arm are all
 read off the source and not measured. The `ResourceCensus` and
 `MeteringSubscriptions::Total` cases added to windows/test/recorder_types_test.cpp
 cover the arithmetic and the released-rows rule; like the rest of that suite they
-have not been compiled here.
+pass in CI and have not been compiled here.
 
 NOT RUN: what a census actually proves on either platform
 Reason: the two tests spec 19.1 names run at the view-model level against
@@ -254,7 +257,7 @@ here rather than papered over on the wire.
 | Preview texture | registered on show, **unregistered on hide** — a registered texture keeps its last uploaded contents, so re-showing drew the previous session's last camera frame until the new camera delivered | belongs to the window, so it goes with it |
 | Event monitors | drag-end and menu-dismissal `NSEvent` monitors, plus the rolling left-button watch | low-level mouse and keyboard hooks, installed for exactly as long as a menu is open |
 | Session rows | read from `RecordingSession` through a lock-guarded ledger; the camera and microphone are asked directly (`isConfigured`) | read from each owner's own predicate — `CaptureEngine::is_running`, `MediaWriter::is_open`, `VideoCompositor::is_initialized` |
-| Verified | `swift test` covers the arithmetic and the ledger; the plugin's three contributors are covered only through Dart against a fake | **nothing** — never compiled |
+| Verified | `swift test` covers the arithmetic and the ledger; the plugin's three contributors are covered only through Dart against a fake | **nothing at runtime** — it compiles in CI and `windows/test` covers the census arithmetic, but no census has ever been taken from a running plugin |
 
 Because the counts differ, §19.1's equality census is taken **after the first
 cycle, not at launch**: a launch census on macOS is short by three engines that
@@ -331,7 +334,7 @@ correction; `../adr/README.md` already said it.
 |---|---|
 | `OverlayCommand.resetStripPosition` / `nudgeUp…` etc. | declared |
 | macOS host handler | implemented |
-| Windows host handler | written, never compiled |
+| Windows host handler | written, compiled in CI, never run |
 | Dart dispatch to `nudgeControlStrip` | implemented, tested |
 | Anything that raises them | **missing** |
 
@@ -442,17 +445,17 @@ keeping because they are not documented anywhere else:
   Windows at `meter_.Start(kind, StringAt(*arguments, "deviceId"))` — and a
   start naming a different device re-points the tap instead of opening a second
   one. Read off the source on both sides; measured on neither, because the
-  Windows half has still never been compiled here and the macOS half needs a
-  second microphone to tell the two taps apart.
+  Windows half has never been run — it compiles in CI, which is not the same
+  thing — and the macOS half needs a second microphone to tell the two taps apart.
 - **`getInputDevices` can fail on Windows**, where the contract says it always
   answers: an absent or unrecognised `kind` and a full COM worker queue are both
   rejections there and empty lists (or impossible) on macOS.
-- **`cameraPreviewMoved` is written on both hosts and compiled on one.** The
+- **`cameraPreviewMoved` is written on both hosts and exercised on one.** The
   application no longer pulls the tile's position back at teardown, so a host
   that does not raise this event stops remembering drags (§33.5). macOS raises
   it from `OverlayWindowController.onCameraPreviewMoved`; Windows raises it from
   `SetCameraMovedHandler`, four lines beside the compositor call that was
-  already there — read off the source, compiled nowhere.
+  already there — compiled in CI, read off the source, run nowhere.
 - **The camera preview's window is larger than its tile on macOS only.** The
   fixed-size window and the `content*` keys it needs exist to remove a
   `Camera → Square → Camera` resize on a hosted `FlutterView`
