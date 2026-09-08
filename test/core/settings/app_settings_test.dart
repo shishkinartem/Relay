@@ -12,7 +12,18 @@ void main() {
       expect(settings.cameraEnabled, isFalse);
       expect(settings.showCursor, isTrue);
       expect(settings.frameRate, 30);
-      expect(settings.quality, RecordingQuality.hd720);
+      expect(
+        settings.countdownSeconds,
+        0,
+        reason: 'Start has always been immediate; a pre-roll is opt-in',
+      );
+      expect(
+        settings.quality,
+        RecordingQuality.native,
+        reason:
+            'a fresh install records what the display actually shows; a '
+            'bounding box halves a Retina panel before anything sees it',
+      );
       expect(settings.preferredSourceType, CaptureSourceType.display);
       expect(settings.uploadDestinationId, 'telegram');
       expect(settings.localRecordingsDirectory, isNull);
@@ -82,7 +93,7 @@ void main() {
 
       expect(decoded.frameRate, 30);
       expect(decoded.cameraEnabled, isFalse);
-      expect(decoded.quality, RecordingQuality.hd720);
+      expect(decoded.quality, RecordingQuality.native);
       expect(decoded.preferredSourceType, CaptureSourceType.display);
     });
 
@@ -92,8 +103,20 @@ void main() {
         AppSettings.keyPreferredSourceType: 'hologram',
       });
 
-      expect(decoded.quality, RecordingQuality.hd720);
+      expect(decoded.quality, RecordingQuality.native);
       expect(decoded.preferredSourceType, CaptureSourceType.display);
+    });
+
+    test('keeps a stored preset rather than promoting it to native', () {
+      // `quality` is written on every save, so a document holding `hd720`
+      // cannot be told apart from one nobody ever touched. Promoting it would
+      // multiply that user's files without being asked, and §16's 50 MB
+      // Telegram ceiling makes that a consequence rather than a detail.
+      final AppSettings decoded = AppSettings.fromJson(<String, Object?>{
+        AppSettings.keyQuality: 'hd720',
+      });
+
+      expect(decoded.quality, RecordingQuality.hd720);
     });
 
     test('reads a null recordings directory as the platform default', () {
@@ -212,5 +235,37 @@ void main() {
         );
       },
     );
+  });
+
+  group('countdown (§6)', () {
+    test('round-trips every offered value', () {
+      for (final int seconds in AppSettings.countdownChoices) {
+        final AppSettings decoded = AppSettings.fromJson(
+          AppSettings(countdownSeconds: seconds).toJson(),
+        );
+        expect(decoded.countdownSeconds, seconds);
+      }
+    });
+
+    test('a value the launch screen does not offer falls back to off', () {
+      // A stored 7 would select nothing on the segmented control that renders
+      // it, which reads as a broken control rather than as a setting.
+      for (final Object? stored in <Object?>[7, -1, '3', null, 3.0]) {
+        expect(
+          AppSettings.fromJson(<String, Object?>{
+            AppSettings.keyCountdownSeconds: stored,
+          }).countdownSeconds,
+          0,
+          reason: 'stored $stored',
+        );
+      }
+    });
+
+    test('two settings differing only in the countdown are not equal', () {
+      expect(
+        const AppSettings(countdownSeconds: 3),
+        isNot(const AppSettings()),
+      );
+    });
   });
 }

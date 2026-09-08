@@ -22,6 +22,9 @@ it decides. Where the two disagree, the ADR is current and the spec is stale.
 | [Overlay panels are sized once per show](2026-08-24-overlay-panels-are-sized-once-per-show.md) | Accepted — **headline rule superseded** by `2026-08-31-overlay-panels-never-shrink.md`; the rest still stands |
 | [A screen-recording answer is pending until the app reopens, and Relay reopens itself](2026-08-24-screen-recording-permission-applies-on-relaunch.md) | Accepted |
 | [Overlay panels never shrink](2026-08-31-overlay-panels-never-shrink.md) | Accepted — amends the 2026-08-24 sizing rule |
+| [Native-resolution recording, and one bitrate rule for both platforms](2026-09-08-native-resolution-recording.md) | Accepted — amends §10, §12, §29, §31 and the `CLAUDE.md` quality invariant |
+| [Keeping the local copy after a confirmed send](2026-09-08-keeping-the-local-copy-after-sending.md) | Accepted — amends §2, §13, §24, §29, §31; implements the 2026-08-22 delete-confirmation rule rather than reopening it |
+| [A pre-recording countdown, drawn on the control strip](2026-09-08-pre-recording-countdown.md) | Accepted — amends §6, §10, §19, §29, §31; constrained by the never-shrink rule, which it does not reopen |
 
 ## Accepted 2026-08-30, shipped and folded
 

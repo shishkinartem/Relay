@@ -117,4 +117,24 @@ void main() {
       );
     });
   });
+
+  group('splitClock', () {
+    test('the two halves joined are exactly formatClock', () {
+      // The pre-roll draws these two spans where the recording state draws one
+      // string. If they ever differ, the strip changes width — which is the
+      // failure `docs/adr/2026-08-31-overlay-panels-never-shrink.md` exists
+      // for, and it kills the process rather than looking wrong.
+      for (int seconds = 0; seconds <= 3600; seconds++) {
+        final Duration d = Duration(seconds: seconds);
+        final ({String head, String seconds}) parts = splitClock(d);
+        expect(parts.head + parts.seconds, formatClock(d));
+      }
+    });
+
+    test('the split is at the seconds', () {
+      expect(splitClock(const Duration(seconds: 3)).head, '00:00:');
+      expect(splitClock(const Duration(seconds: 3)).seconds, '03');
+      expect(splitClock(const Duration(seconds: 10)).seconds, '10');
+    });
+  });
 }

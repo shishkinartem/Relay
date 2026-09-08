@@ -363,6 +363,7 @@ class RecordingOverlayState {
     this.cameraAvailable = true,
     this.systemAudioAvailable = true,
     this.isStopping = false,
+    this.countdownRemaining,
     this.microphoneHasMenu = false,
     this.cameraHasMenu = false,
     this.systemAudioHasMenu = false,
@@ -377,6 +378,14 @@ class RecordingOverlayState {
   final bool cameraAvailable;
   final bool systemAudioAvailable;
   final bool isStopping;
+
+  /// Time left before the first frame, or null once the session is live (§6).
+  ///
+  /// Null rather than zero: zero is a countdown that has finished, which is a
+  /// recording, and the strip must not draw those the same way. Null is also
+  /// what a host or a build predating this key yields, which is the right
+  /// answer for it.
+  final Duration? countdownRemaining;
 
   /// Whether this input has a device list to disclose (§33.4).
   ///
@@ -397,6 +406,7 @@ class RecordingOverlayState {
     'cameraAvailable': cameraAvailable,
     'systemAudioAvailable': systemAudioAvailable,
     'isStopping': isStopping,
+    'countdownMs': countdownRemaining?.inMilliseconds,
     'microphoneHasMenu': microphoneHasMenu,
     'cameraHasMenu': cameraHasMenu,
     'systemAudioHasMenu': systemAudioHasMenu,
@@ -415,6 +425,11 @@ class RecordingOverlayState {
         cameraAvailable: map['cameraAvailable'] as bool? ?? true,
         systemAudioAvailable: map['systemAudioAvailable'] as bool? ?? true,
         isStopping: map['isStopping'] as bool? ?? false,
+        // An `is num` test rather than a cast: the macOS rewind *removes* this
+        // key between sessions, and a host that predates it sends nothing.
+        countdownRemaining: map['countdownMs'] is num
+            ? Duration(milliseconds: (map['countdownMs']! as num).toInt())
+            : null,
         microphoneHasMenu: map['microphoneHasMenu'] as bool? ?? false,
         cameraHasMenu: map['cameraHasMenu'] as bool? ?? false,
         systemAudioHasMenu: map['systemAudioHasMenu'] as bool? ?? false,
@@ -432,6 +447,11 @@ class RecordingOverlayState {
       other.cameraAvailable == cameraAvailable &&
       other.systemAudioAvailable == systemAudioAvailable &&
       other.isStopping == isStopping &&
+      // Load-bearing. `OverlayPresenter.push` drops a snapshot equal to the
+      // last one, and during a pre-roll every other field is identical between
+      // ticks — `elapsed` is zero throughout. Omitted here, the strip would
+      // render the first number and never change, with no error anywhere.
+      other.countdownRemaining == countdownRemaining &&
       other.microphoneHasMenu == microphoneHasMenu &&
       other.cameraHasMenu == cameraHasMenu &&
       other.systemAudioHasMenu == systemAudioHasMenu;
@@ -447,6 +467,7 @@ class RecordingOverlayState {
     cameraAvailable,
     systemAudioAvailable,
     isStopping,
+    countdownRemaining,
     microphoneHasMenu,
     cameraHasMenu,
     systemAudioHasMenu,

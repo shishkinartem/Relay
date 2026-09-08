@@ -97,20 +97,27 @@ class OverlayPresenter implements SessionOverlays {
   /// resolving here would put the strip over a menu bar the moment a display
   /// changed shape between two sessions.
   @override
-  Future<void> showControlStrip({OverlayStripPosition? position}) =>
-      _overlays.showControlStrip(
-        position == null
-            ? OverlayPlacement.anchored(
-                size: controlStripSize,
-                anchor: OverlayAnchor.topCenter,
-                margin: 6,
-              )
-            : OverlayPlacement.fractional(
-                size: controlStripSize,
-                position: position,
-                margin: 6,
-              ),
-      );
+  Future<void> showControlStrip({OverlayStripPosition? position}) {
+    // A strip that has just been shown has no rendered frame to dedupe against.
+    // Windows destroys the window on hide and keeps no snapshot, so the first
+    // push after a show is the only thing that puts real state on it — and it
+    // is exactly the push [push]'s guard would swallow when the session pushed
+    // the same snapshot just before the show.
+    _lastPushed = null;
+    return _overlays.showControlStrip(
+      position == null
+          ? OverlayPlacement.anchored(
+              size: controlStripSize,
+              anchor: OverlayAnchor.topCenter,
+              margin: 6,
+            )
+          : OverlayPlacement.fractional(
+              size: controlStripSize,
+              position: position,
+              margin: 6,
+            ),
+    );
+  }
 
   @override
   Future<OverlayStripPosition?> controlStripPosition() =>

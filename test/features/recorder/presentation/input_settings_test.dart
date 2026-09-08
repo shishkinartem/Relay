@@ -172,11 +172,19 @@ void main() {
     expect(harness.settings.settings.inputDevices, isEmpty);
   });
 
-  testWidgets('an input the platform cannot choose between offers no list', (
+  testWidgets('an input with nothing to disclose is not a disclosure', (
     WidgetTester tester,
   ) async {
-    // macOS: ScreenCaptureKit delivers the system mix, so there is no endpoint
-    // to pick and the field is drawn fixed rather than tappable (§33.8).
+    // macOS: ScreenCaptureKit delivers the whole system mix, so there is no
+    // device to name, no list to offer and no level to draw (§33.8). This used
+    // to unroll a chevron onto one dead line reading "System mix · not
+    // selectable here" — the exact control
+    // `docs/adr/2026-08-30-input-device-selection.md` rejected: "a disclosure
+    // chevron on a control that cannot disclose anything".
+    //
+    // The stored open state is deliberately part of the fixture: `expanded`
+    // has to be recomputed rather than merely disabled, or a remembered open
+    // row unrolls a panel with nothing left on screen to close it.
     await mount(
       tester,
       settings: const AppSettings(
@@ -184,11 +192,97 @@ void main() {
       ),
     );
 
-    final AppSelectField field = tester.widget<AppSelectField>(
-      find.byType(AppSelectField).first,
+    expect(find.text('System audio'), findsOneWidget);
+    expect(disclosureFor('System audio'), findsNothing);
+    expect(find.byType(AppSelectField), findsNothing);
+    expect(find.text('not selectable here'), findsNothing);
+    expect(find.text('System mix'), findsNothing);
+  });
+
+  testWidgets('the On/Off controls line up, chevron or no chevron', (
+    WidgetTester tester,
+  ) async {
+    // The regression removing the dead chevron introduced: dropping its column
+    // outright pulled that row's On/Off 28 points right, so the one row without
+    // a chevron jogged sideways out of the column. The chevron is still not
+    // drawn — its gutter is simply held open.
+    await mount(tester);
+
+    final List<Rect> toggles = tester
+        .widgetList<AppOnOffControl>(find.byType(AppOnOffControl))
+        .map((AppOnOffControl w) => tester.getRect(find.byWidget(w)))
+        .toList();
+
+    expect(toggles.length, greaterThanOrEqualTo(3));
+    for (final Rect box in toggles) {
+      expect(
+        box.right,
+        moreOrLessEquals(toggles.first.right, epsilon: 0.5),
+        reason: 'every input row ends its control at the same x',
+      );
+    }
+  });
+
+  testWidgets('an input the platform does let you choose keeps its list', (
+    WidgetTester tester,
+  ) async {
+    // Windows: WASAPI loopback is per render endpoint, so system audio is a
+    // real choice there and the row must keep the chevron the macOS case
+    // loses. Without this the assertion above would be satisfied by deleting
+    // the disclosure outright.
+    final FakeRecorder recorder =
+        FakeRecorder(
+            capabilities: const RecorderCapabilities(
+              qualities: <RecordingQuality>{
+                RecordingQuality.hd720,
+                RecordingQuality.fullHd1080,
+                RecordingQuality.native,
+              },
+              supportedFrameRates: <int>{30, 60},
+              supportedSourceTypes: <CaptureSourceType>{
+                CaptureSourceType.display,
+                CaptureSourceType.window,
+              },
+              // The whole point of the fixture: all three kinds selectable, as
+              // `recorder_windows_plugin.cpp` reports.
+              selectableDeviceKinds: <MediaDeviceKind>{
+                MediaDeviceKind.camera,
+                MediaDeviceKind.microphone,
+                MediaDeviceKind.systemAudio,
+              },
+              meterableDeviceKinds: <MediaDeviceKind>{
+                MediaDeviceKind.microphone,
+              },
+              supportsCamera: true,
+              supportsMicrophone: true,
+              supportsSystemAudio: true,
+              supportsPause: true,
+              supportsCursorCapture: true,
+              supportsHardwareEncoding: true,
+              platformName: 'fake-windows',
+            ),
+          )
+          ..devices = <MediaDeviceKind, List<MediaDevice>>{
+            MediaDeviceKind.systemAudio: <MediaDevice>[
+              const MediaDevice(
+                id: 'render:speakers',
+                kind: MediaDeviceKind.systemAudio,
+                label: 'Speakers',
+                isSystemDefault: true,
+              ),
+            ],
+          };
+
+    await mount(
+      tester,
+      recorder: recorder,
+      settings: const AppSettings(
+        expandedInputs: <MediaDeviceKind>{MediaDeviceKind.systemAudio},
+      ),
     );
-    expect(field.onPressed, isNull);
-    expect(find.text('not selectable here'), findsOneWidget);
+
+    expect(disclosureFor('System audio'), findsWidgets);
+    expect(find.text('Speakers'), findsOneWidget);
   });
 
   testWidgets('a remembered device that is gone is named, not hidden', (
@@ -221,7 +315,7 @@ void main() {
     );
 
     expect(find.textContaining('Shure MV7'), findsOneWidget);
-    expect(find.textContaining('was not found'), findsOneWidget);
+    expect(find.textContaining('is gone'), findsOneWidget);
   });
 
   testWidgets('a silent microphone is reported, not left blank', (
@@ -245,7 +339,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('TEST — NO SOUND'), findsOneWidget);
-    expect(find.textContaining('hardware switch'), findsOneWidget);
+    expect(find.textContaining('mute switch'), findsOneWidget);
   });
 
   testWidgets('a level event moves the bar', (WidgetTester tester) async {
@@ -345,7 +439,7 @@ void main() {
         ),
       );
 
-      expect(find.textContaining('drag the preview'), findsOneWidget);
+      expect(find.textContaining('Drag it anywhere'), findsOneWidget);
     });
 
     testWidgets('a window source promises no drag, because there is none', (
@@ -369,7 +463,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(CameraCornerTiles), findsOneWidget);
-      expect(find.textContaining('drag the preview'), findsNothing);
+      expect(find.textContaining('Drag it anywhere'), findsNothing);
     });
 
     testWidgets('a dragged tile is drawn as being in none of the four', (

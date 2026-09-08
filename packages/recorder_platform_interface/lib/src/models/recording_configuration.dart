@@ -13,7 +13,7 @@ class RecordingConfiguration {
     required this.source,
     required this.recordingId,
     required this.outputDirectoryPath,
-    this.quality = RecordingQuality.hd720,
+    this.quality = RecordingQuality.native,
     this.frameRate = 30,
     this.cameraEnabled = false,
     this.microphoneEnabled = true,
@@ -112,6 +112,9 @@ class RecordingConfiguration {
     'recordingId': recordingId,
     'outputDirectoryPath': outputDirectoryPath,
     'quality': quality.name,
+    // The bounding height of the preset's box, or 0 for `native`, which has no
+    // box: a host that reads 0 must take the source's own pixels rather than
+    // computing a 0 x 0 rectangle.
     'targetHeight': quality.targetHeight,
     'frameRate': frameRate,
     'cameraEnabled': cameraEnabled,

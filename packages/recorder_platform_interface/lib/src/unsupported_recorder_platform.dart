@@ -21,7 +21,7 @@ import 'recorder.dart';
 /// of offering controls that cannot work.
 class UnsupportedRecorderPlatform extends RecorderPlatform {
   UnsupportedRecorderPlatform([
-    this.reason = 'Recording is not supported on this platform.',
+    this.reason = 'Relay cannot record on this computer.',
   ]);
 
   final String reason;

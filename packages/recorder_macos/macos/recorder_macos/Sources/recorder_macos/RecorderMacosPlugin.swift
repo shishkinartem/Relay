@@ -556,7 +556,7 @@ public class RecorderMacosPlugin: NSObject, FlutterPlugin {
   private func capabilities() -> [String: Any] {
     let version = ProcessInfo.processInfo.operatingSystemVersion
     return [
-      "qualities": ["hd720", "fullHd1080"],
+      "qualities": ["hd720", "fullHd1080", "native"],
       "frameRates": [30, 60],
       "sourceTypes": ["display", "window"],
       // Cameras and microphones are picked from a list of real devices; system

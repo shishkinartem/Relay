@@ -38,6 +38,37 @@ void main() {
       });
     });
 
+    test('native sorts as the largest preset, not the smallest', () {
+      // It carries a target height of 0 because it has no bounding box, so a
+      // plain comparison on that number would put it at the small end of the
+      // segmented control — beside 720p, which is the opposite of what it is.
+      const RecorderCapabilities capabilities = RecorderCapabilities(
+        qualities: <RecordingQuality>{
+          RecordingQuality.native,
+          RecordingQuality.fullHd1080,
+          RecordingQuality.hd720,
+        },
+        supportedFrameRates: <int>{30},
+        supportedSourceTypes: <CaptureSourceType>{CaptureSourceType.display},
+        supportsCamera: true,
+        supportsMicrophone: true,
+        supportsSystemAudio: true,
+        supportsPause: true,
+        supportsCursorCapture: true,
+        supportsHardwareEncoding: true,
+      );
+
+      expect(capabilities.sortedQualities, <RecordingQuality>[
+        RecordingQuality.hd720,
+        RecordingQuality.fullHd1080,
+        RecordingQuality.native,
+      ]);
+    });
+
+    test('an unknown quality name decodes to native', () {
+      expect(RecordingQuality.fromName('uhd2160'), RecordingQuality.native);
+    });
+
     test('an unsupportedReason disables recording entirely', () {
       final RecorderCapabilities capabilities = RecorderCapabilities.fromMap(
         <String, Object?>{'unsupportedReason': 'no implementation'},
@@ -322,6 +353,22 @@ void main() {
         (map['composition']! as Map<String, Object?>)['aspectRatioPolicy'],
         'containWithinPreset',
       );
+    });
+
+    test('the native preset sends 0 as its target height', () {
+      // `targetHeight` is the bounding height of the preset's box, and `native`
+      // has no box. 0 is the sentinel both hosts read as "use the source's own
+      // pixels"; sending the enum name alone would not do, because the hosts
+      // decode `quality` as an opaque string and size the canvas from the
+      // number.
+      final Map<String, Object?> map = const RecordingConfiguration(
+        source: source,
+        recordingId: '8f2a11',
+        outputDirectoryPath: '/tmp/relay',
+      ).toMap();
+
+      expect(map['quality'], 'native');
+      expect(map['targetHeight'], 0);
     });
 
     test('a recording file round-trips from the documented payload', () {
@@ -1092,6 +1139,48 @@ void main() {
       expect(geometry, isNotNull);
       expect(geometry!.logicalWidth, 1512.0);
       expect(geometry.scaleFactor, 2.0);
+    });
+  });
+
+  group('the pre-roll on the strip (§6)', () {
+    test('the countdown round-trips, and its absence decodes to null', () {
+      const RecordingOverlayState counting = RecordingOverlayState(
+        countdownRemaining: Duration(seconds: 3),
+      );
+
+      expect(counting.toMap()['countdownMs'], 3000);
+      expect(
+        RecordingOverlayState.fromMap(counting.toMap()).countdownRemaining,
+        const Duration(seconds: 3),
+      );
+      // A host that predates the key, and the macOS rewind that removes it
+      // between sessions, both land here.
+      expect(
+        RecordingOverlayState.fromMap(<String, Object?>{}).countdownRemaining,
+        isNull,
+      );
+      expect(
+        RecordingOverlayState.fromMap(<String, Object?>{'countdownMs': null})
+            .countdownRemaining,
+        isNull,
+      );
+    });
+
+    test('two states differing only in the countdown are not equal', () {
+      // Load-bearing. The presenter drops a snapshot equal to the last one, and
+      // during a pre-roll every other field is identical between ticks —
+      // `elapsed` is zero throughout. Without this the strip would render the
+      // first number and never change, with no error anywhere.
+      const RecordingOverlayState three = RecordingOverlayState(
+        countdownRemaining: Duration(seconds: 3),
+      );
+      const RecordingOverlayState two = RecordingOverlayState(
+        countdownRemaining: Duration(seconds: 2),
+      );
+
+      expect(three, isNot(two));
+      expect(three.hashCode, isNot(two.hashCode));
+      expect(three, isNot(const RecordingOverlayState()));
     });
   });
 }

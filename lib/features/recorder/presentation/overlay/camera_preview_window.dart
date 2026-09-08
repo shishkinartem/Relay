@@ -57,9 +57,20 @@ class _CameraPreviewWindowState extends State<CameraPreviewWindow> {
       // Window mode: the preview is a captioned object placed where the user
       // can see it, deliberately *not* where the tile lands (design `1e`).
       // Dragging it would move a thing that is not the picture-in-picture, so
-      // it does not drag at all (§33.5). It keeps its ground because it is a
-      // panel in its own right rather than a stand-in for something in the file.
-      return RelayTheme(child: _placed(surface));
+      // it does not drag at all (§33.5).
+      //
+      // `ground: null` here too, and the reason is the window, not the taste.
+      // The host's preview panel is created once per process and its
+      // never-shrink high-water mark is never cleared, so a display-mode
+      // session — which sizes the panel to the *bounding* size of all three
+      // presets — permanently enlarges it. A later window-mode show asks for
+      // the smaller 200x140, is held at the larger size, and every point of
+      // the surplus used to be filled with the theme's opaque ground: an
+      // off-white slab standing out above and to the right of the captioned
+      // box, over whatever the user is recording. The box paints its own
+      // background inside its frame, so nothing is lost by not painting one
+      // behind it.
+      return RelayTheme(ground: null, child: _placed(surface));
     }
     // Display mode: no ground, and nothing painted outside the tile. This
     // window carries the composited tile, and the compositor leaves every pixel

@@ -51,19 +51,6 @@ MediaWriter::~MediaWriter() {
   Abort();
 }
 
-uint32_t MediaWriter::RecommendedBitrate(uint32_t width, uint32_t height,
-                                         uint32_t frame_rate) {
-  // Quality-oriented VBR, not a user-facing setting (spec 11). Screen content
-  // at roughly 0.1 bits per pixel at 30 fps, scaled sub-linearly with frame
-  // rate because consecutive screen frames are highly correlated. 1080p30 lands
-  // near 6 Mbps, matching the capacity-planning example in spec 12.
-  const double pixels = static_cast<double>(width) * static_cast<double>(height);
-  const double fps_scale = std::sqrt((std::max)(1.0, static_cast<double>(frame_rate)) / 30.0);
-  const double bitrate = pixels * 30.0 * 0.10 * fps_scale;
-  const double clamped = (std::max)(2000000.0, (std::min)(20000000.0, bitrate));
-  return static_cast<uint32_t>(clamped);
-}
-
 bool MediaWriter::Open(const Config& config, ID3D11Device* device, RecorderError* error) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (writing_) {
@@ -144,8 +131,14 @@ bool MediaWriter::OpenInternal(bool allow_hardware, ID3D11Device* device,
   }
   video_out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
   video_out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-  video_out->SetUINT32(MF_MT_AVG_BITRATE, RecommendedBitrate(config_.width, config_.height,
-                                                             config_.frame_rate));
+  // The formula lives in recorder_types.cpp, which the ctest target builds, so
+  // the two platforms' bitrate policy is one rule under test rather than two
+  // that drifted (they did: this used to be 0.10 bpp with a sqrt frame-rate law
+  // while macOS used a step function, so the same canvas encoded at 2.5x the
+  // rate on Windows).
+  video_out->SetUINT32(
+      MF_MT_AVG_BITRATE,
+      RecommendedVideoBitrate(config_.width, config_.height, config_.frame_rate));
   video_out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
   video_out->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
   ::MFSetAttributeSize(video_out.get(), MF_MT_FRAME_SIZE, config_.width, config_.height);

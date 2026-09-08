@@ -56,17 +56,28 @@ class RelayHome extends StatelessWidget {
           final SessionPreflight state => PreflightScreen(state: state),
           SessionPreparing() => const TransientScreen(
             kicker: 'Preparing',
-            message: 'Opening the capture session and starting the encoder.',
+            message: 'Getting ready to record.',
+          ),
+          // The main window is hidden during the pre-roll — that is the point
+          // of it, since the recorder's own panel is the one window the user
+          // cannot arrange around. A fixed message rather than a live count: a
+          // hidden surface mirroring live state is a second place to get the
+          // number wrong.
+          SessionCountingDown() => const TransientScreen(
+            kicker: 'Starting',
+            message:
+                'The countdown is on the control strip. Cancel it there to '
+                'stop before anything is recorded.',
           ),
           final SessionActive state => TransientScreen(
             kicker: state.isStopping ? 'Stopping' : 'Recording',
             message: state.isStopping
-                ? 'Flushing the encoder and finalizing the file.'
+                ? 'Saving your recording.'
                 : 'The control strip is on your current display.',
           ),
           SessionFinalizing() => const TransientScreen(
-            kicker: 'Finalizing',
-            message: 'Writing the MP4 out to disk.',
+            kicker: 'Saving',
+            message: 'Writing the video file.',
           ),
           final SessionReady state => ReadyScreen(state: state),
           final SessionUploading state => UploadingScreen(state: state),

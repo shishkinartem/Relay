@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' show Offset;
 
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
+import 'package:relay/core/platform/folder_opener.dart';
 import 'package:relay/features/recorder/domain/local_recording_store.dart';
 import 'package:relay/features/recorder/domain/session_events.dart';
 import 'package:upload_core/upload_core.dart';
@@ -161,6 +162,26 @@ class FakeHostResources {
   void menuHidden() => _menuShown = false;
 }
 
+/// A [FolderOpener] that opens nothing and remembers what it was asked to.
+///
+/// The whole reason `FolderOpener` is an interface: a widget test that taps
+/// `Open folder` must be able to assert the right path was handed over without
+/// a Finder window appearing on the machine running the suite.
+class FakeFolderOpener implements FolderOpener {
+  /// Every path handed over, newest last.
+  final List<String> opened = <String>[];
+
+  /// What [open] answers. False is the "no file manager here" case, which the
+  /// UI treats as a caption that stays true rather than as an error.
+  bool result = true;
+
+  @override
+  Future<bool> open(String directoryPath) async {
+    opened.add(directoryPath);
+    return result;
+  }
+}
+
 /// A scripted [Recorder] with no native side.
 ///
 /// Records every call so a test can assert *what the application asked the
@@ -172,6 +193,7 @@ class FakeRecorder implements Recorder {
       qualities: <RecordingQuality>{
         RecordingQuality.hd720,
         RecordingQuality.fullHd1080,
+        RecordingQuality.native,
       },
       supportedFrameRates: <int>{30, 60},
       supportedSourceTypes: <CaptureSourceType>{
@@ -524,9 +546,14 @@ class FakeRecorder implements Recorder {
   Future<void> setSystemAudioEnabled(bool enabled) =>
       _record('setSystemAudioEnabled($enabled)');
 
+  /// Runs inside `start()`, so a test can act in the window between the
+  /// countdown ending and the session going live.
+  Future<void> Function()? onStart;
+
   @override
   Future<void> start() async {
     calls.add('start');
+    await onStart?.call();
     if (hangOnStart) {
       await Completer<void>().future;
     }
@@ -775,10 +802,15 @@ class FakeOverlayWindowController implements OverlayWindowController {
     resources.stripHidden();
   }
 
+  /// Runs inside the call, so a test can act from within the window between
+  /// the strip appearing and the countdown loop starting.
+  Future<void> Function(bool visible)? onSetMainWindowVisible;
+
   @override
   Future<void> setMainWindowVisible(bool visible) async {
     calls.add('setMainWindowVisible($visible)');
     mainWindowVisible = visible;
+    await onSetMainWindowVisible?.call(visible);
   }
 
   /// The main window is hidden for the whole of a recording, so whether it came

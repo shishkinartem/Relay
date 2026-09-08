@@ -314,7 +314,7 @@ RecordingConfig ConfigFromMap(const flutter::EncodableMap& map) {
   config.recording_id = StringAt(map, "recordingId");
   config.output_directory = Widen(StringAt(map, "outputDirectoryPath"));
   config.quality = StringAt(map, "quality");
-  config.target_height = static_cast<uint32_t>(IntAt(map, "targetHeight", 720));
+  config.target_height = static_cast<uint32_t>(IntAt(map, "targetHeight", 0));
   config.frame_rate = static_cast<uint32_t>(IntAt(map, "frameRate", 30));
   config.camera_enabled = BoolAt(map, "cameraEnabled", false);
   config.microphone_enabled = BoolAt(map, "microphoneEnabled", true);
@@ -913,7 +913,8 @@ flutter::EncodableMap RecorderWindowsPlugin::Capabilities() const {
   flutter::EncodableMap map;
   map[flutter::EncodableValue("qualities")] = flutter::EncodableValue(
       flutter::EncodableList{flutter::EncodableValue("hd720"),
-                             flutter::EncodableValue("fullHd1080")});
+                             flutter::EncodableValue("fullHd1080"),
+                             flutter::EncodableValue("native")});
   map[flutter::EncodableValue("frameRates")] = flutter::EncodableValue(
       flutter::EncodableList{flutter::EncodableValue(30), flutter::EncodableValue(60)});
   map[flutter::EncodableValue("sourceTypes")] = flutter::EncodableValue(

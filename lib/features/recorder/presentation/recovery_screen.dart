@@ -41,15 +41,15 @@ class RecoveryScreen extends StatelessWidget {
                 const SizedBox(height: 4),
                 AppMonoText(
                   '${_relative(artifact.modifiedAt)} · '
-                  '${formatBytes(artifact.sizeBytes)} · not finalized',
+                  '${formatBytes(artifact.sizeBytes)} · not finished',
                 ),
               ],
             ),
           ),
           const SizedBox(height: 13),
           Text(
-            'The app closed before this recording was written out. Finalizing '
-            'may recover most of it; nothing is deleted unless you choose to.',
+            'Relay closed before this recording was saved. Repairing it may '
+            'recover most of it; nothing is deleted unless you choose to.',
             style: AppTypography.bodyXSmall.copyWith(color: AppColors.ink(70)),
           ),
           const SizedBox(height: 13),
@@ -57,7 +57,7 @@ class RecoveryScreen extends StatelessWidget {
             children: <Widget>[
               Expanded(
                 child: AppButton(
-                  label: 'Try to finalize',
+                  label: 'Try to repair',
                   variant: AppButtonVariant.primary,
                   height: 38,
                   busy: vm.isBusy,

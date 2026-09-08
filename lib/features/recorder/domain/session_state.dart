@@ -7,6 +7,7 @@ enum SessionPhase {
   selectingSource,
   preflight,
   preparing,
+  countingDown,
   recording,
   paused,
   stopping,
@@ -102,6 +103,57 @@ class SessionPreparing extends SessionState {
 
   @override
   SessionPhase get phase => SessionPhase.preparing;
+}
+
+/// The pre-roll: the capture session is prepared and the strip is up, but no
+/// frame has been written and no clock has started (§6, §19).
+///
+/// Its own state rather than a flag on [SessionActive]. `SessionActive` already
+/// derives three phases from two booleans, so a third would make `phase`
+/// ambiguous — and, decisively, `SessionActive` is what the overlay push and
+/// every strip command test for. A pre-roll wearing that type would make Pause,
+/// Stop-as-stop and all three input toggles live over a session that has not
+/// started.
+///
+/// It carries the resolved inputs so the strip draws the session that is about
+/// to be recorded rather than the overlay widget's own defaults.
+class SessionCountingDown extends SessionState {
+  const SessionCountingDown({
+    required this.source,
+    required this.remaining,
+    required this.microphoneEnabled,
+    required this.cameraEnabled,
+    required this.systemAudioEnabled,
+    this.microphoneAvailable = true,
+    this.cameraAvailable = true,
+    this.systemAudioAvailable = true,
+  });
+
+  final CaptureSource source;
+
+  /// Whole seconds left, never zero: reaching zero *is* `RecordingStarted`.
+  final Duration remaining;
+
+  final bool microphoneEnabled;
+  final bool cameraEnabled;
+  final bool systemAudioEnabled;
+  final bool microphoneAvailable;
+  final bool cameraAvailable;
+  final bool systemAudioAvailable;
+
+  SessionCountingDown copyWith({Duration? remaining}) => SessionCountingDown(
+    source: source,
+    remaining: remaining ?? this.remaining,
+    microphoneEnabled: microphoneEnabled,
+    cameraEnabled: cameraEnabled,
+    systemAudioEnabled: systemAudioEnabled,
+    microphoneAvailable: microphoneAvailable,
+    cameraAvailable: cameraAvailable,
+    systemAudioAvailable: systemAudioAvailable,
+  );
+
+  @override
+  SessionPhase get phase => SessionPhase.countingDown;
 }
 
 /// `recording ⇄ paused`, plus the brief `stopping` window.
@@ -222,6 +274,8 @@ class SessionUploading extends SessionState {
     required this.destinationId,
     required this.bytesSent,
     required this.totalBytes,
+    required this.keepLocalCopy,
+    this.everUploaded = false,
     this.chunkIndex,
     this.chunkCount,
     this.retries = 0,
@@ -232,6 +286,15 @@ class SessionUploading extends SessionState {
   final RecordingFile recording;
   final String name;
   final String destinationId;
+
+  /// The answer captured when Send was pressed (§13). Fixed for the life of the
+  /// transfer, which is why it is not a [copyWith] parameter.
+  final bool keepLocalCopy;
+
+  /// Carried through so a cancelled or failed *second* send does not re-arm the
+  /// Delete confirmation for a file that already reached the destination
+  /// (`docs/adr/2026-08-22-delete-confirmation.md`).
+  final bool everUploaded;
 
   /// Bytes the destination confirmed, never bytes handed to a socket.
   final int bytesSent;
@@ -259,6 +322,8 @@ class SessionUploading extends SessionState {
     destinationId: destinationId,
     bytesSent: bytesSent ?? this.bytesSent,
     totalBytes: totalBytes,
+    keepLocalCopy: keepLocalCopy,
+    everUploaded: everUploaded,
     chunkIndex: chunkIndex ?? this.chunkIndex,
     chunkCount: chunkCount ?? this.chunkCount,
     retries: retries ?? this.retries,

@@ -252,6 +252,349 @@ void main() {
       );
     });
 
+    test(
+      'the pre-roll runs after the panel is hidden and before start',
+      () async {
+        final List<String> order = <String>[];
+        final TestHarness harness = await TestHarness.create(
+          settings: const AppSettings(countdownSeconds: 3),
+          delay: (Duration d) async => order.add('wait ${d.inSeconds}s'),
+        );
+        addTearDown(harness.dispose);
+        await harness.initialize();
+
+        await harness.viewModel.requestStart();
+
+        // Three constraints at once: the panel is already hidden, the strip is
+        // already up to draw the count, and nothing has been encoded — the
+        // writer and the ticker both live inside the platform's `start()`.
+        expect(harness.overlays.calls, contains('setMainWindowVisible(false)'));
+        expect(order, <String>['wait 1s', 'wait 1s', 'wait 1s']);
+        expect(harness.viewModel.state, isA<SessionActive>());
+        expect(
+          (harness.viewModel.state as SessionActive).elapsed,
+          Duration.zero,
+        );
+      },
+    );
+
+    test('the strip shows the count before it is ever shown recording', () async {
+      // macOS replays the strip's last snapshot before the panel is placed, and
+      // the hide rewinds only the recording fields — so without a push before
+      // `showControlStrip` the strip opens claiming to be recording for the
+      // whole pre-roll.
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) async {},
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      await harness.viewModel.requestStart();
+
+      final int show = harness.overlays.calls.indexOf('showControlStrip');
+      final int firstPush = harness.overlays.calls.indexOf(
+        'updateControlStrip',
+      );
+      expect(show, greaterThan(-1));
+      expect(firstPush, greaterThan(-1));
+      expect(
+        firstPush,
+        lessThan(show),
+        reason: 'the count must be on the strip before the strip appears',
+      );
+      // And again after, because Windows keeps no snapshot and destroys the
+      // window on hide, so only a push after the show lands there.
+      expect(
+        harness.overlays.calls.lastIndexOf('updateControlStrip'),
+        greaterThan(show),
+      );
+    });
+
+    test('the strip is pushed a descending count, ending at one', () async {
+      // The failure this guards is silent: `OverlayPresenter.push` drops a
+      // snapshot equal to the last one, and during a pre-roll every other field
+      // is identical between ticks — `elapsed` is zero throughout. If
+      // `countdownRemaining` ever fell out of `RecordingOverlayState`'s
+      // equality, the strip would render the first number and never change,
+      // with nothing anywhere reporting it.
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) async {},
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      await harness.viewModel.requestStart();
+
+      final List<Duration> counts = harness.overlays.pushed
+          .map((RecordingOverlayState s) => s.countdownRemaining)
+          .whereType<Duration>()
+          .toList();
+
+      // Never zero: reaching zero *is* the recording starting.
+      expect(counts, <Duration>[
+        const Duration(seconds: 3),
+        const Duration(seconds: 3),
+        const Duration(seconds: 2),
+        const Duration(seconds: 1),
+      ], reason: 'shown before and after the strip appears, then 2 and 1');
+      expect(counts, isNot(contains(Duration.zero)));
+    });
+
+    test('a long pre-roll is not mistaken for a platform that hung', () async {
+      // The wait sits between two awaits and inside neither `.timeout`: folding
+      // a ten-second countdown into the eight-second platform timeout would
+      // report a capture failure for a countdown that worked.
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 10),
+        delay: (Duration d) async {},
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      await harness.viewModel.requestStart();
+
+      expect(harness.viewModel.state, isA<SessionActive>());
+      expect(harness.recorder.calls, contains('start'));
+    });
+
+    test('no countdown leaves the start path exactly as it was', () async {
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      await harness.viewModel.requestStart();
+
+      expect(harness.viewModel.state, isA<SessionActive>());
+      expect(
+        harness.overlays.calls.indexOf('showControlStrip'),
+        lessThan(harness.overlays.calls.indexOf('updateControlStrip')),
+        reason: 'off is the default, and off is the shipped sequence',
+      );
+    });
+
+    test('cancelling the pre-roll releases everything and fails nothing', () async {
+      // The wait is what lets the test press Cancel mid-count: the delay never
+      // completes on its own, so the wake is the only way out.
+      final Completer<void> never = Completer<void>();
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) => never.future,
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      final Future<void> starting = harness.viewModel.requestStart();
+      await pumpEventQueue();
+      expect(harness.viewModel.state, isA<SessionCountingDown>());
+
+      await harness.viewModel.cancelCountdown();
+      await starting;
+
+      // Sequenced, not raced: Windows refuses a release while it still
+      // considers the session live.
+      expect(
+        harness.recorder.calls,
+        containsAllInOrder(<String>['abort', 'releaseSession']),
+      );
+      expect(harness.recorder.calls, isNot(contains('start')));
+      // A cancel is not a failure — that would put the capture-failure screen
+      // in front of someone who simply changed their mind.
+      expect(harness.viewModel.state, isA<SessionIdle>());
+      expect(harness.viewModel.state, isNot(isA<SessionFailed>()));
+      // And the panel comes back, with the overlays gone.
+      expect(harness.overlays.calls, contains('hideControlStrip'));
+      expect(harness.overlays.calls.last, 'setMainWindowVisible(true)');
+    });
+
+    test('a cancelled pre-roll offers nothing to recover', () async {
+      // A cancel must leave nothing for the next launch to offer to repair.
+      //
+      // The two platforms get there differently, and an earlier version of this
+      // comment claimed they were the same — wrongly. macOS opens the writer in
+      // `start()` (`RecordingSession.swift`), so a cancelled pre-roll never
+      // creates the file at all. Windows opens the sink writer and calls
+      // `BeginWriting()` back in `Prepare` (`media_writer.cpp`), so the `.part`
+      // does exist by then; what keeps it out of recovery is
+      // `LocalRecordingStore.findIncompleteArtifacts` dropping anything of zero
+      // size. Whether a cancelled Windows pre-roll can leave a NON-empty file
+      // is unverified — nobody has run Relay on Windows
+      // (docs/development/compatibility-matrix.md).
+      final Completer<void> never = Completer<void>();
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) => never.future,
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      final Future<void> starting = harness.viewModel.requestStart();
+      await pumpEventQueue();
+      await harness.viewModel.cancelCountdown();
+      await starting;
+
+      expect(harness.viewModel.hasRecoverableArtifacts, isFalse);
+    });
+
+    test('two cancel presses one frame apart abort once', () async {
+      final Completer<void> never = Completer<void>();
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) => never.future,
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      final Future<void> starting = harness.viewModel.requestStart();
+      await pumpEventQueue();
+      await harness.viewModel.cancelCountdown();
+      await harness.viewModel.cancelCountdown();
+      await starting;
+
+      expect(
+        harness.recorder.calls.where((String c) => c == 'abort').length,
+        1,
+      );
+    });
+
+    test('a cancel while start() is in flight still cancels', () async {
+      // The narrow window the loop does not cover: `_runCountdown` has returned
+      // and cleared its completer, but the platform's `start()` is still
+      // running. A Stop pressed there used to set a flag nobody read again, and
+      // the recording began over a strip the user had just cancelled.
+      final FakeRecorder recorder = FakeRecorder();
+      final TestHarness harness = await TestHarness.create(
+        recorder: recorder,
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) async {},
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      // Press Stop from inside `start()`, which is exactly the gap.
+      recorder.onStart = harness.viewModel.cancelCountdown;
+
+      await harness.viewModel.requestStart();
+
+      expect(harness.viewModel.state, isA<SessionIdle>());
+      expect(harness.recorder.calls, contains('abort'));
+    });
+
+    test('a cancel that never landed cannot poison the next session', () async {
+      // The defect the first version of the cancel guard introduced. The flag
+      // was process-scoped and only `_runCountdown` cleared it, so a cancel the
+      // guard never consumed — because `start()` threw — survived into a later
+      // session. With the countdown off that session never runs the loop, so
+      // the guard fired against `SessionPreparing`, where `CountdownCancelled`
+      // is not a legal event: it was rejected, the state never moved, and a
+      // healthy recording was aborted into a screen with no controls and no way
+      // out but relaunching.
+      final FakeRecorder recorder = FakeRecorder();
+      final TestHarness harness = await TestHarness.create(
+        recorder: recorder,
+        settings: const AppSettings(countdownSeconds: 3),
+        delay: (Duration d) async {},
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      // Session one: cancel lands while `start()` is running, and `start()`
+      // then fails — so the guard never gets to consume the flag.
+      recorder.onStart = harness.viewModel.cancelCountdown;
+      recorder.failOnStart = const RecorderException(
+        RecorderErrorCode.captureFailed,
+        'no',
+      );
+      await harness.viewModel.requestStart();
+      expect(harness.viewModel.state, isA<SessionFailed>());
+
+      // Session two: countdown off, nothing wrong, nobody pressed anything.
+      recorder.onStart = null;
+      recorder.failOnStart = null;
+      recorder.calls.clear();
+      await harness.settings.setCountdownSeconds(0);
+      harness.viewModel.startNewSession();
+      await harness.viewModel.requestStart();
+
+      expect(
+        harness.viewModel.state,
+        isA<SessionActive>(),
+        reason: 'a stale flag must not cancel a session nobody cancelled',
+      );
+      expect(harness.recorder.calls, isNot(contains('abort')));
+    });
+
+    test('a cancel raised before the count begins is still honoured', () async {
+      // The symmetric window the first fix left open. The strip is up and its
+      // Cancel square is live from the moment `showControlStrip` returns —
+      // before the loop starts, across `_showCameraPreview()` and the panel
+      // hide — and the loop used to clear the flag on entry, throwing that
+      // press away and recording anyway.
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 3, cameraEnabled: true),
+        delay: (Duration d) async {},
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      // Press Cancel from inside the hide, which is inside that window.
+      harness.overlays.onSetMainWindowVisible = (bool visible) async {
+        if (!visible) {
+          await harness.viewModel.cancelCountdown();
+        }
+      };
+
+      await harness.viewModel.requestStart();
+
+      expect(harness.viewModel.state, isA<SessionIdle>());
+      expect(harness.recorder.calls, isNot(contains('start')));
+    });
+
+    test('Start now skips the rest of the pre-roll', () async {
+      final Completer<void> never = Completer<void>();
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 10),
+        delay: (Duration d) => never.future,
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      final Future<void> starting = harness.viewModel.requestStart();
+      await pumpEventQueue();
+      expect(harness.viewModel.state, isA<SessionCountingDown>());
+
+      await harness.viewModel.startCountdownNow();
+      await starting;
+
+      expect(harness.viewModel.state, isA<SessionActive>());
+      expect((harness.viewModel.state as SessionActive).elapsed, Duration.zero);
+      expect(harness.recorder.calls, contains('start'));
+      expect(harness.recorder.calls, isNot(contains('abort')));
+    });
+
+    test('the strip squares mean cancel and start while counting', () async {
+      // No new OverlayCommand: the same two squares are branched here, so the
+      // enum on the wire stays identical on both platforms.
+      final Completer<void> never = Completer<void>();
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(countdownSeconds: 5),
+        delay: (Duration d) => never.future,
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+
+      final Future<void> starting = harness.viewModel.requestStart();
+      await pumpEventQueue();
+
+      harness.overlays.commandController.add(OverlayCommand.stop);
+      await pumpEventQueue();
+      await starting;
+
+      expect(harness.viewModel.state, isA<SessionIdle>());
+      expect(harness.recorder.calls, isNot(contains('start')));
+    });
+
     test('configures the platform from the persisted settings', () async {
       final TestHarness harness = await TestHarness.create(
         settings: const AppSettings(

@@ -30,6 +30,7 @@ Then load only the topic relevant to the task.
 | `development/compatibility-matrix.md` | what is actually built and verified, per platform |
 | `development/macos-tcc-and-launchservices.md` | permission and launch-attribution diagnosis |
 | `development/how-to-install.md` | building and distributing builds — **in Russian**; the only documentation of the Windows packaging story |
+| `development/windows-smoke-test.md` | the ordered first-run script for Windows, for a machine with no development tools |
 
 ## Using it
 

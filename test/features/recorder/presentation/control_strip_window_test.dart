@@ -112,6 +112,44 @@ void main() {
     expect(reported.last.height, recording.height);
   });
 
+  testWidgets('counting down does not change the size either (§6)', (
+    WidgetTester tester,
+  ) async {
+    undersizedWindow(tester);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(ControlStripWindow(client: client));
+    await push(
+      tester,
+      const RecordingOverlayState(
+        elapsed: Duration(seconds: 12),
+        microphoneHasMenu: true,
+        cameraHasMenu: true,
+        systemAudioHasMenu: true,
+      ),
+    );
+    final Size recording = reported.last;
+
+    for (final int seconds in <int>[10, 3, 1]) {
+      await push(
+        tester,
+        RecordingOverlayState(
+          countdownRemaining: Duration(seconds: seconds),
+          microphoneHasMenu: true,
+          cameraHasMenu: true,
+          systemAudioHasMenu: true,
+        ),
+      );
+      expect(reported.last.width, recording.width, reason: 'at $seconds s');
+      expect(reported.last.height, recording.height, reason: 'at $seconds s');
+    }
+
+    // The carets are what make this true: they stay in the tree while counting
+    // down, merely inert. Dropping them would take about 57 points off the
+    // strip's width — the change §6 and the never-shrink ADR both forbid.
+    expect(find.bySemanticsLabel('Choose a microphone'), findsOneWidget);
+  });
+
   testWidgets('every control stays inside the reported size', (
     WidgetTester tester,
   ) async {

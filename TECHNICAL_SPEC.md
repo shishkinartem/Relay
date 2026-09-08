@@ -32,6 +32,9 @@ wins — the tables are digests and drift first.
 | §2, §29, §31 | Post-recording has a third action, New recording | — (shipped; `lib/features/post_recording/`) |
 | §2, §6, §7, §8, §20, §29, §31 | v0.5 interactive capture controls, folded out of §33 on 2026-08-31 | the four ADRs dated `2026-08-30` |
 | §19.1 | The equality census is taken after the first cycle, not at launch | — (§19.1's own "Repeat runs" rule; the parenthetical was the stale side) |
+| §10, §12, §29, §31 | A `Native` resolution preset, default for a fresh install; source dimensions on the channel are backing-store pixels; one bitrate rule on both platforms | `docs/adr/2026-09-08-native-resolution-recording.md` |
+| §2, §13, §24, §29, §31 | A confirmed send deletes the local copy **unless the user chose to keep it**; `New recording` becomes `Keep without sending` | `docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md` |
+| §6, §10, §19, §29, §31 | An optional pre-recording countdown, drawn in the control strip's clock slot; a new `countingDown` session state | `docs/adr/2026-09-08-pre-recording-countdown.md` |
 
 Two consequences of the Drive removal are **not** resolved here and are owner
 decisions: §24's resumable-upload release gate and §30 item 6. Both are marked in place.
@@ -158,7 +161,7 @@ Linux is not part of MVP, but the application architecture must allow a Linux ca
 - microphone toggle during recording
 - camera toggle during recording
 - system audio toggle during recording
-- quality setting: 720p / 1080p
+- quality setting: Native / 720p / 1080p
 - FPS setting: 30 / 60 FPS
 - default FPS: 30
 - output container: MP4
@@ -168,9 +171,9 @@ Linux is not part of MVP, but the application architecture must allow a Linux ca
 - one final mixed audio track
 - camera composited into the final video
 - microphone + system audio mixed into the final audio
-- Send / Delete / New recording actions after recording
+- Send / Delete / Keep without sending, after recording
 - upload destination setting: Telegram / WebDAV
-- local file deletion after successful upload
+- local file deletion after successful upload, unless the user chose to keep a copy
 - preservation of the local file after upload failure
 - upload progress
 - architecture that supports additional capture platforms and upload destinations
@@ -774,9 +777,32 @@ This must be explicitly covered by automated tests once confirmed.
 Available values:
 
 ```text
+Native
 720p
 1080p
 ```
+
+Default:
+
+```text
+Native
+```
+
+**Native** is the source's own pixel resolution, scaled by nothing. Amended
+2026-09-08 by `docs/adr/2026-09-08-native-resolution-recording.md`; a stored
+`720p` or `1080p` is never promoted to it.
+
+### Countdown setting
+
+Seconds of pre-roll between Start and the first frame. Values: `Off / 3s / 5s /
+10s`, default **Off** (added 2026-09-08 by
+`docs/adr/2026-09-08-pre-recording-countdown.md`).
+
+The count is drawn in the control strip's own clock slot, in the clock's format,
+so the strip keeps one size in every session state (§6). While it runs the strip
+washes accent, the input toggles are drawn but inert, and its last two squares
+read `Start now` and `Cancel countdown`. Cancelling aborts and releases the
+prepared session and writes no file.
 
 ### FPS setting
 
@@ -808,11 +834,26 @@ This allows 120 FPS to be added later after a platform/performance PoC.
 
 ### Output dimensions
 
-A 720p/1080p quality preset defines the target output quality/canvas policy.
+A 720p/1080p quality preset defines the target output quality/canvas policy: the
+source is fitted inside a 16:9 box of that height, preserving its aspect ratio
+and never upscaling.
+
+**Native** has no box. The canvas *is* the source's backing-store pixels, capped
+at 3840 × 2160 — an encodability limit, since H.264 caps frame size in
+macroblocks and a 5K panel needs a level above 5.2. Beyond the cap the canvas is
+scaled down proportionally; it is never cropped or distorted.
+
+Source dimensions crossing the platform channel are **backing-store pixels, never
+points**. macOS reported points until 2026-09-08, which capped every recording on
+a Retina display at the point grid — "1080p" on a 3024 × 1964 panel produced
+982 lines, a 2:1 downsample applied before anything that understands glyphs saw
+the frame.
 
 **TBD:** precise handling for sources whose aspect ratio is not 16:9 — non-16:9
 application windows, and displays that are not 16:9 (for example 16:10 or ultrawide).
-The source aspect ratio must not be distorted. This remains §30.3.
+The source aspect ratio must not be distorted. This remains §30.3. *Native is a
+third answer to it — no box, so nothing to fit — but only for the preset that
+declines to resize at all; §30.3 stays open for 720p and 1080p.*
 
 ---
 
@@ -892,7 +933,7 @@ Finalize local MP4
 Ready
   ↓
 ┌─────────────┬─────────────┬────────────────┐
-│ Send        │ Delete      │ New recording  │
+│ Send        │ Delete      │ Keep w/o send  │
 └─────────────┴─────────────┴────────────────┘
 ```
 
@@ -907,8 +948,19 @@ UploadDestination
   ↓
 Remote success confirmed
   ↓
-Delete local file
+Delete local file, unless the user chose to keep a copy
 ```
+
+**"Keep a copy on this computer"** is a persisted On/Off, default **Off**, shown
+on the post-recording screen and mirrored in Settings
+(`docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md`). Off makes a send
+a move; On makes it a copy. The answer is read once, when Send is pressed, and
+carried on the session — a preference changed while bytes are in flight cannot
+retroactively decide the fate of a file already on its way.
+
+This narrows the second of §18's two deletion triggers by a user choice. It adds
+no third trigger: a local file is still removed only on an explicit Delete or a
+confirmed upload.
 
 ### Delete
 
@@ -924,12 +976,22 @@ uploaded** — the irreversible case.
 
 Consequence: the dialog appears at most once per recording.
 
-### New recording
+### Keep without sending
 
 Returns to the recorder ready to start again, with the recording untouched:
 nothing is uploaded and nothing is deleted (§18). Send and Delete were the only
 two ways out of Ready, which left no way to keep a recording and get on with the
 next one.
+
+Named for the user's intent. It shipped as `New recording`, a ghost link in the
+title bar named for its side effect, which is why keeping a recording read as
+something that had to be inferred rather than chosen. The behaviour is
+unchanged; the label and the placement are not — it is now a full-width peer of
+Send in the panel footer.
+
+The post-recording screen also states **where the file is**: an `On this
+computer` row naming the folder, with a button that opens it in the platform's
+file manager.
 
 It states where the file was left, because afterwards the session no longer
 refers to that recording.
@@ -1254,6 +1316,9 @@ selectingSource
   ↓
 preparing
   ↓
+countingDown          (only when the countdown setting is on; §10)
+  ├──► idle           (Cancel countdown — aborts, releases, writes nothing)
+  ↓
 recording
   ⇄ paused
   ↓
@@ -1272,6 +1337,9 @@ ready
       deletingLocalFile
           ↓
          idle
+
+      (uploadSucceeded returns to `ready` instead, with the file intact,
+       when "Keep a copy on this computer" was on when Send was pressed; §13)
 ```
 
 Capture-related errors:
@@ -1709,7 +1777,9 @@ At minimum:
 - overlay controls absent from output
 - camera PiP present only when enabled
 - local file retained after failed upload
-- local file deleted after confirmed successful upload
+- local file deleted after confirmed successful upload, with "Keep a copy on
+  this computer" off (the default)
+- local file **retained** after confirmed successful upload, with it on
 
 ---
 
@@ -1871,7 +1941,8 @@ Launch
 Select source (display — default — or window)
   ↓
 Optional settings
-  ├── Quality: 720p / 1080p
+  ├── Quality: Native / 720p / 1080p
+  ├── Countdown: Off / 3s / 5s / 10s
   ├── FPS: 30 / 60
   ├── Upload: Telegram / WebDAV
   └── Per input, behind a disclosure closed by default:
@@ -1897,13 +1968,13 @@ Ready
   │     ↓
   │   selected UploadDestination
   │     ↓
-  │   success → delete local file
+  │   success → delete local file, unless the user chose to keep a copy
   │
   ├── Delete
   │     ↓
   │   delete local file
   │
-  └── New recording
+  └── Keep without sending
         ↓
       keep the file, return to the recorder
 ```
@@ -1994,19 +2065,20 @@ The open items should be resolved before the corresponding behavior is considere
 | Device menus | their own always-on-top window, excluded from capture like the other two overlays |
 | Main panel width | 588–960, three breakpoints, no horizontal scrolling at any width |
 | Audio output | system + mic mixed |
-| Quality | 720p / 1080p |
+| Quality | Native (default) / 720p / 1080p |
+| Countdown | Off (default) / 3s / 5s / 10s |
 | FPS | 30 / 60, default 30 |
 | 120 FPS | future capability |
 | Container | MP4 |
 | Video codec | H.264 |
 | Audio codec | AAC |
-| Post-recording | Send / Delete / New recording |
+| Post-recording | Send / Delete / Keep without sending |
 | Delete confirmation | required only when never uploaded |
 | Upload abstraction | common `UploadDestination` |
 | MVP destinations | Telegram + WebDAV |
 | Resumable upload | not supported; a broken transfer restarts |
 | Destination selection | Settings |
-| Delete after upload | only after confirmed success |
+| Delete after upload | only after confirmed success, and only when the user has not chosen to keep a local copy |
 
 ---
 

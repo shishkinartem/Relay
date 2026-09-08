@@ -26,6 +26,7 @@ class TestHarness {
     required this.recorder,
     required this.permissions,
     required this.overlays,
+    required this.folders,
     required this.settings,
     required this.destinations,
     required this.uploads,
@@ -37,6 +38,7 @@ class TestHarness {
   final FakeRecorder recorder;
   final FakeRecorderPermissions permissions;
   final FakeOverlayWindowController overlays;
+  final FakeFolderOpener folders;
   final SettingsController settings;
   final UploadDestinationRegistry destinations;
   final UploadCoordinator uploads;
@@ -51,6 +53,7 @@ class TestHarness {
     AppSettings settings = const AppSettings(),
     Directory? directory,
     DateTime Function()? clock,
+    Future<void> Function(Duration)? delay,
   }) async {
     // The view model observes the app lifecycle to re-read permissions, which
     // needs a binding even in a non-widget test.
@@ -99,23 +102,27 @@ class TestHarness {
     );
     final Directory recordings =
         directory ?? Directory.systemTemp.createTempSync('relay_harness_');
+    final FakeFolderOpener fakeFolders = FakeFolderOpener();
 
     final RecorderViewModel viewModel = RecorderViewModel(
       recorder: fakeRecorder,
       permissions: fakePermissions,
       overlays: OverlayPresenter(overlays: fakeOverlays),
       store: LocalRecordingStore(directory: recordings, logger: logger),
+      folders: fakeFolders,
       settings: settingsController,
       uploads: uploads,
       destinations: registry,
       logger: logger,
       clock: clock ?? () => DateTime.utc(2026, 8, 22, 14, 22),
+      delay: delay,
     );
 
     return TestHarness._(
       recorder: fakeRecorder,
       permissions: fakePermissions,
       overlays: fakeOverlays,
+      folders: fakeFolders,
       settings: settingsController,
       destinations: registry,
       uploads: uploads,

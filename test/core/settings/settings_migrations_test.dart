@@ -139,7 +139,7 @@ void main() {
           });
 
       final SettingsMigrated migrated = result as SettingsMigrated;
-      expect(migrated.toVersion, 3);
+      expect(migrated.toVersion, AppSettings.currentSchemaVersion);
       final AppSettings settings = AppSettings.fromJson(migrated.document);
       expect(settings.frameRate, 60);
       expect(

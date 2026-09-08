@@ -70,9 +70,10 @@ class ErrorPresentation {
             'record again. Nothing was deleted.',
       ),
       RecorderErrorCode.finalizationFailed => (
-        'Recording not finalized',
-        'The file could not be written out completely. The partial recording '
-            'is still on this computer and can be recovered at next launch.',
+        'Recording not saved completely',
+        'Relay could not finish writing the file. What was captured is still '
+            'on this computer, and Relay will offer to repair it the next time '
+            'it opens.',
       ),
       RecorderErrorCode.invalidState => (
         'Recorder is busy',
@@ -93,7 +94,7 @@ class ErrorPresentation {
     return ErrorPresentation(
       title: copy.$1,
       body: copy.$2,
-      technical: _technical('RecorderError.${code.name}', <String?>[message]),
+      technical: _technical(_recorderCause(code), <String?>[message]),
     );
   }
 
@@ -160,7 +161,7 @@ class ErrorPresentation {
     return ErrorPresentation(
       title: copy.$1,
       body: copy.$2,
-      technical: _technical('UploadError.${error.kind.name}', <String?>[
+      technical: _technical(_uploadCause(error.kind), <String?>[
         if (!messageEchoesBody) error.message,
         error.details,
         if (error.retryAfter != null)
@@ -168,6 +169,40 @@ class ErrorPresentation {
       ]),
     );
   }
+
+  /// A plain-language name for the cause, for the diagnostics line.
+  ///
+  /// This used to render the enum's own path — `RecorderError.diskFull` — which
+  /// is source code shown to a user. The mono line is still terse diagnostics;
+  /// it is just no longer written in Dart.
+  static String _recorderCause(RecorderErrorCode code) => switch (code) {
+    RecorderErrorCode.permissionDenied => 'permission denied',
+    RecorderErrorCode.sourceUnavailable => 'source unavailable',
+    RecorderErrorCode.sourceClosed => 'source closed',
+    RecorderErrorCode.diskFull => 'disk full',
+    RecorderErrorCode.encodingFailed => 'encoder failed',
+    RecorderErrorCode.captureFailed => 'capture failed',
+    RecorderErrorCode.finalizationFailed => 'could not finish the file',
+    RecorderErrorCode.microphoneUnavailable => 'microphone unavailable',
+    RecorderErrorCode.cameraUnavailable => 'camera unavailable',
+    RecorderErrorCode.systemAudioUnavailable => 'system audio unavailable',
+    RecorderErrorCode.invalidState => 'not possible right now',
+    RecorderErrorCode.unsupported => 'not supported here',
+    RecorderErrorCode.unknown => 'unknown cause',
+  };
+
+  static String _uploadCause(UploadErrorKind kind) => switch (kind) {
+    UploadErrorKind.network => 'network',
+    UploadErrorKind.fileTooLarge => 'file too large',
+    UploadErrorKind.authentication => 'signed out',
+    UploadErrorKind.notConfigured => 'not set up',
+    UploadErrorKind.sessionExpired => 'session expired',
+    UploadErrorKind.destinationRejected => 'destination refused it',
+    UploadErrorKind.rateLimited => 'rate limited',
+    UploadErrorKind.localFileUnavailable => 'file not found',
+    UploadErrorKind.cancelled => 'cancelled',
+    UploadErrorKind.unknown => 'unknown cause',
+  };
 
   final String title;
 

@@ -152,7 +152,7 @@ class MethodChannelRecorder implements Recorder {
         .invokeMethod<Map<Object?, Object?>>('getCapabilities');
     if (raw == null) {
       return const RecorderCapabilities.unsupported(
-        'The platform returned no capabilities.',
+        'Relay could not find out what this computer can record.',
       );
     }
     return RecorderCapabilities.fromMap(raw.cast<String, Object?>());

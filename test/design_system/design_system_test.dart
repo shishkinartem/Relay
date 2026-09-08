@@ -240,6 +240,78 @@ void main() {
       expect(paused, recording);
     });
 
+    testWidgets('the strip is the same size counting down (§6)', (
+      WidgetTester tester,
+    ) async {
+      await loadDesignFonts();
+      Future<Size> measure(Duration? countdown) async {
+        await tester.pumpWidget(
+          host(
+            RecordingControlStrip(
+              elapsed: countdown == null
+                  ? const Duration(minutes: 14, seconds: 32)
+                  : Duration.zero,
+              isPaused: false,
+              countdownRemaining: countdown,
+              microphoneEnabled: true,
+              cameraEnabled: false,
+              systemAudioEnabled: true,
+              onOpenMicrophoneMenu: (_) {},
+              onOpenCameraMenu: (_) {},
+              onOpenSystemAudioMenu: (_) {},
+            ),
+            size: const Size(760, 200),
+          ),
+        );
+        await tester.pumpAndSettle();
+        return tester.getSize(find.byType(RecordingControlStrip));
+      }
+
+      final Size recording = await measure(null);
+      // This is a release gate, not a nicety. The strip sizes its own
+      // always-on-top window, and a panel that alternates sizes is what
+      // `docs/adr/2026-08-31-overlay-panels-never-shrink.md` was written after
+      // the process died twice. The pre-roll therefore draws the clock's own
+      // eight cells and keeps every caret in the tree, merely inert.
+      for (final int seconds in <int>[10, 3, 1]) {
+        expect(
+          await measure(Duration(seconds: seconds)),
+          recording,
+          reason: 'the strip must not resize at $seconds seconds',
+        );
+      }
+    });
+
+    testWidgets('counting down draws the clock, and never a zero', (
+      WidgetTester tester,
+    ) async {
+      await loadDesignFonts();
+      await tester.pumpWidget(
+        host(
+          const RecordingControlStrip(
+            elapsed: Duration.zero,
+            isPaused: false,
+            countdownRemaining: Duration(seconds: 3),
+            microphoneEnabled: true,
+            cameraEnabled: false,
+            systemAudioEnabled: true,
+          ),
+          size: const Size(760, 200),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Eight cells, split at the seconds: the same string the recording state
+      // draws, with only the part that is counting inked.
+      expect(find.textContaining('00:00:'), findsOneWidget);
+      expect(find.textContaining('03'), findsOneWidget);
+      // The two squares change meaning without changing place.
+      expect(find.bySemanticsLabel('Start now'), findsOneWidget);
+      expect(find.bySemanticsLabel('Cancel countdown'), findsOneWidget);
+      expect(find.bySemanticsLabel('Pause'), findsNothing);
+      expect(find.bySemanticsLabel('Stop'), findsNothing);
+    });
+
     testWidgets('pause and resume are the same square in the same place', (
       WidgetTester tester,
     ) async {
@@ -1440,6 +1512,76 @@ void main() {
           quality: RecordingQuality.hd720,
         ),
         const Size(1280, 720),
+      );
+    });
+
+    test('the native preset takes the source unchanged', () {
+      // The defect it exists for: a 14-inch MacBook's panel is 3024 x 1964
+      // backing pixels, and every preset box capped it at the point grid —
+      // "1080p" produced 982 lines, a straight 2:1 downsample done before
+      // anything that understands glyphs saw the frame.
+      const VideoCompositionConfiguration configuration =
+          VideoCompositionConfiguration();
+      expect(
+        configuration.resolveCanvasSize(
+          sourceWidth: 3024,
+          sourceHeight: 1964,
+          quality: RecordingQuality.native,
+        ),
+        const Size(3024, 1964),
+      );
+    });
+
+    test('the native canvas is still even, whatever the source is', () {
+      const VideoCompositionConfiguration configuration =
+          VideoCompositionConfiguration();
+      final Size canvas = configuration.resolveCanvasSize(
+        sourceWidth: 1367,
+        sourceHeight: 769,
+        quality: RecordingQuality.native,
+      );
+      expect(canvas.width % 2, 0, reason: 'H.264 4:2:0 requires it');
+      expect(canvas.height % 2, 0);
+    });
+
+    test('a native canvas beyond the encoder budget is scaled down', () {
+      // A 5K panel's 5120 x 2880 needs an H.264 level above 5.2, which little
+      // hardware accepts. Capping keeps "native" honest everywhere it can be
+      // encoded and playable where it cannot, instead of failing `prepare`
+      // with an encoder error nobody can act on.
+      const VideoCompositionConfiguration configuration =
+          VideoCompositionConfiguration();
+      final Size canvas = configuration.resolveCanvasSize(
+        sourceWidth: 5120,
+        sourceHeight: 2880,
+        quality: RecordingQuality.native,
+      );
+
+      expect(
+        canvas.width * canvas.height,
+        lessThanOrEqualTo(
+          VideoCompositionConfiguration.maxNativePixels.toDouble(),
+        ),
+      );
+      expect(
+        canvas.width / canvas.height,
+        closeTo(5120 / 2880, 0.01),
+        reason: 'the cap scales, it never crops or distorts',
+      );
+    });
+
+    test('a native canvas with no source falls back to the 1080p box', () {
+      // Never a 2 x 2 canvas: `native` has no box of its own, so the box
+      // arithmetic below it would compute 0 x 0 and clamp.
+      const VideoCompositionConfiguration configuration =
+          VideoCompositionConfiguration();
+      expect(
+        configuration.resolveCanvasSize(
+          sourceWidth: 0,
+          sourceHeight: 0,
+          quality: RecordingQuality.native,
+        ),
+        const Size(1920, 1080),
       );
     });
   });

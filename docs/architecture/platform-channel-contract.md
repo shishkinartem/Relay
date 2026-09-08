@@ -162,15 +162,23 @@ defect §33.2 exists to prevent.
 
 ```jsonc
 {
-  "qualities": ["hd720", "fullHd1080"],
+  // "native" is the source's own pixels — see the prepare payload's
+  // targetHeight. Both plugins must advertise the same set: the launch screen
+  // draws capabilities.sortedQualities, and the settings default is "native",
+  // so a plugin that omitted it would render a segmented control whose selected
+  // value matches no segment.
+  "qualities": ["hd720", "fullHd1080", "native"],
   "frameRates": [30, 60],
   "sourceTypes": ["display", "window"],
   // §33.2. A kind absent from selectableDeviceKinds is still recorded; the UI
   // names what it records instead of offering a list. What getInputDevices
   // returns for such a kind is whatever is true of it: the one device it will
   // open, or an empty list where there is no endpoint at all. macOS returns an
-  // empty list for systemAudio — ScreenCaptureKit delivers the mix — and the
-  // row is named from a Dart literal ("System mix"), not from an enumeration.
+  // empty list for systemAudio — ScreenCaptureKit delivers the mix. A kind
+  // that is in neither set and enumerates nothing has nothing to disclose, so
+  // the launch screen draws its row without a chevron rather than unrolling a
+  // panel that only says so
+  // (docs/adr/2026-08-30-input-device-selection.md).
   "selectableDeviceKinds": ["camera", "microphone"],
   "meterableDeviceKinds": ["microphone"],
   "supportsCamera": true,
@@ -197,9 +205,15 @@ defect §33.2 exists to prevent.
   "id": "display:1",          // opaque; never parsed in Dart
   "type": "display",          // "display" | "window"
   "title": "Built-in Display",
-  "subtitle": "2560 × 1600",
-  "pixelWidth": 2560,
-  "pixelHeight": 1600,
+  "subtitle": "3024 × 1964",
+  // BACKING-STORE PIXELS, never points. The recorder sizes its canvas from
+  // these, so points here halve the resolution of every recording on a Retina
+  // display. macOS must convert: SCDisplay.width/height and SCWindow.frame are
+  // in points, and CaptureSourceEnumerator multiplies through
+  // CGDisplayModeGetPixelWidth/Height (displays) and the screen's
+  // backingScaleFactor (windows). Windows already reports physical pixels.
+  "pixelWidth": 3024,
+  "pixelHeight": 1964,
   "isCurrentDisplay": true,   // §5 — the display holding the main window
   "thumbnail": <Uint8List>    // PNG, may be absent
 }
@@ -245,6 +259,10 @@ the user the rest of the list.
   "sourceId": "display:1", "sourceType": "display",
   "sourceWidth": 2560, "sourceHeight": 1600,
   "recordingId": "8f2a11", "outputDirectoryPath": "/Users/…/Movies/Relay",
+  // targetHeight is the bounding HEIGHT of the preset's 16:9 box. 0 is the
+  // "native" sentinel: no box at all, take the source's own pixels, capped at
+  // 3840 x 2160 so the canvas stays encodable as H.264. A host that reads 0
+  // must not compute a 0 x 0 box — both plugins answer that case explicitly.
   "quality": "fullHd1080", "targetHeight": 1080, "frameRate": 30,
   "cameraEnabled": false, "microphoneEnabled": true,
   "systemAudioEnabled": true, "showCursor": true,

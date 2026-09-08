@@ -41,6 +41,7 @@ class RecordingControlStrip extends StatelessWidget {
     this.cameraAvailable = true,
     this.systemAudioAvailable = true,
     this.isStopping = false,
+    this.countdownRemaining,
     this.onMoveRequested,
     this.onOpenMicrophoneMenu,
     this.onOpenCameraMenu,
@@ -80,6 +81,18 @@ class RecordingControlStrip extends StatelessWidget {
   final bool systemAudioAvailable;
   final bool isStopping;
 
+  /// Time left before the first frame, or null once the session is live (§6).
+  ///
+  /// Null rather than zero: zero is a countdown that has finished, which is a
+  /// recording, and the strip must not draw those the same way.
+  ///
+  /// design gap: `1f` and `1g` are the only strips on the canvas and neither
+  /// counts down. Assembled from the existing controls and tokens, per
+  /// `docs/development/design-system.md` → *Missing states*.
+  final Duration? countdownRemaining;
+
+  bool get isCountingDown => countdownRemaining != null;
+
   /// Raised once a press on the strip's background has travelled
   /// [moveThreshold]. The host takes the drag from there (§33.3).
   ///
@@ -113,9 +126,16 @@ class RecordingControlStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: AppColors.background,
+        // Two axes from one ramp. The frame says "no frames are being written",
+        // which paused says too; the ground says "and none have been yet",
+        // which only the pre-roll says. Colour is the whole vocabulary here,
+        // because §6 forbids the strip changing size between two states of one
+        // session, so geometry is not available.
+        color: isCountingDown ? AppColors.accent200 : AppColors.background,
         border: Border.all(
-          color: isPaused ? AppColors.accent : AppColors.ink(28),
+          color: isCountingDown || isPaused
+              ? AppColors.accent
+              : AppColors.ink(28),
         ),
         boxShadow: AppShadows.medium,
       ),
@@ -137,6 +157,10 @@ class RecordingControlStrip extends StatelessWidget {
   }
 
   Widget _controls() {
+    final Duration? remaining = countdownRemaining;
+    final ({String head, String seconds})? pre = remaining == null
+        ? null
+        : splitClock(remaining);
     return Padding(
       // The trailing control carries half a gap of slop of its own, so the
       // right inset is halved to match; the leading status dot carries none.
@@ -161,15 +185,47 @@ class RecordingControlStrip extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                StatusDot(active: !isPaused),
-                const SizedBox(width: 7),
-                Text(
-                  formatClock(elapsed),
-                  style: AppTypography.mono.copyWith(
-                    fontSize: 13,
-                    color: AppColors.text,
-                  ),
+                // Three states, three dots, one size: filled red recording,
+                // filled accent counting down, hollow grey paused.
+                StatusDot(
+                  active: isCountingDown || !isPaused,
+                  color: isCountingDown ? AppColors.accent : null,
                 ),
+                const SizedBox(width: 7),
+                if (pre == null)
+                  Text(
+                    formatClock(elapsed),
+                    style: AppTypography.mono.copyWith(
+                      fontSize: 13,
+                      color: AppColors.text,
+                    ),
+                  )
+                else
+                  // The same eight cells `formatClock` fills — which is what
+                  // keeps this strip one width in every state. Only the seconds
+                  // carry ink, so the digits the user is watching are the inked
+                  // ones, and at zero the prefix simply lights up and the clock
+                  // carries straight on.
+                  Text.rich(
+                    TextSpan(
+                      children: <InlineSpan>[
+                        TextSpan(
+                          text: pre.head,
+                          style: AppTypography.mono.copyWith(
+                            fontSize: 13,
+                            color: AppColors.ink(28),
+                          ),
+                        ),
+                        TextSpan(
+                          text: pre.seconds,
+                          style: AppTypography.mono.copyWith(
+                            fontSize: 13,
+                            color: AppColors.accent800,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
@@ -183,6 +239,7 @@ class RecordingControlStrip extends StatelessWidget {
             onPressed: onToggleMicrophone,
             menuLabel: 'Choose a microphone',
             onOpenMenu: onOpenMicrophoneMenu,
+            inert: isCountingDown,
           ),
           _InputToggle(
             enabledIcon: AppIcons.camera,
@@ -193,6 +250,7 @@ class RecordingControlStrip extends StatelessWidget {
             onPressed: onToggleCamera,
             menuLabel: 'Choose a camera',
             onOpenMenu: onOpenCameraMenu,
+            inert: isCountingDown,
           ),
           _InputToggle(
             enabledIcon: AppIcons.systemAudio,
@@ -201,26 +259,38 @@ class RecordingControlStrip extends StatelessWidget {
             available: systemAudioAvailable,
             label: systemAudioEnabled ? 'System audio on' : 'System audio off',
             onPressed: onToggleSystemAudio,
-            menuLabel: 'Choose a system-audio device',
+            menuLabel: 'Choose where sound comes from',
             onOpenMenu: onOpenSystemAudioMenu,
+            inert: isCountingDown,
           ),
           const _StripDivider(leading: gap / 2, trailing: gap / 2),
           // One control in one square, in both states: the glyph and the fill
           // change, the geometry does not.
+          // Three glyphs in one square, and the square never changes. While
+          // counting down this is "start now" — the pre-roll's exit upward, as
+          // the square beside it is its exit downward.
           AppIconButton(
-            icon: isPaused ? AppIcons.play : AppIcons.pause,
-            semanticLabel: isPaused ? 'Resume' : 'Pause',
+            icon: isCountingDown
+                ? AppIcons.record
+                : (isPaused ? AppIcons.play : AppIcons.pause),
+            semanticLabel: isCountingDown
+                ? 'Start now'
+                : (isPaused ? 'Resume' : 'Pause'),
             size: 32,
-            iconSize: isPaused ? 13 : 14,
-            variant: isPaused
+            iconSize: isCountingDown || isPaused ? 13 : 14,
+            variant: isCountingDown || isPaused
                 ? AppButtonVariant.primary
                 : AppButtonVariant.secondary,
             hitSlop: controlSlop,
             onPressed: isStopping ? null : onPauseOrResume,
           ),
+          // The same square in the same place, ending the session either way.
+          // The mark changes because a stop square during a pre-roll claims
+          // there is something to stop: cancelling leaves no file, stopping
+          // writes one, and that difference outranks glyph constancy.
           AppIconButton(
-            icon: AppIcons.stop,
-            semanticLabel: 'Stop',
+            icon: isCountingDown ? AppIcons.close : AppIcons.stop,
+            semanticLabel: isCountingDown ? 'Cancel countdown' : 'Stop',
             size: 32,
             iconSize: 13,
             hitSlop: controlSlop,
@@ -326,6 +396,7 @@ class _InputToggle extends StatelessWidget {
     required this.onPressed,
     required this.menuLabel,
     required this.onOpenMenu,
+    required this.inert,
   });
 
   final AppIconData enabledIcon;
@@ -337,6 +408,15 @@ class _InputToggle extends StatelessWidget {
   final String menuLabel;
   final ValueChanged<double>? onOpenMenu;
 
+  /// Drawn, but taking no presses — the pre-roll.
+  ///
+  /// A flag rather than nulled callbacks at the call site, and that is geometry
+  /// rather than taste: a null `onOpenMenu` drops the caret from the tree
+  /// entirely, which would make the strip about 57 points narrower while
+  /// counting down. A width change between two states of one session is what
+  /// §6 and `docs/adr/2026-08-31-overlay-panels-never-shrink.md` both forbid.
+  final bool inert;
+
   @override
   Widget build(BuildContext context) {
     final Widget toggle = AppIconButton(
@@ -346,7 +426,7 @@ class _InputToggle extends StatelessWidget {
       variant: enabled ? AppButtonVariant.primary : AppButtonVariant.secondary,
       foreground: enabled ? null : AppColors.neutral600,
       hitSlop: RecordingControlStrip.controlSlop,
-      onPressed: available ? onPressed : null,
+      onPressed: available && !inert ? onPressed : null,
     );
     final ValueChanged<double>? open = onOpenMenu;
     if (open == null) {
@@ -359,7 +439,12 @@ class _InputToggle extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         toggle,
-        _MenuCaret(label: menuLabel, enabled: enabled, onOpen: open),
+        _MenuCaret(
+          label: menuLabel,
+          enabled: enabled,
+          inert: inert,
+          onOpen: open,
+        ),
       ],
     );
   }
@@ -372,11 +457,17 @@ class _MenuCaret extends StatelessWidget {
   const _MenuCaret({
     required this.label,
     required this.enabled,
+    required this.inert,
     required this.onOpen,
   });
 
   final String label;
   final bool enabled;
+
+  /// Drawn but not pressable, so the strip keeps its width. See
+  /// [_InputToggle.inert].
+  final bool inert;
+
   final ValueChanged<double> onOpen;
 
   static const double width = 13;
@@ -405,16 +496,19 @@ class _MenuCaret extends StatelessWidget {
           top: 7,
           bottom: 7,
         ),
-        onPressed: () {
-          final RenderObject? render = context.findRenderObject();
-          if (render is! RenderBox || !render.hasSize) {
-            return;
-          }
-          // Window coordinates, because this engine's window hosts nothing but
-          // the strip: its origin and the window's are the same point.
-          final Offset origin = render.localToGlobal(Offset.zero);
-          onOpen(origin.dx + render.size.width / 2);
-        },
+        onPressed: inert
+            ? null
+            : () {
+                final RenderObject? render = context.findRenderObject();
+                if (render is! RenderBox || !render.hasSize) {
+                  return;
+                }
+                // Window coordinates, because this engine's window hosts
+                // nothing but the strip: its origin and the window's are the
+                // same point.
+                final Offset origin = render.localToGlobal(Offset.zero);
+                onOpen(origin.dx + render.size.width / 2);
+              },
       ),
     );
   }

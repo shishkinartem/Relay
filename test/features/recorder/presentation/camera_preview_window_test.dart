@@ -90,15 +90,44 @@ void main() {
     );
   });
 
-  testWidgets('window mode keeps its ground', (WidgetTester tester) async {
-    // There the preview is a captioned panel in its own right, not a stand-in
-    // for something in the file (design `1e`).
+  testWidgets('window mode paints no ground either', (
+    WidgetTester tester,
+  ) async {
+    // It used to keep one, on the reasoning that the window-mode preview is a
+    // captioned panel in its own right (design `1e`) rather than a stand-in for
+    // something in the file. That is true of the *box* and false of the
+    // *window* it floats in.
+    //
+    // The host builds one preview panel per process and never clears its
+    // never-shrink high-water mark, so a display-mode session — sized to hold
+    // all three presets at once — permanently enlarges it. The next window-mode
+    // show asks for 200x140, is held at the larger size, and the ground filled
+    // every point of the surplus: an opaque slab standing out above and to the
+    // right of the box, over whatever was being recorded. The box paints its
+    // own background inside its frame, so there is nothing to lose here.
     await mount(tester, matchesCompositedPip: false);
 
-    expect(
-      tester.widget<RelayTheme>(find.byType(RelayTheme)).ground,
-      isNotNull,
+    expect(tester.widget<RelayTheme>(find.byType(RelayTheme)).ground, isNull);
+  });
+
+  testWidgets('a window-mode picture in an oversized window paints no slab', (
+    WidgetTester tester,
+  ) async {
+    // The intersection nobody tested: each rule had a test — "window mode keeps
+    // its ground" and "the window can be larger than the picture" — and the bug
+    // lived exactly where the two met.
+    await mount(
+      tester,
+      matchesCompositedPip: false,
+      window: const Size(300, 200),
+      content: const Rect.fromLTWH(0, 11, 200, 140),
     );
+
+    expect(tester.widget<RelayTheme>(find.byType(RelayTheme)).ground, isNull);
+    // And the picture still sits exactly where the host put it.
+    final Rect box = tester.getRect(find.byType(CameraPreviewSurface));
+    expect(box.width, 200);
+    expect(box.height, 140);
   });
 
   group('the window can be larger than the picture (§33.5)', () {

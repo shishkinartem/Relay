@@ -246,7 +246,8 @@ struct RecordingConfig {
   std::string recording_id;
   std::wstring output_directory;
   std::string quality;
-  uint32_t target_height = 720;
+  // 0 is the `native` preset: no bounding box, the source's own pixels.
+  uint32_t target_height = 0;
   uint32_t frame_rate = 30;
   bool camera_enabled = false;
   bool microphone_enabled = true;
@@ -411,12 +412,38 @@ bool CameraMaskIsRectangular(const CameraFrameMask& mask);
 RectD LetterboxRect(double source_width, double source_height,
                     double canvas_width, double canvas_height);
 
+// The most pixels a `native` canvas may have: 3840 x 2160.
+//
+// An encodability limit, not a quality judgement. H.264 caps frame size in
+// macroblocks, and a 5K panel's 5120 x 2880 needs a level above 5.2 that little
+// hardware accepts. Beyond this the native canvas is scaled down proportionally,
+// so such a display still records something playable rather than failing to
+// open an encoder at all. Mirrors RecordingConfiguration.maxNativePixels in
+// Swift and VideoCompositionConfiguration.maxNativePixels in Dart.
+inline constexpr uint32_t kMaxNativePixels = 3840u * 2160u;
+
 // Encoded canvas for a source under a quality preset, mirroring
 // VideoCompositionConfiguration.resolveCanvasSize in Dart. Even dimensions:
-// H.264 4:2:0 chroma subsampling requires it.
+// H.264 4:2:0 chroma subsampling requires it. A target_height of 0 is the
+// `native` preset: no box, the source's own pixels, capped at kMaxNativePixels.
 void ResolveCanvasSize(const CompositionConfig& composition, uint32_t source_width,
                        uint32_t source_height, uint32_t target_height,
                        uint32_t* out_width, uint32_t* out_height);
+
+// Bits per pixel per frame for screen content (spec 11, 12).
+//
+// One constant, shared with RecordingConfiguration.videoBitrate in Swift, so
+// the same canvas encodes the same on both platforms. It reproduces the two
+// rates this application shipped to within one percent — 1280x720 at 30 fps
+// lands on 1.783 Mbps against 1.800, and 1920x1080 at 30 fps on 4.012 against
+// 4.000 — so a canvas of any size is priced continuously with them.
+inline constexpr double kBitsPerPixelPerFrame = 0.0645;
+inline constexpr uint32_t kMinimumVideoBitrate = 1500000u;
+inline constexpr uint32_t kMaximumVideoBitrate = 40000000u;
+
+// Quality-oriented VBR rate for a canvas. Not a user-facing setting (spec 11).
+// Lives here rather than in MediaWriter so ctest can execute it.
+uint32_t RecommendedVideoBitrate(uint32_t width, uint32_t height, uint32_t frame_rate);
 
 // ── the movable control strip (spec 33.3) ────────────────────────────────────
 //

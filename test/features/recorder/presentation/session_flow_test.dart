@@ -232,7 +232,7 @@ void main() {
       final File onDisk = File(harness.viewModel.state.file!.path);
       expect(onDisk.existsSync(), isTrue);
 
-      await tester.tap(find.bySemanticsLabel('Delete recording'));
+      await tester.tap(find.bySemanticsLabel('Delete this recording'));
       await tester.pumpAndSettle();
 
       // §18: a recording that was never uploaded is only deleted after the
@@ -245,7 +245,7 @@ void main() {
       expect(onDisk.existsSync(), isTrue);
       expect(find.byType(ReadyScreen), findsOneWidget);
 
-      await tester.tap(find.bySemanticsLabel('Delete recording'));
+      await tester.tap(find.bySemanticsLabel('Delete this recording'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Delete'));
       await tester.pumpAndSettle();

@@ -161,7 +161,11 @@ void main() {
       expect(state.items.map((InputMenuItem i) => i.label), <String>[
         'System audio off',
       ]);
-      expect(state.emptyMessage, 'System mix');
+      // Only ever the *empty* message. On macOS this sheet is unreachable —
+      // no caret is drawn for a kind with no choice — and on Windows an empty
+      // list means a machine reporting no sound output at all, which is what
+      // it now says instead of naming a mix that is not a device.
+      expect(state.emptyMessage, 'No sound output found');
     });
 
     test(
@@ -738,7 +742,7 @@ void main() {
         );
         expect(
           harness.overlays.menuStates.last.notice,
-          contains('still using the previous one'),
+          contains('Still using the previous one'),
         );
       });
 

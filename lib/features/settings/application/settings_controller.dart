@@ -30,6 +30,12 @@ abstract interface class SettingsGateway implements Listenable {
 
   Future<void> setShowCursor(bool enabled);
 
+  /// Seconds of pre-roll before the first frame (§6). `0` is off.
+  Future<void> setCountdownSeconds(int seconds);
+
+  /// Whether a confirmed send leaves the local recording where it is (§13).
+  Future<void> setKeepLocalCopyAfterSending(bool keep);
+
   Future<void> setPreferredSourceType(CaptureSourceType type);
 
   Future<void> setUploadDestination(String destinationId);
@@ -105,6 +111,14 @@ class SettingsController extends ChangeNotifier implements SettingsGateway {
   @override
   Future<void> setShowCursor(bool enabled) =>
       update(_settings.copyWith(showCursor: enabled));
+
+  @override
+  Future<void> setCountdownSeconds(int seconds) =>
+      update(_settings.copyWith(countdownSeconds: seconds));
+
+  @override
+  Future<void> setKeepLocalCopyAfterSending(bool keep) =>
+      update(_settings.copyWith(keepLocalCopyAfterSending: keep));
 
   @override
   Future<void> setPreferredSourceType(CaptureSourceType type) =>

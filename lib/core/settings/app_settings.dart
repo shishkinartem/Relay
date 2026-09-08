@@ -12,12 +12,14 @@ class AppSettings {
   const AppSettings({
     this.uploadDestinationId = defaultUploadDestinationId,
     this.localRecordingsDirectory,
-    this.quality = RecordingQuality.hd720,
+    this.quality = RecordingQuality.native,
     this.frameRate = defaultFrameRate,
     this.microphoneEnabled = true,
     this.systemAudioEnabled = true,
     this.cameraEnabled = false,
     this.showCursor = true,
+    this.countdownSeconds = defaultCountdownSeconds,
+    this.keepLocalCopyAfterSending = false,
     this.preferredSourceType = CaptureSourceType.display,
     this.inputDevices = const <MediaDeviceKind, InputDeviceChoice>{},
     this.expandedInputs = const <MediaDeviceKind>{},
@@ -37,6 +39,8 @@ class AppSettings {
     systemAudioEnabled: _bool(json, keySystemAudioEnabled, true),
     cameraEnabled: _bool(json, keyCameraEnabled, false),
     showCursor: _bool(json, keyShowCursor, true),
+    countdownSeconds: _countdownSeconds(json[keyCountdownSeconds]),
+    keepLocalCopyAfterSending: _bool(json, keyKeepLocalCopyAfterSending, false),
     preferredSourceType: _sourceType(json[keyPreferredSourceType]),
     inputDevices: _inputDevices(json[keyInputDevices]),
     expandedInputs: _expandedInputs(json[keyExpandedInputs]),
@@ -51,13 +55,23 @@ class AppSettings {
   );
 
   /// Schema version of the document [toJson] writes.
-  static const int currentSchemaVersion = 3;
+  static const int currentSchemaVersion = 5;
 
   /// Telegram is the only destination this build ships (§15, §16, and
   /// `docs/adr/2026-08-23-telegram-only-destination.md`).
   static const String defaultUploadDestinationId = 'telegram';
 
   static const int defaultFrameRate = 30;
+
+  /// No pre-roll. Start has always been immediate, and a recorder that waits
+  /// when nobody asked it to is a recorder that missed the thing you were
+  /// pointing at.
+  static const int defaultCountdownSeconds = 0;
+
+  /// Only the four the launch screen offers. A value from a build that offered
+  /// a different set is not one this build can put on a segmented control, so
+  /// it falls back rather than rendering a control with nothing selected.
+  static const List<int> countdownChoices = <int>[0, 3, 5, 10];
 
   static const String keySchemaVersion = 'schemaVersion';
   static const String keyUploadDestinationId = 'uploadDestinationId';
@@ -68,6 +82,9 @@ class AppSettings {
   static const String keySystemAudioEnabled = 'systemAudioEnabled';
   static const String keyCameraEnabled = 'cameraEnabled';
   static const String keyShowCursor = 'showCursor';
+  static const String keyCountdownSeconds = 'countdownSeconds';
+  static const String keyKeepLocalCopyAfterSending =
+      'keepLocalCopyAfterSending';
   static const String keyPreferredSourceType = 'preferredSourceType';
   static const String keyInputDevices = 'inputDevices';
   static const String keyExpandedInputs = 'expandedInputs';
@@ -88,6 +105,24 @@ class AppSettings {
   final bool systemAudioEnabled;
   final bool cameraEnabled;
   final bool showCursor;
+
+  /// Seconds of pre-roll between Start and the first frame (§6). `0` is off.
+  ///
+  /// Off is the default. It also keeps the camera light from burning for the
+  /// extra seconds: macOS opens the camera at `prepare`, which is before the
+  /// count begins.
+  final int countdownSeconds;
+
+  /// Whether a confirmed send leaves the local recording where it is (§13, and
+  /// `docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md`).
+  ///
+  /// False is the shipped default and what every pre-v5 document meant: a send
+  /// is a move. True makes it a copy. Read once, when Send is pressed, and then
+  /// carried on the session — never re-read when the destination answers, so a
+  /// switch flipped while bytes are in flight cannot retroactively decide the
+  /// fate of a file that is already being sent.
+  final bool keepLocalCopyAfterSending;
+
   final CaptureSourceType preferredSourceType;
 
   /// The device each input should reopen next time, by kind (§33.2).
@@ -148,6 +183,8 @@ class AppSettings {
     bool? systemAudioEnabled,
     bool? cameraEnabled,
     bool? showCursor,
+    int? countdownSeconds,
+    bool? keepLocalCopyAfterSending,
     CaptureSourceType? preferredSourceType,
     Map<MediaDeviceKind, InputDeviceChoice>? inputDevices,
     Set<MediaDeviceKind>? expandedInputs,
@@ -166,6 +203,9 @@ class AppSettings {
     systemAudioEnabled: systemAudioEnabled ?? this.systemAudioEnabled,
     cameraEnabled: cameraEnabled ?? this.cameraEnabled,
     showCursor: showCursor ?? this.showCursor,
+    countdownSeconds: countdownSeconds ?? this.countdownSeconds,
+    keepLocalCopyAfterSending:
+        keepLocalCopyAfterSending ?? this.keepLocalCopyAfterSending,
     preferredSourceType: preferredSourceType ?? this.preferredSourceType,
     inputDevices: inputDevices ?? this.inputDevices,
     expandedInputs: expandedInputs ?? this.expandedInputs,
@@ -189,6 +229,8 @@ class AppSettings {
     keySystemAudioEnabled: systemAudioEnabled,
     keyCameraEnabled: cameraEnabled,
     keyShowCursor: showCursor,
+    keyCountdownSeconds: countdownSeconds,
+    keyKeepLocalCopyAfterSending: keepLocalCopyAfterSending,
     keyPreferredSourceType: preferredSourceType.name,
     keyInputDevices: <String, Object?>{
       for (final MapEntry<MediaDeviceKind, InputDeviceChoice> entry
@@ -279,7 +321,14 @@ class AppSettings {
 
   static RecordingQuality _quality(Object? value) => value is String
       ? RecordingQuality.fromName(value)
-      : RecordingQuality.hd720;
+      : RecordingQuality.native;
+
+  /// A value outside the offered set falls back rather than selecting nothing
+  /// on the segmented control that renders it.
+  static int _countdownSeconds(Object? value) =>
+      value is int && countdownChoices.contains(value)
+      ? value
+      : defaultCountdownSeconds;
 
   static int _frameRate(Object? value) =>
       value is int && value > 0 ? value : defaultFrameRate;
@@ -302,6 +351,8 @@ class AppSettings {
       other.systemAudioEnabled == systemAudioEnabled &&
       other.cameraEnabled == cameraEnabled &&
       other.showCursor == showCursor &&
+      other.countdownSeconds == countdownSeconds &&
+      other.keepLocalCopyAfterSending == keepLocalCopyAfterSending &&
       other.preferredSourceType == preferredSourceType &&
       mapEquals(other.inputDevices, inputDevices) &&
       setEquals(other.expandedInputs, expandedInputs) &&
@@ -320,6 +371,8 @@ class AppSettings {
     systemAudioEnabled,
     cameraEnabled,
     showCursor,
+    countdownSeconds,
+    keepLocalCopyAfterSending,
     preferredSourceType,
     // Hashed in enum order, so two equal settings hash equal whatever order
     // their map and set happen to iterate in.

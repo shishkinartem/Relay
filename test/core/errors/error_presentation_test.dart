@@ -18,7 +18,12 @@ void main() {
         expect(presentation.title, isNotEmpty);
         expect(presentation.body, isNotEmpty);
         expect(presentation.title.length, lessThan(48));
-        expect(presentation.technical, contains('RecorderError.${code.name}'));
+        // The diagnostics line names the cause in words. It used to render
+        // the enum's own path — `RecorderError.diskFull` — which is source
+        // code shown to a user.
+        expect(presentation.technical, isNotNull);
+        expect(presentation.technical, isNot(contains('RecorderErrorCode')));
+        expect(presentation.technical, isNot(contains('RecorderError.')));
         expect(presentation.technical, contains('native said no'));
       });
     }
@@ -45,7 +50,9 @@ void main() {
         expect(presentation.title, isNotEmpty);
         expect(presentation.body, isNotEmpty);
         expect(presentation.title.length, lessThan(48));
-        expect(presentation.technical, contains('UploadError.${kind.name}'));
+        expect(presentation.technical, isNotNull);
+        expect(presentation.technical, isNot(contains('UploadError.')));
+        expect(presentation.technical, isNot(contains('UploadErrorKind')));
         expect(presentation.technical, contains('destination said no'));
       });
     }
@@ -74,7 +81,7 @@ void main() {
       expect(presentation.body, contains('resumed'));
       expect(
         presentation.technical,
-        'UploadError.network · session still valid · 12h left',
+        'network · session still valid · 12h left',
       );
     });
 
@@ -90,7 +97,7 @@ void main() {
         expect(presentation.body, contains('size limit'));
         expect(presentation.body, contains('was not started'));
         expect(presentation.body, contains('kept'));
-        expect(presentation.technical, contains('UploadError.fileTooLarge'));
+        expect(presentation.technical, contains('file too large'));
         expect(presentation.technical, contains('50 MB'));
       },
     );
@@ -116,14 +123,14 @@ void main() {
 
       expect(
         presentation.technical,
-        'UploadError.rateLimited · too many requests · HTTP 429 · retry in 30s',
+        'rate limited · too many requests · HTTP 429 · retry in 30s',
       );
     });
 
     test('omits an empty message', () {
       expect(
         ErrorPresentation.forRecorder(RecorderErrorCode.diskFull, '').technical,
-        'RecorderError.diskFull',
+        'disk full',
       );
     });
 

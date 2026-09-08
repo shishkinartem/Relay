@@ -52,7 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final String selectedId = scope.settings.settings.uploadDestinationId;
     _folder.text =
         scope.settings.settings.localRecordingsDirectory ??
-        scope.recorder.defaultRecordingsDirectoryPath;
+        scope.recorder.recordingsDirectoryPath;
 
     return AppPanel(
       title: 'Settings',
@@ -114,6 +114,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const AppMonoText(
             'Changing this affects the next recording. Existing files stay '
             'where they are.',
+          ),
+          const AppDivider(margin: EdgeInsets.symmetric(vertical: 12)),
+          // Directly under the folder, because it is a fact about that folder;
+          // and in Settings because Settings is where the things that outlive a
+          // session live. Same label and same control as the Ready screen, so
+          // the two surfaces cannot drift.
+          AppRow(
+            leading: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(
+                  'Keep a copy on this computer',
+                  style: AppTypography.fieldLabel.copyWith(
+                    color: AppColors.textLabel,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                AppMonoText(
+                  scope.settings.settings.keepLocalCopyAfterSending
+                      ? 'After a confirmed send, a recording stays in the '
+                            'folder above.'
+                      : 'After a confirmed send, a recording is removed from '
+                            'the folder above.',
+                  maxLines: 2,
+                ),
+              ],
+            ),
+            trailing: AppOnOffControl(
+              value: scope.settings.settings.keepLocalCopyAfterSending,
+              semanticLabel: 'Keep a copy on this computer after sending',
+              onChanged: scope.settings.setKeepLocalCopyAfterSending,
+            ),
           ),
         ],
       ),

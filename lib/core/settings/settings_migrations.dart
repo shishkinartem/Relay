@@ -73,7 +73,13 @@ class SettingsMigrator {
 
   /// The migrations this build ships.
   SettingsMigrator.standard()
-    : this(const <SettingsMigration>[_V0ToV1(), _V1ToV2(), _V2ToV3()]);
+    : this(const <SettingsMigration>[
+        _V0ToV1(),
+        _V1ToV2(),
+        _V2ToV3(),
+        _V3ToV4(),
+        _V4ToV5(),
+      ]);
 
   final int targetVersion;
   final Map<int, SettingsMigration> _migrations;
@@ -192,6 +198,53 @@ class _V2ToV3 implements SettingsMigration {
 
   @override
   int get fromVersion => 2;
+
+  @override
+  Map<String, Object?> apply(Map<String, Object?> json) =>
+      Map<String, Object?>.of(json);
+}
+
+/// The native-resolution preset arrived and became the default for a fresh
+/// install (§10).
+///
+/// **Nothing stored changes, deliberately.** `quality` is written on every save
+/// (`AppSettings.toJson`), so a document holding `hd720` is indistinguishable
+/// from one that never had the setting touched — there is no way to tell a
+/// deliberate 720p from yesterday's default. Promoting it would multiply that
+/// user's files several-fold without being asked, and §16's 50 MB Telegram
+/// ceiling makes that a consequence rather than a detail. A user who wants
+/// native picks it; the launch screen is one tap away.
+///
+/// The step exists anyway because the migrator walks version by version and a
+/// gap in the walk is a typed failure, not a skip: a v3 document with no v3→v4
+/// step would be reported as unmigratable and the user would silently lose
+/// *every* setting, not just this one. [_V2ToV3] is the same no-op for the same
+/// reason.
+class _V3ToV4 implements SettingsMigration {
+  const _V3ToV4();
+
+  @override
+  int get fromVersion => 3;
+
+  @override
+  Map<String, Object?> apply(Map<String, Object?> json) =>
+      Map<String, Object?>.of(json);
+}
+
+/// "Keep a copy on this computer" arrived
+/// (`docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md`).
+///
+/// Nothing stored has to change: the key is new and its reader defaults it to
+/// `false`, which is what every existing document already meant — a send was a
+/// move. The step exists for the reason [_V2ToV3] and [_V3ToV4] do: the
+/// migrator walks version by version and a gap is a typed failure, so a v4
+/// document with no v4→v5 step would be reported unmigratable and the user
+/// would silently get defaults for *everything*, not just the new key.
+class _V4ToV5 implements SettingsMigration {
+  const _V4ToV5();
+
+  @override
+  int get fromVersion => 4;
 
   @override
   Map<String, Object?> apply(Map<String, Object?> json) =>

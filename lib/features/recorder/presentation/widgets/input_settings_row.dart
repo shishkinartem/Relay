@@ -4,6 +4,7 @@ import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import '../../../../app/app_scope.dart';
 import '../../../../design_system/design_system.dart';
 import '../../application/recorder_view_model.dart';
+import '../../domain/input_device_copy.dart';
 
 /// One input on the launch screen: On / Off on the row, everything else behind
 /// a disclosure (§33.2).
@@ -19,17 +20,11 @@ class InputSettingsRow extends StatefulWidget {
     required this.label,
     required this.enabled,
     required this.onEnabledChanged,
-    this.fixedDeviceLabel,
   });
 
   final MediaDeviceKind kind;
   final AppIconData icon;
   final String label;
-
-  /// What to call the one thing this input records when the platform offers no
-  /// choice and enumerates no device — macOS's system mix, which is a real
-  /// input with no endpoint behind it (§33.8).
-  final String? fixedDeviceLabel;
 
   /// The input's On / Off state, which is not a device concern.
   final bool enabled;
@@ -115,10 +110,27 @@ class _InputSettingsRowState extends State<InputSettingsRow> {
   @override
   Widget build(BuildContext context) {
     final RecorderViewModel vm = AppScope.of(context).recorder;
-    final bool expanded = vm.isInputExpanded(widget.kind);
+    // Whether opening this row would show anything. macOS system audio is the
+    // case it exists for: ScreenCaptureKit hands over the whole mix, so there
+    // is no device to name, no list to offer and no level to draw — and the
+    // chevron used to unroll a single line saying so. That is the control
+    // `docs/adr/2026-08-30-input-device-selection.md` rejected in as many
+    // words: "it would put a disclosure chevron on a control that cannot
+    // disclose anything". The row itself stays exactly as design `1c` draws
+    // it — icon, name, On / Off.
+    final bool hasDetail =
+        vm.canChooseDevice(widget.kind) ||
+        vm.canMeter(widget.kind) ||
+        widget.kind == MediaDeviceKind.camera ||
+        vm.effectiveDeviceFor(widget.kind) != null;
+    // A remembered `expanded` must not outlive the chevron: `AppDisclosure`
+    // draws its child on `expanded` alone, so a stored open state would unroll
+    // a panel with nothing left on screen that could close it again.
+    final bool expanded = hasDetail && vm.isInputExpanded(widget.kind);
 
     return AppDisclosure(
       semanticLabel: '${widget.label} settings',
+      enabled: hasDetail,
       expanded: expanded,
       onToggle: (bool next) {
         if (!next) {
@@ -149,7 +161,6 @@ class _InputSettingsRowState extends State<InputSettingsRow> {
       child: _Details(
         kind: widget.kind,
         label: widget.label,
-        fixedDeviceLabel: widget.fixedDeviceLabel,
         inputEnabled: widget.enabled,
         picking: _picking,
         onPickingChanged: (bool next) => setState(() => _picking = next),
@@ -162,7 +173,6 @@ class _Details extends StatelessWidget {
   const _Details({
     required this.kind,
     required this.label,
-    required this.fixedDeviceLabel,
     required this.inputEnabled,
     required this.picking,
     required this.onPickingChanged,
@@ -170,7 +180,6 @@ class _Details extends StatelessWidget {
 
   final MediaDeviceKind kind;
   final String label;
-  final String? fixedDeviceLabel;
   final bool inputEnabled;
   final bool picking;
   final ValueChanged<bool> onPickingChanged;
@@ -190,8 +199,8 @@ class _Details extends StatelessWidget {
       children: <Widget>[
         AppSelectField(
           semanticLabel: '$label device',
-          label: effective?.label ?? fixedDeviceLabel ?? _nothingFound,
-          meta: _fieldMeta(choosable, selection, effective),
+          label: effective?.label ?? _nothingFound,
+          meta: _fieldMeta(selection, effective),
           expanded: picking,
           onPressed: choosable && devices.isNotEmpty
               ? () => onPickingChanged(!picking)
@@ -211,7 +220,7 @@ class _Details extends StatelessWidget {
         ],
         if (unresolved != null) ...<Widget>[
           const SizedBox(height: 7),
-          AppMonoText('“$unresolved” was not found · using the default'),
+          AppMonoText(unresolvedDeviceNotice(unresolved)),
         ],
         if (kind == MediaDeviceKind.camera) ...<Widget>[
           const SizedBox(height: 9),
@@ -229,19 +238,13 @@ class _Details extends StatelessWidget {
 
   static const String _nothingFound = 'No device found';
 
-  /// The word beside the device name. It answers a different question in each
-  /// case, so it is never a decoration: whether the choice is the platform's,
-  /// whether there is a choice at all, and whether the device can be opened.
-  String? _fieldMeta(
-    bool choosable,
-    MediaDevice? selection,
-    MediaDevice? effective,
-  ) {
-    if (!choosable) {
-      // There is nothing to pick, so the word says why rather than describing
-      // a choice that does not exist.
-      return 'not selectable here';
-    }
+  /// The word beside the device name. It answers a question about the device
+  /// this row actually has, so it is never a decoration: whether that device
+  /// can be opened, and whether it was the user's choice or the system's. It
+  /// never explains the *absence* of a choice — the missing chevron says that,
+  /// and a word repeating it would describe the interface rather than the
+  /// recording.
+  String? _fieldMeta(MediaDevice? selection, MediaDevice? effective) {
     if (effective == null) {
       return null;
     }
@@ -330,9 +333,7 @@ class _Meter extends StatelessWidget {
         ),
         if (silent) ...<Widget>[
           const SizedBox(height: 6),
-          const AppMonoText(
-            'nothing has reached this input · check its hardware switch',
-          ),
+          const AppMonoText('No sound yet. Check the device’s mute switch.'),
         ],
       ],
     );
@@ -343,7 +344,7 @@ class _Meter extends StatelessWidget {
       return 'Test — input is off';
     }
     if (!running) {
-      return 'Test — unavailable';
+      return 'Test — no signal';
     }
     return silent ? 'Test — no sound' : 'Test — speak now';
   }
@@ -424,7 +425,8 @@ class _CameraPosition extends StatelessWidget {
           // nothing to drag (design `1e`), so the corner is the whole answer
           // and this would be a promise the session does not keep.
           const AppMonoText(
-            'the tile starts here · drag the preview to move it while recording',
+            'The camera starts in this corner. Drag it anywhere once recording '
+            'begins.',
           ),
         ],
       ],

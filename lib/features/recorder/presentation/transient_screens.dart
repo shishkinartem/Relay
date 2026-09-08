@@ -100,7 +100,7 @@ class CaptureFailureScreen extends StatelessWidget {
             const SizedBox(height: 14),
             AppFactTable(
               facts: <AppFact>[
-                const AppFact('Partial recording', 'kept on disk'),
+                const AppFact('What was captured', 'still on this computer'),
                 AppFact(
                   'Location',
                   state.retainedArtifactPath!.split(RegExp(r'[\\/]')).last,

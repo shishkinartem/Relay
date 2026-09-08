@@ -783,6 +783,74 @@ TEST(ResolveCanvasSize, AnUnknownSourceSizeFallsBackToThePresetBox) {
   EXPECT_EQ(height, 1080u);
 }
 
+TEST(ResolveCanvasSize, TheNativePresetTakesTheSourceUnchanged) {
+  // target_height 0 is `native`: no box, the source's own pixels. The defect it
+  // exists for is a dense display being capped at a preset box and resampled
+  // before anything that understands text sees the frame.
+  const CompositionConfig composition;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  ResolveCanvasSize(composition, 3024, 1964, 0, &width, &height);
+
+  EXPECT_EQ(width, 3024u);
+  EXPECT_EQ(height, 1964u);
+}
+
+TEST(ResolveCanvasSize, TheNativeCanvasIsStillEven) {
+  const CompositionConfig composition;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  ResolveCanvasSize(composition, 1367, 769, 0, &width, &height);
+
+  EXPECT_EQ(width % 2, 0u);
+  EXPECT_EQ(height % 2, 0u);
+}
+
+TEST(ResolveCanvasSize, ANativeCanvasBeyondTheEncoderBudgetIsScaledDown) {
+  // A 5K panel's 5120x2880 needs an H.264 level above 5.2, which little
+  // hardware accepts. The cap scales; it never crops or distorts.
+  const CompositionConfig composition;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  ResolveCanvasSize(composition, 5120, 2880, 0, &width, &height);
+
+  EXPECT_LE(width * height, kMaxNativePixels);
+  EXPECT_NEAR(static_cast<double>(width) / height, 5120.0 / 2880.0, 0.01);
+}
+
+TEST(ResolveCanvasSize, AnUnknownSourceSizeUnderNativeFallsBackToThePresetBox) {
+  // Never a 2x2 canvas: `native` has no box, so the box arithmetic below would
+  // compute 0x0 and clamp.
+  const CompositionConfig composition;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  ResolveCanvasSize(composition, 0, 0, 0, &width, &height);
+
+  EXPECT_EQ(width, 1920u);
+  EXPECT_EQ(height, 1080u);
+}
+
+TEST(RecommendedVideoBitrate, ReproducesBothShippedAnchors) {
+  // The per-pixel rule replaced two disagreeing rules — a step on height on
+  // macOS and 0.1 bits per pixel with a sqrt frame-rate law here, which priced
+  // the same canvas 2.5x apart. It had to land on the rates spec 12 publishes.
+  EXPECT_NEAR(RecommendedVideoBitrate(1280, 720, 30), 1800000.0, 30000.0);
+  EXPECT_NEAR(RecommendedVideoBitrate(1920, 1080, 30), 4000000.0, 30000.0);
+  EXPECT_NEAR(RecommendedVideoBitrate(1920, 1080, 60), 8000000.0, 60000.0);
+}
+
+TEST(RecommendedVideoBitrate, HasNoCliffBetweenPresets) {
+  const uint32_t retina = RecommendedVideoBitrate(1512, 982, 30);
+
+  EXPECT_GT(retina, RecommendedVideoBitrate(1280, 720, 30));
+  EXPECT_LT(retina, RecommendedVideoBitrate(1920, 1080, 30));
+}
+
+TEST(RecommendedVideoBitrate, IsClampedAtBothEnds) {
+  EXPECT_EQ(RecommendedVideoBitrate(64, 64, 30), kMinimumVideoBitrate);
+  EXPECT_EQ(RecommendedVideoBitrate(7680, 4320, 60), kMaximumVideoBitrate);
+}
+
 TEST(ResolveCanvasSize, TheReferenceCanvasPolicyUsesThePresetBox) {
   CompositionConfig composition;
   composition.aspect_policy = AspectRatioPolicy::kLetterboxIntoReferenceCanvas;
@@ -1347,7 +1415,7 @@ TEST(RecordingConfig, ThePartAndFinalNamesFollowTheSpecifiedPattern) {
 
 TEST(RecordingConfig, TheDefaultsMatchTheSpecifiedProductBehaviour) {
   // CLAUDE.md: microphone on, camera off, system audio on, cursor recorded,
-  // 30 fps, 720p.
+  // 30 fps, and the source's own resolution.
   const RecordingConfig config;
 
   EXPECT_TRUE(config.microphone_enabled);
@@ -1355,7 +1423,8 @@ TEST(RecordingConfig, TheDefaultsMatchTheSpecifiedProductBehaviour) {
   EXPECT_TRUE(config.system_audio_enabled);
   EXPECT_TRUE(config.show_cursor);
   EXPECT_EQ(config.frame_rate, 30u);
-  EXPECT_EQ(config.target_height, 720u);
+  // 0 is the `native` sentinel: no bounding box, the source's own pixels.
+  EXPECT_EQ(config.target_height, 0u);
   EXPECT_EQ(config.source_type, CaptureSourceType::kDisplay);
 }
 

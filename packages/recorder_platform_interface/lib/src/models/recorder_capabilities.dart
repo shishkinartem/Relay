@@ -98,11 +98,18 @@ class RecorderCapabilities {
   /// Frame rates in ascending order, for stable presentation.
   List<int> get sortedFrameRates => supportedFrameRates.toList()..sort();
 
-  List<RecordingQuality> get sortedQualities => qualities.toList()
-    ..sort(
-      (RecordingQuality a, RecordingQuality b) =>
-          a.targetHeight.compareTo(b.targetHeight),
-    );
+  /// Ascending by output size, which is the order the launch screen draws them
+  /// in.
+  ///
+  /// [RecordingQuality.native] has no fixed height and is the largest preset
+  /// there is, so its `0` sentinel has to sort last rather than first —
+  /// comparing the raw heights would put it at the small end of the row.
+  List<RecordingQuality> get sortedQualities =>
+      qualities.toList()..sort((RecordingQuality a, RecordingQuality b) {
+        int rank(RecordingQuality q) =>
+            q.followsSourceResolution ? 1 << 30 : q.targetHeight;
+        return rank(a).compareTo(rank(b));
+      });
 
   /// Unknown members are dropped rather than defaulted: a kind this build does
   /// not know is not a kind it can offer.

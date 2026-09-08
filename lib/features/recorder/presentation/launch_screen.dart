@@ -4,6 +4,7 @@ import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import '../../../app/app_scope.dart';
 import '../../../app/panel_route.dart';
 import '../../../core/formatting/size_estimate.dart';
+import '../../../core/settings/app_settings.dart';
 import '../../../design_system/design_system.dart';
 import '../../settings/application/settings_controller.dart';
 import '../../settings/presentation/settings_screen.dart';
@@ -25,6 +26,10 @@ class LaunchScreen extends StatelessWidget {
     final SettingsGateway settings = scope.settings;
     final RecorderCapabilities capabilities = vm.capabilities;
     final CaptureSource? source = vm.selectedSource;
+    final Size? estimateCanvas = const RecordingSizeEstimator().canvasFor(
+      source,
+      settings.settings.quality,
+    );
 
     return AppPanel(
       title: 'Recorder',
@@ -58,11 +63,17 @@ class LaunchScreen extends StatelessWidget {
                 : vm.requestStart,
           ),
           const SizedBox(height: 8),
-          Center(
-            child: AppMonoText(
-              '${const RecordingSizeEstimator().describePerHour(settings.settings.quality, settings.settings.frameRate)} at this profile',
+          // Taken from the canvas this source would actually encode, not from
+          // the preset's name: `Native` has no fixed size, and on a Retina
+          // display it is four times the pixels the old per-preset table
+          // assumed. With no source picked there is no canvas, and a number
+          // there would be a guess about a recording that cannot start.
+          if (estimateCanvas != null)
+            Center(
+              child: AppMonoText(
+                '${const RecordingSizeEstimator().describePerHour(estimateCanvas, settings.settings.frameRate)} at these settings',
+              ),
             ),
-          ),
           if (!capabilities.isSupported) ...<Widget>[
             const SizedBox(height: 8),
             Center(
@@ -208,10 +219,6 @@ class _SessionControls extends StatelessWidget {
           kind: MediaDeviceKind.systemAudio,
           icon: AppIcons.systemAudio,
           label: 'System audio',
-          // Where the platform captures the whole mix rather than one endpoint
-          // there is no device to enumerate, and the row still has to say what
-          // is being recorded (§33.8).
-          fixedDeviceLabel: 'System mix',
           enabled: settings.settings.systemAudioEnabled,
           onEnabledChanged: capabilities.supportsSystemAudio
               ? settings.setSystemAudioEnabled
@@ -287,6 +294,34 @@ class _AdvancedSectionState extends State<_AdvancedSection> {
         if (_expanded) ...<Widget>[
           const SizedBox(height: 12),
           LabelledControlRow(
+            // design gap: `1c` draws no countdown row, and the icon set has no
+            // clock. `record` is the honest glyph — this row governs what
+            // pressing Start does.
+            icon: AppIcons.record,
+            label: 'Countdown',
+            control: AppSegmentedControl<int>(
+              semanticLabel: 'Countdown before recording',
+              value: widget.settings.settings.countdownSeconds,
+              onChanged: widget.settings.setCountdownSeconds,
+              segments: <AppSegment<int>>[
+                for (final int seconds in AppSettings.countdownChoices)
+                  AppSegment<int>(
+                    value: seconds,
+                    label: seconds == 0 ? 'Off' : '${seconds}s',
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 9),
+          AppMonoText(
+            widget.settings.settings.countdownSeconds == 0
+                ? 'Recording starts the moment you press Start.'
+                : 'The control strip counts '
+                      '${widget.settings.settings.countdownSeconds} seconds '
+                      'down before the first frame.',
+          ),
+          const SizedBox(height: 12),
+          LabelledControlRow(
             icon: AppIcons.cursor,
             label: 'Show cursor',
             control: AppOnOffControl(
@@ -298,8 +333,15 @@ class _AdvancedSectionState extends State<_AdvancedSection> {
             ),
           ),
           const SizedBox(height: 9),
-          const AppMonoText(
-            'showCursor = true · §4.3 requires it in the output',
+          // States what the current setting does, rather than citing the
+          // section of the specification that asked for it. It has to be
+          // state-aware: the toggle above really works, so a fixed sentence
+          // claiming the pointer is always recorded becomes a lie the moment
+          // someone switches it off.
+          AppMonoText(
+            widget.settings.settings.showCursor
+                ? 'The mouse pointer appears in the recording.'
+                : 'The mouse pointer is left out of the recording.',
           ),
         ],
       ],

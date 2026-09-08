@@ -81,8 +81,6 @@ class MediaWriter {
   int64_t last_audio_timestamp_100ns() const { return last_audio_100ns_.load(); }
 
   static bool Probe(const std::wstring& path, MediaProbe* probe);
-  static uint32_t RecommendedBitrate(uint32_t width, uint32_t height,
-                                     uint32_t frame_rate);
 
  private:
   bool OpenInternal(bool allow_hardware, ID3D11Device* device, RecorderError* error);

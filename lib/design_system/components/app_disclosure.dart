@@ -52,7 +52,16 @@ class AppDisclosure extends StatelessWidget {
   /// choice about. The chevron is not drawn at all rather than drawn dead: a
   /// control that cannot ever do anything is not a disabled control, it is not
   /// a control (§33.4).
+  ///
+  /// Its **space is still reserved**. Dropping the chevron's column outright
+  /// pulled [headerTrailing] 28 points to the right, so in a stack of these
+  /// rows the On / Off controls stopped lining up and the one row without a
+  /// chevron jogged sideways. A column of primary controls that does not sit in
+  /// a column is a worse defect than the dead chevron this replaced.
   final bool enabled;
+
+  /// The gutter the chevron occupies: the gap before it, plus its target.
+  static const double _chevronGutter = 4 + 24;
 
   @override
   Widget build(BuildContext context) {
@@ -73,6 +82,9 @@ class AppDisclosure extends StatelessWidget {
                   : header,
             ),
             ?headerTrailing,
+            if (!enabled)
+              // Held open, not filled. See [enabled].
+              const SizedBox(width: _chevronGutter),
             if (enabled) ...<Widget>[
               const SizedBox(width: 4),
               _Target(

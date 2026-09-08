@@ -153,6 +153,24 @@ jobs:
           { echo '### flutter build macos — last 60 lines'; echo '```'; tail -60 build-macos.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Artefact smoke check
         run: test -d build/macos/Build/Products/Release/relay.app
+      # Packaged so the build can actually be *run*, not just proved to compile.
+      # `--build` is omitted: the bundle above is the one that was tested, and
+      # rebuilding it here would ship something no step in this job checked.
+      - name: Package the DMG
+        run: ./tool/package-dmg.sh
+      # Zipped by upload-artifact anyway, but named so the download says what it
+      # is. NOTE the signature: this job signs ad-hoc (see above), which is the
+      # one signature macOS keys to the code's own hash — so a recipient
+      # re-grants screen recording after every single CI build. A DMG meant to
+      # be lived with has to come from a machine with a real certificate; this
+      # one is for checking a change.
+      - name: Upload the macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-macos-adhoc-dmg
+          path: build/*.dmg
+          retention-days: 14
+          if-no-files-found: error
 
   build-windows:
     name: Windows build
@@ -182,6 +200,18 @@ jobs:
       - name: Artefact smoke check
         run: Test-Path build\windows\x64\runner\Release\relay.exe
         shell: pwsh
+      # Published so the build can actually be *run*. Until now this job proved
+      # the code compiles and then threw the result away, which is why nobody
+      # has ever started Relay on Windows: there was nothing to download. The
+      # whole Release directory goes, not just the .exe — the Flutter runner
+      # needs flutter_windows.dll, the plugin DLLs and data/ beside it.
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-windows-x64
+          path: build/windows/x64/runner/Release/
+          retention-days: 14
+          if-no-files-found: error
 
   secret-scan:
     name: Secret review

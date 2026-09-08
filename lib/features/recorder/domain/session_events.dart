@@ -53,6 +53,48 @@ class PreparationStarted extends SessionEvent {
   final CaptureSource source;
 }
 
+/// The pre-roll began. Carries the resolved inputs so the countdown state can
+/// draw the strip the recording will use (§6).
+class CountdownStarted extends SessionEvent {
+  const CountdownStarted({
+    required this.source,
+    required this.remaining,
+    required this.microphoneEnabled,
+    required this.cameraEnabled,
+    required this.systemAudioEnabled,
+    required this.microphoneAvailable,
+    required this.cameraAvailable,
+    required this.systemAudioAvailable,
+  });
+
+  final CaptureSource source;
+  final Duration remaining;
+  final bool microphoneEnabled;
+  final bool cameraEnabled;
+  final bool systemAudioEnabled;
+  final bool microphoneAvailable;
+  final bool cameraAvailable;
+  final bool systemAudioAvailable;
+}
+
+/// One second of the pre-roll elapsed.
+class CountdownTicked extends SessionEvent {
+  const CountdownTicked(this.remaining);
+
+  final Duration remaining;
+}
+
+/// The user cancelled the pre-roll — the strip's last square, which reads
+/// `Cancel countdown` while counting.
+///
+/// Not a [StopRequested]: there is no recording to stop, and stopping writes a
+/// file where cancelling leaves none. Not a [CaptureFailed] either: nothing
+/// failed, and that routes to the capture-failure screen, which would put a
+/// failure in front of someone who simply changed their mind.
+class CountdownCancelled extends SessionEvent {
+  const CountdownCancelled();
+}
+
 class RecordingStarted extends SessionEvent {
   const RecordingStarted({
     required this.source,
@@ -150,9 +192,18 @@ class RecordingRenamed extends SessionEvent {
 }
 
 class UploadRequested extends SessionEvent {
-  const UploadRequested(this.destinationId);
+  const UploadRequested(this.destinationId, {required this.keepLocalCopy});
 
   final String destinationId;
+
+  /// Whether the local file survives a confirmed success (§13, and
+  /// `docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md`).
+  ///
+  /// Carried on the event rather than read when the upload finishes, so the
+  /// answer is fixed at the moment Send was pressed: a preference changed while
+  /// bytes are in flight cannot retroactively decide the fate of a file that is
+  /// already on its way.
+  final bool keepLocalCopy;
 }
 
 class UploadBegan extends SessionEvent {

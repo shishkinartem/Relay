@@ -1,6 +1,7 @@
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 import 'package:upload_core/upload_core.dart';
 
+import '../../../core/formatting/formatters.dart';
 import 'session_events.dart';
 import 'session_state.dart';
 
@@ -33,6 +34,10 @@ class SessionMachine {
         SessionSelectingSource() ||
         SessionPreflight() ||
         SessionPreparing() ||
+        // Without this, a device lost during the pre-roll is rejected as "no
+        // capture in progress" and the session wedges in `countingDown` with
+        // the main window hidden.
+        SessionCountingDown() ||
         SessionActive() ||
         SessionFinalizing() => SessionTransition(
           SessionFailed(
@@ -74,6 +79,7 @@ class SessionMachine {
       SessionSelectingSource() => _fromSelecting(state, event),
       SessionPreflight() => _fromPreflight(state, event),
       SessionPreparing() => _fromPreparing(state, event),
+      SessionCountingDown() => _fromCountingDown(state, event),
       SessionActive() => _fromActive(state, event),
       SessionFinalizing() => _fromFinalizing(state, event),
       SessionReady() => _fromReady(state, event),
@@ -206,7 +212,75 @@ class SessionMachine {
           systemAudioAvailable: systemAudioAvailable,
         ),
       ),
+    CountdownStarted(
+      :final CaptureSource source,
+      :final Duration remaining,
+      :final bool microphoneEnabled,
+      :final bool cameraEnabled,
+      :final bool systemAudioEnabled,
+      :final bool microphoneAvailable,
+      :final bool cameraAvailable,
+      :final bool systemAudioAvailable,
+    ) =>
+      SessionTransition(
+        SessionCountingDown(
+          source: source,
+          remaining: remaining,
+          microphoneEnabled: microphoneEnabled,
+          cameraEnabled: cameraEnabled,
+          systemAudioEnabled: systemAudioEnabled,
+          microphoneAvailable: microphoneAvailable,
+          cameraAvailable: cameraAvailable,
+          systemAudioAvailable: systemAudioAvailable,
+        ),
+      ),
     _ => _reject(state, event, 'preparing'),
+  };
+
+  /// The pre-roll (§6). Three ways out: the count reaching zero or `Start now`
+  /// (both `RecordingStarted`), the user cancelling, and a capture failure.
+  ///
+  /// `SessionReset` is deliberately *not* one of them, and is still rejected as
+  /// "session is still live" by the guard above: a pre-roll holds a prepared
+  /// platform handle with the camera already open, so it has to leave through
+  /// the path that aborts and releases it.
+  SessionTransition _fromCountingDown(
+    SessionCountingDown state,
+    SessionEvent event,
+  ) => switch (event) {
+    // Strictly decreasing and never to zero. Zero is not a countdown state —
+    // reaching it *is* `RecordingStarted` — and a tick that did not move is a
+    // duplicate the strip must never be asked to render.
+    CountdownTicked(:final Duration remaining) =>
+      remaining <= Duration.zero || remaining >= state.remaining
+          ? _reject(state, event, 'countingDown')
+          : SessionTransition(state.copyWith(remaining: remaining)),
+    // The same arm `_fromPreparing` has. Raised by the count running out or by
+    // `Start now` on the strip; the machine cannot tell them apart and has no
+    // reason to.
+    RecordingStarted(
+      :final CaptureSource source,
+      :final bool microphoneEnabled,
+      :final bool cameraEnabled,
+      :final bool systemAudioEnabled,
+      :final bool microphoneAvailable,
+      :final bool cameraAvailable,
+      :final bool systemAudioAvailable,
+    ) =>
+      SessionTransition(
+        SessionActive(
+          source: source,
+          elapsed: Duration.zero,
+          microphoneEnabled: microphoneEnabled,
+          cameraEnabled: cameraEnabled,
+          systemAudioEnabled: systemAudioEnabled,
+          microphoneAvailable: microphoneAvailable,
+          cameraAvailable: cameraAvailable,
+          systemAudioAvailable: systemAudioAvailable,
+        ),
+      ),
+    CountdownCancelled() => const SessionTransition(SessionIdle()),
+    _ => _reject(state, event, 'countingDown'),
   };
 
   SessionTransition _fromActive(SessionActive state, SessionEvent event) =>
@@ -256,32 +330,34 @@ class SessionMachine {
     _ => _reject(state, event, 'finalizing'),
   };
 
-  SessionTransition _fromReady(SessionReady state, SessionEvent event) =>
-      switch (event) {
-        RecordingRenamed(:final String name, :final RecordingFile? recording) =>
-          SessionTransition(state.copyWith(name: name, recording: recording)),
-        UploadRequested(:final String destinationId) => SessionTransition(
-          SessionUploading(
-            recording: state.recording,
-            name: state.name,
-            destinationId: destinationId,
-            bytesSent: 0,
-            totalBytes: state.recording.sizeBytes,
-          ),
+  SessionTransition _fromReady(
+    SessionReady state,
+    SessionEvent event,
+  ) => switch (event) {
+    RecordingRenamed(:final String name, :final RecordingFile? recording) =>
+      SessionTransition(state.copyWith(name: name, recording: recording)),
+    UploadRequested(:final String destinationId, :final bool keepLocalCopy) =>
+      SessionTransition(
+        SessionUploading(
+          recording: state.recording,
+          name: state.name,
+          destinationId: destinationId,
+          bytesSent: 0,
+          totalBytes: state.recording.sizeBytes,
+          keepLocalCopy: keepLocalCopy,
+          everUploaded: state.everUploaded,
         ),
-        LocalDeletionStarted(:final DeletionReason reason) =>
-          reason == DeletionReason.userRequested
-              ? SessionTransition(
-                  SessionDeleting(
-                    recording: state.recording,
-                    afterUpload: false,
-                  ),
-                )
-              // A post-upload cleanup can only follow a confirmed success,
-              // which never passes through `ready` (§18).
-              : _reject(state, event, 'no confirmed upload success'),
-        _ => _reject(state, event, 'ready'),
-      };
+      ),
+    LocalDeletionStarted(:final DeletionReason reason) =>
+      reason == DeletionReason.userRequested
+          ? SessionTransition(
+              SessionDeleting(recording: state.recording, afterUpload: false),
+            )
+          // A post-upload cleanup can only follow a confirmed success,
+          // which never passes through `ready` (§18).
+          : _reject(state, event, 'no confirmed upload success'),
+    _ => _reject(state, event, 'ready'),
+  };
 
   SessionTransition _fromUploading(
     SessionUploading state,
@@ -297,6 +373,12 @@ class SessionMachine {
           totalBytes: totalBytes,
           retries: state.retries,
           resumed: resumed,
+          // Rebuilt rather than copied, so everything the transfer has to
+          // remember must be restated here. Dropping this pair would delete a
+          // file the user asked to keep, and re-arm the Delete confirmation
+          // for one that is already at the destination.
+          keepLocalCopy: state.keepLocalCopy,
+          everUploaded: state.everUploaded,
         ),
       ),
     UploadProgressed(
@@ -320,6 +402,24 @@ class SessionMachine {
     UploadCancellationRequested() => SessionTransition(
       state.copyWith(cancelling: true),
     ),
+    // A confirmed success with the keep preference on returns to `ready` with
+    // the file still on disk. §18 *permits* the post-upload deletion; it has
+    // never required it, and which successor a confirmed success takes was
+    // decided when Send was pressed
+    // (`docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md`).
+    //
+    // `everUploaded: true` is what stands the Delete confirmation down from
+    // here on (`docs/adr/2026-08-22-delete-confirmation.md`): the local file is
+    // no longer the only copy, so removing it is no longer irreversible.
+    UploadEnded(:final RemoteUploadResult? result, :final bool cancelled)
+        when result != null && !cancelled && state.keepLocalCopy =>
+      SessionTransition(
+        SessionReady(
+          recording: state.recording,
+          name: state.name,
+          everUploaded: true,
+        ),
+      ),
     UploadEnded(:final RemoteUploadResult? result, :final bool cancelled)
         when result != null && !cancelled =>
       SessionTransition(
@@ -331,9 +431,12 @@ class SessionMachine {
         SessionReady(
           recording: state.recording,
           name: state.name,
-          everUploaded: false,
+          // Not `false`. Cancelling a *second* send does not un-send the first,
+          // and claiming otherwise re-arms a confirmation dialog that calls the
+          // deletion irreversible when it is not.
+          everUploaded: state.everUploaded,
           lastError: UploadError.cancelled(
-            'Upload cancelled at $bytesConfirmed bytes.',
+            'Upload cancelled after ${formatBytes(bytesConfirmed)}.',
           ),
         ),
       ),
@@ -347,6 +450,7 @@ class SessionMachine {
           error: error,
           bytesConfirmed: bytesConfirmed,
           canResume: bytesConfirmed > 0 && error.isRetryable,
+          everUploaded: state.everUploaded,
         ),
       ),
     _ => _reject(state, event, 'uploading'),
@@ -356,15 +460,18 @@ class SessionMachine {
     SessionUploadFailed state,
     SessionEvent event,
   ) => switch (event) {
-    UploadRequested(:final String destinationId) => SessionTransition(
-      SessionUploading(
-        recording: state.recording,
-        name: state.name,
-        destinationId: destinationId,
-        bytesSent: 0,
-        totalBytes: state.recording.sizeBytes,
+    UploadRequested(:final String destinationId, :final bool keepLocalCopy) =>
+      SessionTransition(
+        SessionUploading(
+          recording: state.recording,
+          name: state.name,
+          destinationId: destinationId,
+          bytesSent: 0,
+          totalBytes: state.recording.sizeBytes,
+          keepLocalCopy: keepLocalCopy,
+          everUploaded: state.everUploaded,
+        ),
       ),
-    ),
     RecordingRenamed(:final String name, :final RecordingFile? recording) =>
       SessionTransition(
         SessionReady(

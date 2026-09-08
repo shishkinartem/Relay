@@ -6,10 +6,12 @@ import 'package:upload_core/upload_core.dart';
 
 import '../../../core/ids.dart';
 import '../../../core/logging/app_logger.dart';
+import '../../../core/platform/folder_opener.dart';
 import '../../../core/settings/app_settings.dart';
 import '../../../upload/application/upload_coordinator.dart';
 import '../../../upload/application/upload_destination_registry.dart';
 import '../../settings/application/settings_controller.dart';
+import '../domain/input_device_copy.dart';
 import '../domain/local_recording_store.dart';
 import '../domain/recording_naming.dart';
 import '../domain/session_events.dart';
@@ -41,11 +43,13 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     required RecorderPermissions permissions,
     required this._overlays,
     required this._store,
+    required this._folders,
     required this._settings,
     required this._uploads,
     required this._destinations,
     required this._logger,
     DateTime Function()? clock,
+    Future<void> Function(Duration)? delay,
     this._machine = const SessionMachine(),
     SessionPermissions? permissionCoordinator,
     SourceCatalog? sourceCatalog,
@@ -54,6 +58,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     ArtifactRecovery? artifactRecovery,
   }) : _recorder = recorder,
        _clock = clock ?? DateTime.now,
+       _delay = delay ?? Future<void>.delayed,
        // Built here rather than injected from the composition root, because
        // both are this object's own decomposition and not a wiring decision:
        // there is exactly one sensible implementation of each and it needs the
@@ -100,12 +105,27 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   final ArtifactRecovery _recovery;
   final SessionOverlays _overlays;
   final RecordingStore _store;
+  final FolderOpener _folders;
   final SettingsGateway _settings;
   final Uploads _uploads;
   final DestinationRegistry _destinations;
   final Logger _logger;
   final DateTime Function() _clock;
+
+  /// Waits, so a test does not (§19).
+  ///
+  /// Injected for the same reason [_clock] is: a pre-roll that really slept
+  /// would make every test that calls `requestStart()` and asserts
+  /// `SessionActive` either hang or assert the wrong state.
+  final Future<void> Function(Duration) _delay;
   final SessionMachine _machine;
+
+  /// Completed to end the pre-roll early — by `Start now`, by Cancel, or by
+  /// disposal. Null when no countdown is running.
+  Completer<void>? _countdownWake;
+
+  /// Which of the two early exits the wake means.
+  bool _countdownCancelled = false;
 
   StreamSubscription<RecorderEvent>? _recorderEvents;
   StreamSubscription<OverlayCommand>? _overlayCommands;
@@ -115,7 +135,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   SessionState _state = const SessionIdle();
   RecorderCapabilities _capabilities = const RecorderCapabilities.unsupported(
-    'Capabilities have not been read yet.',
+    'Relay is still checking what this computer can record.',
   );
   DisplayGeometry? _currentDisplay;
   String? _activeRecordingId;
@@ -874,9 +894,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
       // take (§33.7).
       notice:
           _swapFailures[kind] ??
-          (unresolved == null
-              ? null
-              : '“$unresolved” was not found · using the default'),
+          (unresolved == null ? null : unresolvedDeviceNotice(unresolved)),
       // Null only for a kind that is never metered. A kind that *can* be
       // metered but is not reporting gets a level of silence, so the sheet
       // draws the bar dead rather than removing it: §33.7 requires "off" and
@@ -951,7 +969,10 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   static String _nothingFound(MediaDeviceKind kind) => switch (kind) {
     MediaDeviceKind.camera => 'No camera found',
     MediaDeviceKind.microphone => 'No microphone found',
-    MediaDeviceKind.systemAudio => 'System mix',
+    // Only ever the *empty* message: the kind that enumerates nothing has no
+    // sheet to show it in, and the platform that does enumerate endpoints here
+    // would be reporting a machine with no sound output at all.
+    MediaDeviceKind.systemAudio => 'No sound output found',
   };
 
   /// Puts the strip back at its default dock (§33.3).
@@ -1265,6 +1286,15 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     final bool systemAudio = s.systemAudioEnabled && systemAudioAvailable;
     final String recordingId = newId();
     _activeRecordingId = recordingId;
+    // Session-scoped, and it has to be. The flag used to be cleared only by
+    // `_runCountdown`, so a cancel that was never consumed — `start()` threw
+    // before the guard below could read it, or `dispose()` set it — survived
+    // into the *next* session. A later session with the countdown off never
+    // runs `_runCountdown`, so the guard fired against `SessionPreparing`,
+    // where `CountdownCancelled` is not legal: the event was rejected, the
+    // state never moved, and a healthy recording was aborted into a screen
+    // with no controls and no way out but relaunching.
+    _countdownCancelled = false;
     _dispatch(PreparationStarted(source));
 
     // The panel is hidden as part of starting, and a failure anywhere in here
@@ -1306,15 +1336,75 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           )
           .timeout(platformCallTimeout);
 
+      // Dispatched *before* the strip is shown, and pushed twice, because the
+      // strip is not blank in this window: macOS replays its last snapshot
+      // before the panel is placed, and `hideControlStrip` rewinds only the
+      // recording fields — so without the first push the strip opens claiming
+      // to be recording, red dot and 00:00:00, for the whole of the show. The
+      // first push is a no-op on Windows, where no strip window exists yet; the
+      // second is what lands there, and `showControlStrip` clears the dedupe so
+      // it is not swallowed as "no change".
+      final Duration preRoll = Duration(seconds: s.countdownSeconds);
+      final bool countsDown = preRoll > Duration.zero;
+      if (countsDown) {
+        _dispatch(
+          CountdownStarted(
+            source: source,
+            remaining: preRoll,
+            microphoneEnabled: microphone,
+            cameraEnabled: camera,
+            systemAudioEnabled: systemAudio,
+            microphoneAvailable: microphoneAvailable,
+            cameraAvailable: cameraAvailable,
+            systemAudioAvailable: systemAudioAvailable,
+          ),
+        );
+        await _pushOverlayState();
+      }
       await _overlays
           .showControlStrip(position: settings.stripPosition)
           .timeout(platformCallTimeout);
+      if (countsDown) {
+        await _pushOverlayState();
+      }
       if (camera) {
         await _showCameraPreview();
       }
       await _overlays.setMainWindowVisible(false).timeout(platformCallTimeout);
 
+      // The wait, and it sits here for three reasons at once: the panel is
+      // already hidden, the strip is already up, and nothing is encoded —
+      // `startWriting` and the ticker are both inside the platform's `start()`,
+      // so elapsed still begins at zero.
+      //
+      // Deliberately between two awaits and inside neither `.timeout`: a wait
+      // the user asked for is not a platform call that stopped responding, and
+      // folding a ten-second pre-roll into an eight-second timeout would report
+      // a capture failure for a countdown that worked.
+      if (countsDown && !await _runCountdown(preRoll)) {
+        // `started` stays false, so the `finally` below restores the panel and
+        // removes the overlays — persisting the strip position and the camera
+        // tile exactly as an ordinary end does.
+        _dispatch(const CountdownCancelled());
+        await _abortAndRelease();
+        // Cleared here, or the *next* session's finalization failure names this
+        // session's `.part` as its retained artefact.
+        _activeRecordingId = null;
+        return;
+      }
+
       await _recorder.start().timeout(platformCallTimeout);
+      // Cancel is still legal here. `_runCountdown` has returned and cleared
+      // its completer, but `start()` takes as long as the platform takes, and a
+      // Stop pressed in that window used to set a flag nobody read again — the
+      // recording began anyway, over a strip the user had just cancelled.
+      if (_countdownCancelled) {
+        _countdownCancelled = false;
+        _dispatch(const CountdownCancelled());
+        await _abortAndRelease();
+        _activeRecordingId = null;
+        return;
+      }
       started = true;
 
       _dispatch(
@@ -1368,9 +1458,88 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         ),
       );
     } finally {
+      // Cleared on every exit, including the ones that throw. Nothing about
+      // this session may reach the next one.
+      _countdownCancelled = false;
       if (!started) {
         await _teardownOverlays();
       }
+    }
+  }
+
+  /// Counts the pre-roll down on the strip. False if the user cancelled.
+  ///
+  /// One wait per second, not one for the whole span: the number has to change,
+  /// and both exits have to be noticed between two of them. Each wait is
+  /// *raced* against the wake rather than simply awaited, so Cancel and
+  /// `Start now` answer on the press instead of at the next second boundary —
+  /// up to a full second of a dead control on a floating window over someone
+  /// else's work reads as a crash.
+  Future<bool> _runCountdown(Duration total) async {
+    final Completer<void> wake = Completer<void>();
+    _countdownWake = wake;
+    try {
+      for (int left = total.inSeconds; left > 0; left--) {
+        // Checked before the wait, not only after it. The strip is on screen
+        // and its Cancel square is live from the moment `showControlStrip`
+        // returns, which is before this loop starts — and the gap is not small:
+        // it holds `_showCameraPreview()`, which builds a second Flutter engine
+        // in its own panel. Clearing the flag at entry, as this used to, threw
+        // that press away and started the recording anyway.
+        if (_countdownCancelled) {
+          return false;
+        }
+        await Future.any(<Future<void>>[
+          _delay(const Duration(seconds: 1)),
+          wake.future,
+        ]);
+        if (_countdownCancelled) {
+          return false;
+        }
+        if (wake.isCompleted) {
+          return true;
+        }
+        // No tick on the last second: the strip counts 3, 2, 1 and then the
+        // recording starts. A zero held for a second is a second of dead time.
+        if (left > 1) {
+          _dispatch(CountdownTicked(Duration(seconds: left - 1)));
+          await _pushOverlayState();
+        }
+      }
+      return true;
+    } finally {
+      // The completer is this loop's; the cancel flag is the session's.
+      _countdownWake = null;
+    }
+  }
+
+  /// Cancels the pre-roll (§6, §19.1).
+  ///
+  /// Only signals. The teardown belongs to `_beginRecording`, which owns this
+  /// session's windows and its platform handle: a second path tearing the same
+  /// session down is the race every other lifecycle operation here is guarded
+  /// against, and strip commands arrive unawaited, so two presses one frame
+  /// apart both reach this.
+  Future<void> cancelCountdown() async {
+    if (_state is! SessionCountingDown) {
+      return;
+    }
+    _countdownCancelled = true;
+    _wakeCountdown();
+  }
+
+  /// Skips the rest of the pre-roll — the strip's third square while counting.
+  Future<void> startCountdownNow() async {
+    if (_state is! SessionCountingDown) {
+      return;
+    }
+    _wakeCountdown();
+  }
+
+  void _wakeCountdown() {
+    final Completer<void>? wake = _countdownWake;
+    if (wake != null && !wake.isCompleted) {
+      wake.complete();
     }
   }
 
@@ -1555,8 +1724,8 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
               : RecorderErrorCode.finalizationFailed,
           message: e is RecorderException
               ? e.message
-              : 'The recording could not be written out. The partial file was '
-                    'kept.',
+              : 'The recording could not be saved completely. What was '
+                    'captured is still on this computer.',
           retainedArtifactPath: _activeRecordingId == null
               ? null
               : '${_store.directory.path}/recording-$_activeRecordingId${RecordingStore.partSuffix}',
@@ -1702,22 +1871,42 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     if (current is! SessionActive || !current.cameraAvailable) {
       return;
     }
+    final bool next = !current.cameraEnabled;
+    InputsChanged inputsWith(bool camera) => InputsChanged(
+      microphoneEnabled: current.microphoneEnabled,
+      cameraEnabled: camera,
+      systemAudioEnabled: current.systemAudioEnabled,
+    );
+
     await _runStripCommand(StripControl.camera, () async {
-      final bool next = !current.cameraEnabled;
-      await _recorder.setCameraEnabled(next).timeout(platformCallTimeout);
-      if (next) {
-        await _showCameraPreview().timeout(platformCallTimeout);
-      } else {
-        await _overlays.hideCameraPreview().timeout(platformCallTimeout);
-      }
-      _dispatch(
-        InputsChanged(
-          microphoneEnabled: current.microphoneEnabled,
-          cameraEnabled: next,
-          systemAudioEnabled: current.systemAudioEnabled,
-        ),
-      );
+      // The glyph flips now, and the device work happens behind it.
+      //
+      // This one control is optimistic where the other two are not, because
+      // this one is the only expensive one: turning the camera on opens an
+      // `AVCaptureDevice` — `beginConfiguration`, a new input, a blocking
+      // `startRunning()`, and a fresh discovery session when a device was
+      // chosen — which the plugin's own note sizes at "a fifth of a second
+      // cold … seconds on a Continuity or Bluetooth camera", and then a
+      // preview panel is built on top of that. Waiting for all of it before
+      // redrawing made the button read as stuck. The microphone and system
+      // audio flip a flag and need none of this.
+      _dispatch(inputsWith(next));
       await _pushOverlayState();
+      try {
+        await _recorder.setCameraEnabled(next).timeout(platformCallTimeout);
+        if (next) {
+          await _showCameraPreview().timeout(platformCallTimeout);
+        } else {
+          await _overlays.hideCameraPreview().timeout(platformCallTimeout);
+        }
+      } on Object {
+        // Put the strip back before the failure is reported. Optimism the user
+        // can see has to be reversible where the user saw it — and every one of
+        // `_runStripCommand`'s failure branches pushes again after this, so the
+        // rolled-back state is what lands.
+        _dispatch(inputsWith(current.cameraEnabled));
+        rethrow;
+      }
     }, onFailed: _keepInputAsItWas);
   }
 
@@ -1806,7 +1995,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     final String target =
         destinationId ?? _settings.settings.uploadDestinationId;
 
-    _dispatch(UploadRequested(target));
+    // Read once, here. The file's fate is decided by what the switch said when
+    // Send was pressed, not by what it says when the destination answers.
+    _dispatch(
+      UploadRequested(
+        target,
+        keepLocalCopy: _settings.settings.keepLocalCopyAfterSending,
+      ),
+    );
     if (_state is! SessionUploading) {
       return;
     }
@@ -2002,10 +2198,19 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         unawaited(toggleCamera());
       case OverlayCommand.toggleSystemAudio:
         unawaited(toggleSystemAudio());
+      // The same two squares, two meanings each. A pre-roll has nothing to
+      // finalize and nothing to pause, so the last square cancels and the one
+      // before it starts immediately. Branched here rather than inside `stop()`,
+      // which keeps meaning "write the file out", and inside `pauseOrResume()`,
+      // which keeps meaning "pause a running capture" — and no new
+      // `OverlayCommand`, so the enum on the wire is identical on both
+      // platforms.
       case OverlayCommand.pauseOrResume:
-        unawaited(pauseOrResume());
+        unawaited(
+          _state is SessionCountingDown ? startCountdownNow() : pauseOrResume(),
+        );
       case OverlayCommand.stop:
-        unawaited(stop());
+        unawaited(_state is SessionCountingDown ? cancelCountdown() : stop());
       case OverlayCommand.openMicrophoneMenu:
         unawaited(openInputMenu(MediaDeviceKind.microphone));
       case OverlayCommand.openCameraMenu:
@@ -2168,11 +2373,11 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// the picture in the file is still the previous device's.
   static String _swapFailureNotice(MediaDeviceKind kind) => switch (kind) {
     MediaDeviceKind.camera =>
-      'That camera would not open · still using the previous one',
+      'That camera would not open. Still using the previous one.',
     MediaDeviceKind.microphone =>
-      'That microphone would not open · still using the previous one',
+      'That microphone would not open. Still using the previous one.',
     MediaDeviceKind.systemAudio =>
-      'That output would not open · still using the previous one',
+      'That sound output would not open. Still using the previous one.',
   };
 
   static StripControl? _controlFor(MediaDeviceKind kind) => switch (kind) {
@@ -2234,6 +2439,27 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _pushOverlayState() async {
     final SessionState current = _state;
+    if (current is SessionCountingDown) {
+      await _overlays.push(
+        RecordingOverlayState(
+          countdownRemaining: current.remaining,
+          microphoneEnabled: current.microphoneEnabled,
+          cameraEnabled: current.cameraEnabled,
+          systemAudioEnabled: current.systemAudioEnabled,
+          microphoneAvailable: current.microphoneAvailable,
+          cameraAvailable: current.cameraAvailable,
+          systemAudioAvailable: current.systemAudioAvailable,
+          // Filled exactly as the recording snapshot is, and that is a
+          // requirement rather than a convenience: a caret dropped here would
+          // make the strip narrower while counting down, which is the width
+          // change §6 and the never-shrink ADR both forbid.
+          microphoneHasMenu: canChooseDevice(MediaDeviceKind.microphone),
+          cameraHasMenu: canChooseDevice(MediaDeviceKind.camera),
+          systemAudioHasMenu: canChooseDevice(MediaDeviceKind.systemAudio),
+        ),
+      );
+      return;
+    }
     if (current is! SessionActive) {
       return;
     }
@@ -2276,7 +2502,11 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         fields: <String, Object?>{'from': before.name, 'to': _state.phase.name},
       );
     }
-    notifyListeners();
+    // Through the guard, not straight to `notifyListeners`. Quitting during the
+    // pre-roll wakes the countdown loop on purpose, and its continuation
+    // dispatches `CountdownCancelled` after `dispose()` has run — which is an
+    // assertion failure in debug and a silently skipped teardown either way.
+    _notifyIfAlive();
   }
 
   void _setBusy(bool value) {
@@ -2290,13 +2520,33 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// The destination the next Send would use.
   String get activeDestinationId => _settings.settings.uploadDestinationId;
 
-  /// Where recordings are written when Settings has no override.
-  String get defaultRecordingsDirectoryPath => _store.directory.path;
+  /// The folder the finished recording is actually in.
+  ///
+  /// The store's own directory, which the composition root resolved from
+  /// Settings at launch — so this stays correct even after the folder is
+  /// changed in Settings mid-session, which does not move existing files.
+  String get recordingsDirectoryPath => _store.directory.path;
+
+  /// Opens that folder in the platform's file manager.
+  ///
+  /// Best effort. A file manager that will not open is a caption that stays
+  /// true, not a failure the user has to dismiss.
+  Future<bool> openRecordingsFolder() async {
+    final bool opened = await _folders.open(_store.directory.path);
+    if (!opened) {
+      _logger.warn('open_folder_failed');
+    }
+    return opened;
+  }
 
   DestinationRegistry get destinations => _destinations;
 
   @override
   void dispose() {
+    // Quitting mid-pre-roll releases the loop rather than leaving it awaiting
+    // a delay inside a disposed model.
+    _countdownCancelled = true;
+    _wakeCountdown();
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_recorderEvents?.cancel());

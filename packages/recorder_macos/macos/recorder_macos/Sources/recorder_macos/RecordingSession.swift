@@ -940,8 +940,9 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     writer.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 1)
     writer.shouldOptimizeForNetworkUse = false
 
-    let bitrate = RecordingSession.videoBitrate(
-      height: Int(canvasSize.height), frameRate: configuration.frameRate)
+    let bitrate = RecordingConfiguration.videoBitrate(
+      width: Int(canvasSize.width), height: Int(canvasSize.height),
+      frameRate: configuration.frameRate)
     let videoInput = AVAssetWriterInput(
       mediaType: .video,
       outputSettings: [
@@ -996,6 +997,16 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     let streamConfiguration = SCStreamConfiguration()
     streamConfiguration.width = Int(canvasSize.width)
     streamConfiguration.height = Int(canvasSize.height)
+    // The canvas is in backing-store pixels, so ask for the backing store.
+    // Without this ScreenCaptureKit is free to hand back a nominal-resolution
+    // frame and upscale it into the buffer it was asked for, which produces
+    // exactly the soft text the native preset exists to avoid.
+    if #available(macOS 14.0, *) {
+      streamConfiguration.captureResolution = .best
+    }
+    // Down only, never up: an upscaled source spends bitrate on invented
+    // pixels, which is the rule `canvasSize()` already applies.
+    streamConfiguration.scalesToFit = false
     streamConfiguration.minimumFrameInterval = CMTime(
       value: 1, timescale: CMTimeScale(configuration.frameRate))
     streamConfiguration.showsCursor = configuration.showCursor
@@ -1260,12 +1271,5 @@ final class RecordingSession: NSObject, SCStreamOutput, SCStreamDelegate {
     adaptor = nil
     compositor = nil
     ledger.releaseAll()
-  }
-
-  /// Quality-oriented rates for screen content; not a user-facing setting (§11).
-  static func videoBitrate(height: Int, frameRate: Int) -> Int {
-    let base: Double = height >= 1000 ? 4_000_000 : 1_800_000
-    let rateScale = Double(max(frameRate, 1)) / 30.0
-    return Int(base * rateScale)
   }
 }

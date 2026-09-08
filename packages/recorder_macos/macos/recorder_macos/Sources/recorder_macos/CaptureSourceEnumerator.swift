@@ -65,13 +65,22 @@ final class CaptureSourceEnumerator {
     var sources: [EnumeratedSource] = []
 
     for display in content.displays {
+      // `SCDisplay.width/height` are POINTS — the ScreenCaptureKit header says
+      // so. The channel key is `pixelWidth`, Windows sends physical pixels, and
+      // the recorder sizes its canvas from this number, so sending points here
+      // halved the resolution of every recording on every Retina Mac: a
+      // 3024x1964 panel was captured as 1512x982 and "1080p" produced 982
+      // lines. Text is what shows it first, because a 2:1 downsample of glyphs
+      // hinted for the 2x grid is done before anything that understands them.
+      let (pixelWidth, pixelHeight) =
+        CaptureSourceEnumerator.backingPixels(of: display)
       var source = EnumeratedSource(
         id: "display:\(display.displayID)",
         type: "display",
         title: CaptureSourceEnumerator.displayName(for: display.displayID),
-        subtitle: "\(display.width) × \(display.height)",
-        pixelWidth: display.width,
-        pixelHeight: display.height,
+        subtitle: "\(pixelWidth) × \(pixelHeight)",
+        pixelWidth: pixelWidth,
+        pixelHeight: pixelHeight,
         isCurrentDisplay: display.displayID == currentDisplayID,
         thumbnail: nil)
       if refreshThumbnails {
@@ -105,8 +114,12 @@ final class CaptureSourceEnumerator {
         type: "window",
         title: window.owningApplication?.applicationName ?? "Window",
         subtitle: window.title ?? "",
-        pixelWidth: Int(window.frame.width),
-        pixelHeight: Int(window.frame.height),
+        // `SCWindow.frame` is in points too, so a window on a Retina display
+        // needs the same correction the displays above get.
+        pixelWidth: Int(
+          (window.frame.width * CaptureSourceEnumerator.scaleOf(window)).rounded()),
+        pixelHeight: Int(
+          (window.frame.height * CaptureSourceEnumerator.scaleOf(window)).rounded()),
         isCurrentDisplay: false,
         thumbnail: nil)
       if refreshThumbnails {
@@ -212,6 +225,63 @@ final class CaptureSourceEnumerator {
     else { return nil }
     let bitmap = NSBitmapImageRep(cgImage: rendered)
     return bitmap.representation(using: .png, properties: [:])
+  }
+
+  /// A display's real backing-store size, in pixels.
+  ///
+  /// `SCDisplay` only ever reports points, so the pixel count has to come from
+  /// the display mode. `CGDisplayModeGetPixelWidth/Height` are the authority —
+  /// they report the framebuffer, which on a scaled Retina mode is neither the
+  /// point size nor the mode's own nominal size. A display whose mode cannot be
+  /// read falls back to points, which is the number this used to send and is
+  /// never worse than refusing to enumerate it.
+  ///
+  /// The properties, not `CGDisplayModeGetPixelWidth/Height`: the C functions
+  /// are renamed by API notes and are an error to call from Swift against a
+  /// recent SDK. `swift test` does not catch that — this file is in the
+  /// plugin's own sources, outside the `RecorderCore` package the Swift suite
+  /// compiles — so only the macOS application build does.
+  static func backingPixels(of display: SCDisplay) -> (Int, Int) {
+    guard let mode = CGDisplayCopyDisplayMode(display.displayID) else {
+      return (display.width, display.height)
+    }
+    let width = mode.pixelWidth
+    let height = mode.pixelHeight
+    guard width > 0, height > 0 else {
+      return (display.width, display.height)
+    }
+    return (width, height)
+  }
+
+  /// The backing scale of the display a window is on, for the same correction.
+  ///
+  /// A window carries no scale of its own and can sit on any display, so the
+  /// frame decides which one to ask.
+  ///
+  /// **Entirely in Core Graphics, deliberately.** `SCWindow.frame` is a CG rect
+  /// — global space, origin top-left — while `NSScreen.frame` is Cocoa, origin
+  /// bottom-left. Intersecting the two only appears to work because a
+  /// single-display desktop makes the two spaces coincide; on displays stacked
+  /// vertically the test misses every screen, falls back to the main one, and
+  /// reports a window's size off by that display's scale factor. The scale is
+  /// therefore derived from the display's own mode — pixels over points — which
+  /// is the same source `backingPixels(of:)` uses.
+  ///
+  /// It also keeps AppKit out of this call. `enumerate` runs off the main
+  /// thread, and `NSScreen` there is undefined behaviour.
+  static func scaleOf(_ window: SCWindow) -> CGFloat {
+    var displayID = CGDirectDisplayID(0)
+    var count: UInt32 = 0
+    guard
+      CGGetDisplaysWithRect(window.frame, 1, &displayID, &count) == .success,
+      count > 0,
+      let mode = CGDisplayCopyDisplayMode(displayID)
+    else {
+      return 1
+    }
+    let points = CGDisplayBounds(displayID).width
+    guard points > 0 else { return 1 }
+    return CGFloat(mode.pixelWidth) / points
   }
 
   /// The display holding the main application window (§5).

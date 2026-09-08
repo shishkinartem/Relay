@@ -117,9 +117,12 @@ class _ConnectDestinationScreenState extends State<ConnectDestinationScreen> {
       if (mounted) {
         setState(() {
           _error =
-              'The connection could not be completed. Relay was not expecting '
-              'this failure, so the reason is reported as it arrived:';
-          _errorDetail = '${error.runtimeType}: $error';
+              'The connection could not be completed. This is not a failure '
+              'Relay knows how to explain, so the raw report is below:';
+          // `error.runtimeType` printed a Dart class name at the user. Almost
+          // every Dart error's own `toString` already begins with its type, so
+          // the prefix cost a line of source code on screen and added nothing.
+          _errorDetail = error.toString();
         });
       }
     } finally {
@@ -175,7 +178,7 @@ class _ConnectDestinationScreenState extends State<ConnectDestinationScreen> {
             ),
           ),
           const SizedBox(height: 4),
-          AppMonoText(_account ?? 'No account is configured yet.'),
+          AppMonoText(_account ?? 'No account connected yet.'),
           const AppDivider(margin: EdgeInsets.symmetric(vertical: 12)),
           const AppKicker('How to connect'),
           const SizedBox(height: 7),

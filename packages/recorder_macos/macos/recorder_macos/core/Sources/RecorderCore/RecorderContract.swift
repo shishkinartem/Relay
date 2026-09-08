@@ -533,8 +533,8 @@ public struct RecordingConfiguration {
     self.sourceHeight = map["sourceHeight"] as? Int ?? 0
     self.recordingId = recordingId
     self.outputDirectoryPath = outputDirectoryPath
-    self.quality = map["quality"] as? String ?? "hd720"
-    self.targetHeight = map["targetHeight"] as? Int ?? 720
+    self.quality = map["quality"] as? String ?? "native"
+    self.targetHeight = map["targetHeight"] as? Int ?? 0
     self.frameRate = map["frameRate"] as? Int ?? 30
     self.cameraEnabled = map["cameraEnabled"] as? Bool ?? false
     self.microphoneEnabled = map["microphoneEnabled"] as? Bool ?? true
@@ -561,10 +561,35 @@ public struct RecordingConfiguration {
     return id
   }
 
+  /// The most pixels a native canvas may have: 3840 x 2160.
+  ///
+  /// An encodability limit, not a quality judgement. H.264 caps frame size in
+  /// macroblocks, and a 5K panel's 5120 x 2880 needs a level above 5.2, which
+  /// little hardware accepts. Beyond this the native canvas is scaled down
+  /// proportionally, so a display that cannot be encoded at its own resolution
+  /// still records something playable instead of failing `prepare`.
+  public static let maxNativePixels = 3840 * 2160
+
   /// The encoded canvas, matching `VideoCompositionConfiguration` in Dart.
   ///
   /// Even dimensions because H.264 4:2:0 requires them.
   public func canvasSize() -> CGSize {
+    // `targetHeight == 0` is the native preset: no box, the source's own
+    // pixels. Falling through to the box arithmetic would compute a 0 x 0 box
+    // and clamp it to a 2 x 2 canvas, so the two degenerate cases are answered
+    // here — an unknown source size has no native resolution to follow, and
+    // falls back to the 1080p box.
+    if targetHeight <= 0 {
+      guard sourceWidth > 0, sourceHeight > 0 else {
+        return CGSize(width: 1920, height: 1080)
+      }
+      let pixels = Double(sourceWidth) * Double(sourceHeight)
+      let budget = Double(RecordingConfiguration.maxNativePixels)
+      let scale = pixels > budget ? (budget / pixels).squareRoot() : 1.0
+      return CGSize(
+        width: evenValue((Double(sourceWidth) * scale).rounded()),
+        height: evenValue((Double(sourceHeight) * scale).rounded()))
+    }
     let boxHeight = Double(targetHeight)
     let boxWidth = (boxHeight * 16.0 / 9.0).rounded()
     guard sourceWidth > 0, sourceHeight > 0,
@@ -577,6 +602,36 @@ public struct RecordingConfiguration {
     return CGSize(
       width: evenValue((Double(sourceWidth) * scale).rounded()),
       height: evenValue((Double(sourceHeight) * scale).rounded()))
+  }
+
+  /// Bits per pixel per frame for screen content (§11, §12).
+  ///
+  /// One constant, shared with `MediaWriter::RecommendedBitrate` on Windows, so
+  /// the same canvas encodes the same on both platforms. It reproduces both
+  /// rates this application used to ship to within one percent — 1280x720 at
+  /// 30 fps lands on 1.783 Mbps against the old 1.800, and 1920x1080 at 30 fps
+  /// on 4.012 against the old 4.000 — so no existing recording profile moves
+  /// perceptibly, and a canvas of any size is priced continuously with them.
+  public static let bitsPerPixelPerFrame = 0.0645
+
+  /// Keeps a small window watchable.
+  public static let minimumVideoBitrate = 1_500_000
+
+  /// The file-size and encoder-level guard.
+  public static let maximumVideoBitrate = 40_000_000
+
+  /// Quality-oriented rate for screen content; not a user-facing setting (§11).
+  ///
+  /// A step on height was wrong twice over. A 1512x982 Retina canvas has 1.61
+  /// times the pixels of 720p and was given 720p's bitrate because 982 is under
+  /// the 1000-line step — a 38% deficit that showed as mush on text edges. And
+  /// no step can price a native canvas at all, because its size is not known
+  /// until `prepare`.
+  public static func videoBitrate(width: Int, height: Int, frameRate: Int) -> Int {
+    let pixels = Double(max(width, 2)) * Double(max(height, 2))
+    let rate = Double(max(frameRate, 1))
+    let bitrate = bitsPerPixelPerFrame * pixels * rate
+    return min(maximumVideoBitrate, max(minimumVideoBitrate, Int(bitrate)))
   }
 
   private func evenValue(_ value: Double) -> Double {

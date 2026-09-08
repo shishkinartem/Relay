@@ -9,6 +9,7 @@ import '../core/environment/app_environment.dart';
 import '../core/logging/app_logger.dart';
 import '../core/logging/file_log_sink.dart';
 import '../core/platform/app_directories.dart';
+import '../core/platform/url_launcher_folder_opener.dart';
 import '../core/settings/settings_repository.dart';
 import '../features/recorder/application/overlay_presenter.dart';
 import '../features/recorder/application/recorder_view_model.dart';
@@ -144,6 +145,7 @@ class CompositionRoot {
         directory: Directory(recordingsPath),
         logger: logger,
       ),
+      folders: const UrlLauncherFolderOpener(),
       settings: settingsController,
       uploads: uploads,
       destinations: destinations,

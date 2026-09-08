@@ -39,6 +39,52 @@ import '../support/harness.dart';
 void main() {
   final Directory output = Directory('build/design_review');
 
+  /// Writes the PNG for whatever is already on screen under [key].
+  ///
+  /// Split out of [capture] for the screens that have to be *interacted with*
+  /// before they are worth looking at — a section that is collapsed by default
+  /// cannot be reviewed by a helper that only pumps.
+  Future<void> writePng(WidgetTester tester, String name, GlobalKey key) async {
+    if (!output.existsSync()) {
+      output.createSync(recursive: true);
+    }
+    final RenderRepaintBoundary boundary =
+        key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+    final ui.Image? image = await tester.runAsync(
+      () => boundary.toImage(pixelRatio: 2),
+    );
+    final ByteData? bytes = await tester.runAsync<ByteData?>(
+      () async => image!.toByteData(format: ui.ImageByteFormat.png),
+    );
+    File('${output.path}/$name.png')
+        .writeAsBytesSync(bytes!.buffer.asUint8List());
+    image!.dispose();
+  }
+
+  /// Mounts [screen] inside the capture boundary and returns its key, so a
+  /// test can drive the screen and then call [writePng].
+  Future<GlobalKey> mount(
+    WidgetTester tester,
+    Widget screen, {
+    Size size = panelSize,
+  }) async {
+    await loadDesignFonts();
+    final GlobalKey key = GlobalKey();
+    await tester.binding.setSurfaceSize(size);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      RepaintBoundary(
+        key: key,
+        child: MediaQuery(
+          data: const MediaQueryData(size: panelSize, devicePixelRatio: 2),
+          child: SizedBox.fromSize(size: size, child: screen),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    return key;
+  }
+
   Future<void> capture(
     WidgetTester tester,
     String name,
@@ -118,6 +164,51 @@ void main() {
       '1c_launch_inputs_open',
       harness.wrap(const LaunchScreen()),
       size: const Size(AppSpacing.panelWidth, 900),
+    );
+  });
+
+  testWidgets('1c launch screen with Advanced open', (
+    WidgetTester tester,
+  ) async {
+    // The section is collapsed by default, which is exactly why a mono line
+    // citing a specification section survived every previous design review:
+    // no render ever contained it. It now holds two real controls.
+    final TestHarness harness = await TestHarness.create(
+      settings: const AppSettings(countdownSeconds: 3),
+    );
+    addTearDown(harness.dispose);
+    await harness.initialize();
+
+    final GlobalKey key = await mount(
+      tester,
+      harness.wrap(const LaunchScreen()),
+      size: const Size(AppSpacing.panelWidth, 820),
+    );
+    await tester.tap(find.text('ADVANCED'));
+    await tester.pumpAndSettle();
+
+    await writePng(tester, '1c_launch_advanced_open', key);
+  });
+
+  testWidgets('the control strip counting down', (WidgetTester tester) async {
+    // design gap: `1f` and `1g` are the only strips on the canvas and neither
+    // counts down (`docs/adr/2026-09-08-pre-recording-countdown.md`).
+    await capture(
+      tester,
+      'strip_counting_down',
+      const RelayTheme(
+        child: Center(
+          child: RecordingControlStrip(
+            elapsed: Duration.zero,
+            isPaused: false,
+            countdownRemaining: Duration(seconds: 3),
+            microphoneEnabled: true,
+            cameraEnabled: true,
+            systemAudioEnabled: true,
+          ),
+        ),
+      ),
+      size: const Size(560, 90),
     );
   });
 
@@ -558,6 +649,7 @@ void main() {
             destinationId: 'telegram',
             bytesSent: (1094813696 * 0.62).round(),
             totalBytes: 1094813696,
+            keepLocalCopy: false,
             chunkIndex: 42,
             chunkCount: 68,
           ),

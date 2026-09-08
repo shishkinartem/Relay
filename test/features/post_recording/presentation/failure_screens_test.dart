@@ -38,6 +38,7 @@ void main() {
               destinationId: 'telegram',
               bytesSent: 512,
               totalBytes: 2048,
+              keepLocalCopy: false,
             ),
           ),
         ),
@@ -65,6 +66,7 @@ void main() {
               destinationId: 'webdav',
               bytesSent: 2048,
               totalBytes: 2048,
+              keepLocalCopy: false,
             ),
           ),
         ),
@@ -212,7 +214,7 @@ void main() {
       // without the user saying so.
       await mount(tester);
 
-      expect(find.text('Try to finalize'), findsOneWidget);
+      expect(find.text('Try to repair'), findsOneWidget);
       expect(find.text('Keep as is'), findsOneWidget);
       expect(find.text('Discard file'), findsOneWidget);
     });
@@ -223,7 +225,7 @@ void main() {
       await mount(tester);
 
       expect(find.textContaining('recording-abc123.part'), findsOneWidget);
-      expect(find.textContaining('not finalized'), findsOneWidget);
+      expect(find.textContaining('not finished'), findsOneWidget);
     });
 
     testWidgets('merely showing the screen deletes nothing', (
@@ -249,7 +251,7 @@ void main() {
     ) async {
       final TestHarness harness = await mount(tester);
 
-      await tester.tap(find.text('Try to finalize'));
+      await tester.tap(find.text('Try to repair'));
       await tester.pumpAndSettle();
 
       expect(harness.recorder.calls, contains('recoverArtifact'));

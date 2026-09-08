@@ -98,7 +98,7 @@ class UploadFailedScreen extends StatelessWidget {
             facts: <AppFact>[
               AppFact(
                 'Local file',
-                'retained · ${formatBytes(state.recording.sizeBytes)}',
+                'kept · ${formatBytes(state.recording.sizeBytes)}',
               ),
               AppFact(
                 'Uploaded',

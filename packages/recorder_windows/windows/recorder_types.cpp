@@ -868,6 +868,25 @@ RectD LetterboxRect(double source_width, double source_height, double canvas_wid
 void ResolveCanvasSize(const CompositionConfig& composition, uint32_t source_width,
                        uint32_t source_height, uint32_t target_height,
                        uint32_t* out_width, uint32_t* out_height) {
+  // target_height == 0 is the `native` preset: no bounding box, the source's
+  // own pixels. Falling through to the box arithmetic would compute a 0 x 0
+  // box and clamp it to a 2 x 2 canvas, so both degenerate cases are answered
+  // here — a source of unknown size has no native resolution to follow and
+  // falls back to the 1080p box.
+  if (target_height == 0) {
+    if (source_width == 0 || source_height == 0) {
+      *out_width = 1920;
+      *out_height = 1080;
+      return;
+    }
+    const double pixels =
+        static_cast<double>(source_width) * static_cast<double>(source_height);
+    const double budget = static_cast<double>(kMaxNativePixels);
+    const double scale = pixels > budget ? std::sqrt(budget / pixels) : 1.0;
+    *out_width = EvenAtLeast2(source_width * scale);
+    *out_height = EvenAtLeast2(source_height * scale);
+    return;
+  }
   const double box_height = static_cast<double>(target_height);
   const double box_width = box_height * 16.0 / 9.0;
   if (source_width == 0 || source_height == 0 ||
@@ -882,6 +901,22 @@ void ResolveCanvasSize(const CompositionConfig& composition, uint32_t source_wid
   const double applied = (std::min)(scale, 1.0);
   *out_width = EvenAtLeast2(source_width * applied);
   *out_height = EvenAtLeast2(source_height * applied);
+}
+
+uint32_t RecommendedVideoBitrate(uint32_t width, uint32_t height, uint32_t frame_rate) {
+  // A per-pixel rule rather than a step on height: a step cannot price a
+  // `native` canvas, whose size is not known until Prepare, and it mispriced
+  // every canvas that landed just under one of its thresholds. Linear in frame
+  // rate, which is the law spec 12's own table uses (4 -> 8 -> 16 Mbps across
+  // 30 -> 60 -> 120).
+  const double pixels = static_cast<double>((std::max)(width, 2u)) *
+                        static_cast<double>((std::max)(height, 2u));
+  const double rate = (std::max)(1.0, static_cast<double>(frame_rate));
+  const double bitrate = pixels * rate * kBitsPerPixelPerFrame;
+  const double clamped =
+      (std::max)(static_cast<double>(kMinimumVideoBitrate),
+                 (std::min)(static_cast<double>(kMaximumVideoBitrate), bitrate));
+  return static_cast<uint32_t>(clamped);
 }
 
 LONG StripSnapPixels(double scale) {

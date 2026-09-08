@@ -60,9 +60,19 @@ class UploadingScreen extends StatelessWidget {
           const SizedBox(height: 16),
           AppFactTable(
             facts: <AppFact>[
-              const AppFact('Validated', 'size ok for this destination'),
+              const AppFact('Size check', 'within this destination’s limit'),
               AppFact('Retries', '${state.retries}'),
-              const AppFact('On success', 'delete local file'),
+              // The only place the running application ever warned, in
+              // advance, what a confirmed send does to the local file. It reads
+              // the session's own captured answer rather than live settings, so
+              // it describes the decision that was actually made when Send was
+              // pressed.
+              AppFact(
+                'When it finishes',
+                state.keepLocalCopy
+                    ? 'the copy on this computer is kept'
+                    : 'the copy on this computer is deleted',
+              ),
             ],
           ),
           const SizedBox(height: 14),
@@ -80,10 +90,10 @@ class UploadingScreen extends StatelessWidget {
   String _transportLine(String destinationName) {
     final StringBuffer buffer = StringBuffer(destinationName);
     if (state.resumed) {
-      buffer.write(' · resumed session');
+      buffer.write(' · resumed');
     }
     if (state.chunkIndex != null && state.chunkCount != null) {
-      buffer.write(' · chunk ${state.chunkIndex} / ${state.chunkCount}');
+      buffer.write(' · part ${state.chunkIndex} of ${state.chunkCount}');
     }
     return buffer.toString();
   }

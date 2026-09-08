@@ -120,6 +120,9 @@ satisfied by none of them until now. Each is marked `design gap:` at its source:
 | The camera preset picker | `lib/design_system/components/camera_preset_tiles.dart` |
 | The four-corner grid — the camera sheet's, window mode only, and the launch screen's, both modes | `lib/design_system/components/camera_corner_tiles.dart` |
 | The preset's shape drawn *inside* the window-mode preview | `lib/design_system/components/camera_preview_surface.dart` |
+| The post-recording screen's footer, its `On this computer` row and its `Keep a copy on this computer` switch — `1i` draws Send and Delete only, with `New recording` nowhere (`docs/adr/2026-09-08-keeping-the-local-copy-after-sending.md`) | `lib/features/post_recording/presentation/ready_screen.dart` |
+| A third `Quality` segment. `1c` draws `720p` and `1080p`; `Native` is a state the canvas has never had (`docs/adr/2026-09-08-native-resolution-recording.md`) | `lib/features/recorder/presentation/launch_screen.dart` |
+| The `Countdown` row in Advanced, and the strip's counting-down state — `1f` and `1g` are the only strips on the canvas and neither counts down (`docs/adr/2026-09-08-pre-recording-countdown.md`) | `lib/features/recorder/presentation/launch_screen.dart`, `lib/design_system/components/recording_control_strip.dart` |
 
 What is built is assembled from the existing components and tokens rather than
 invented, which is the most the rule allows once something has to ship. It is

@@ -61,3 +61,15 @@ String formatFileTimestamp(DateTime timestamp) {
 }
 
 String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
+/// [formatClock]'s output, split at the seconds.
+///
+/// The control strip's pre-roll draws the same eight monospace cells the
+/// elapsed clock does — that is what keeps the strip one width in every session
+/// state (§6, `docs/adr/2026-08-31-overlay-panels-never-shrink.md`) — with only
+/// the seconds inked. Split here rather than measured in the widget, because
+/// what has to be true is that the two halves joined are exactly [formatClock].
+({String head, String seconds}) splitClock(Duration duration) {
+  final String clock = formatClock(duration);
+  return (head: clock.substring(0, 6), seconds: clock.substring(6));
+}

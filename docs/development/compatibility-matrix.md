@@ -148,6 +148,90 @@ on the default 16:9.
 ## Not verified
 
 ```text
+NOT RUN 2026-09-08: the Windows half of the native-resolution change
+`docs/adr/2026-09-08-native-resolution-recording.md` touches three C++ files —
+`recorder_types.{h,cpp}` (the `native` branch of `ResolveCanvasSize`, the 3840x2160 cap
+and the new `RecommendedVideoBitrate`), `media_writer.{h,cpp}` (the old per-writer bitrate
+deleted, the call re-pointed) and `recorder_windows_plugin.cpp` (the `targetHeight` default
+and the advertised `qualities`). Nine ctest cases were written for them and **none has been
+executed here**: `recorder_types.h` includes `windows.h`, so the suite cannot even be
+configured on macOS. CI's `native-windows` and `build-windows` jobs are the first thing
+that will run any of it.
+
+Reasoned, not measured, on either platform: whether a software H.264 encoder keeps up with
+a 3024x1964 canvas at 60 fps. The bounded queue drops the newest frame rather than
+stalling, so the predicted failure mode is a stuttery file rather than a stopped recording
+— but nobody has watched it happen.
+```
+
+```text
+CONFIRMED 2026-09-08: `swift test` compiles only RecorderCore, not the plugin's own sources
+The native-resolution change edited `Sources/recorder_macos/CaptureSourceEnumerator.swift`,
+`swift test` passed 236 tests, and `flutter build macos --release` then failed on that very
+file: `CGDisplayModeGetPixelWidth/Height` are renamed by API notes and are an *error* to
+call from Swift against the macOS 26.4 SDK (use `CGDisplayMode.pixelWidth/.pixelHeight`).
+
+The Swift suite builds the `core` package alone — that split is why it can run without
+Flutter at all — so the twelve files under `Sources/recorder_macos/` (the plugin,
+`RecordingSession`, `OverlayWindows`, `CaptureSourceEnumerator`, `VideoCompositor`, …) are
+compiled by **nothing but the application build**. A green `swift test` says nothing about
+them. Treat `flutter build macos --release` as the compile gate for that half, the way
+CI's `build-windows` is for the C++ half.
+```
+
+**How to change any of this:** `docs/development/windows-smoke-test.md` is the ordered script for
+the first Windows run, written for a machine with no development tools. CI now publishes
+`relay-windows-x64` on every green run, so getting a build no longer needs a Windows dev setup.
+
+```text
+NOT RUN 2026-09-08: whether the published Windows build starts on a clean machine
+`windows/CMakeLists.txt` is the stock Flutter template: it never calls
+`InstallRequiredSystemLibraries` and nothing overrides `CMAKE_MSVC_RUNTIME_LIBRARY`, so
+`relay.exe` and all four plugin DLLs link `/MD` against the VC++ 2015-2022 redistributable —
+which is NOT an OS component (the UCRT is; this is not). Nothing in the repository copies those
+DLLs and, until now, nothing named them as a prerequisite.
+
+The first person to run Relay on Windows is the most likely to be on a clean VM, and the failure
+mode is a missing-DLL dialog that reads as "Relay is broken". README.md now states the
+prerequisite; bundling it instead (`InstallRequiredSystemLibraries` + an `install(FILES ...)`)
+remains the better fix and is not done.
+
+Windows N/KN also lack the Media Feature Pack; the plugin links mfplat/mfreadwrite/mf/mfuuid as
+imports, so the process fails to start rather than degrading.
+```
+
+```text
+NOT RUN 2026-09-08: whether a cancelled pre-roll leaves a `.part` on Windows
+macOS opens the AVAssetWriter inside `start()`, so cancelling the countdown creates no file.
+Windows opens the sink writer and calls `BeginWriting()` back in `Prepare` (`media_writer.cpp`),
+so the file exists before the count even begins. Recovery is protected only by
+`findIncompleteArtifacts` discarding zero-length files — and whether the writer has flushed
+anything into it by cancel time is unknown, because nobody has run Relay on Windows.
+
+If it can be non-empty, a cancelled countdown would offer the user a "repair" for a recording
+that never started. Verify on the first real Windows run: start a countdown, cancel it, relaunch,
+and see whether the recovery screen appears.
+```
+
+```text
+NOT RUN 2026-09-08: the macOS control-strip countdown rewind
+`docs/adr/2026-09-08-pre-recording-countdown.md` adds one line to
+`OverlayWindows.hideControlStrip`: `lastStripState.removeValue(forKey: "countdownMs")`.
+`OverlayWindows` sits outside `RecorderCore`, so `swift test` cannot reach it and it has no
+unit coverage — the never-shrink ADR records the same limitation for the placement code.
+
+Miss it and the *next* session's strip opens accent-washed showing a stale count with dead
+controls until the first real push: self-correcting in milliseconds on a fast machine, and
+not on a slow one. **Verify by hand: two sessions back to back, the second with the
+countdown off.**
+
+Also unverified against a running application, on either platform: that the strip does not
+resize between counting down and recording. It is asserted twice in widget tests — the
+rendered `Size` and the reported `contentSize` — which is the executable form of the rule,
+but the rule exists because a real window hosting a real Flutter view crashed.
+```
+
+```text
 VERIFIED IN CI 2026-08-31: the Windows native build and the native unit tests
 Both jobs are green on `d187db7` — the first time either has ever passed. Recorded at
 length because this file confidently said the opposite, and was wrong in both directions.

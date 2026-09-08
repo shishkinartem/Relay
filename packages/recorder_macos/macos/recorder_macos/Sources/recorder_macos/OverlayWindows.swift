@@ -420,6 +420,10 @@ final class OverlayWindowController {
     lastStripState["isStopping"] = false
     lastStripState["isPaused"] = false
     lastStripState["elapsedMs"] = 0
+    // Removed rather than nulled: `[String: Any]` cannot hold nil, and an
+    // `NSNull` here would decode as a *present* value and open the next
+    // session's strip mid-countdown.
+    lastStripState.removeValue(forKey: "countdownMs")
   }
 
   func updateControlStrip(_ state: [String: Any]) {
