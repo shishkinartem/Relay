@@ -121,13 +121,25 @@ Then turn **Keep a copy on this computer** on, send again, and confirm the local
 The log, which holds the structured record of everything above:
 
 ```
-%APPDATA%\com.relay.relay\relay.log
+%APPDATA%\com.relay\relay\relay.log
 ```
 
-Paste that path into Explorer's address bar. Send the file, plus a note of which numbered step
-first behaved differently from the description.
+**Two folders, not one.** `com.relay` and `relay` are separate directories: Windows builds the
+path by joining the executable's `CompanyName` and `ProductName`, which are `com.relay` and
+`relay` (`windows/runner/Runner.rc`). It is not the macOS-style `com.relay.relay`.
 
-Settings live beside it in `settings.json`, and recordings in `%USERPROFILE%\Videos\Relay`.
+To get there: press **Win + R**, paste the line above, press Enter — that opens the log in
+whatever handles `.log` (Notepad, usually). To open the *folder* instead, paste
+`%APPDATA%\com.relay\relay` into Explorer's address bar, or into Win + R. Explorer expands
+`%APPDATA%` for you; you never need to know your own user name.
+
+If the folder does not exist, Relay has not started successfully even once — that is itself the
+finding, and it points at the redistributable in *Before you start*.
+
+Send the file, plus a note of which numbered step first behaved differently from the description.
+
+`settings.json` sits in the same folder. Recordings go to `%USERPROFILE%\Videos\Relay`, which
+Explorer also reaches as **Videos → Relay** in the sidebar.
 
 ## What this cannot tell us
 
