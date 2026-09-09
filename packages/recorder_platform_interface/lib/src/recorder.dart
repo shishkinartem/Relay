@@ -10,6 +10,7 @@ import 'models/recorder_event.dart';
 import 'models/recording_configuration.dart';
 import 'models/recording_file.dart';
 import 'models/resource_census.dart';
+import 'models/window_chrome.dart';
 import 'unsupported_recorder_platform.dart';
 
 /// Enumerates capture targets (§4.1).
@@ -328,4 +329,20 @@ abstract class RecorderPlatform {
   Recorder get recorder;
   RecorderPermissions get permissions;
   OverlayWindowController get overlays;
+
+  /// How the runner framed the window this build draws into.
+  ///
+  /// Deliberately not a member of [RecorderCapabilities], which answers a
+  /// different question at a different time: capabilities describe what the
+  /// *recorder* can do and are fetched asynchronously over the method channel,
+  /// while this is a fixed property of the window the runner already created
+  /// before Dart started. The first frame of the first screen has to lay the
+  /// header out around it, and a `Future` is the wrong shape for a value that
+  /// can neither change nor arrive late — a header that reflowed once the
+  /// channel answered would be a visible jump on every launch.
+  ///
+  /// [WindowChrome.separateTitleBar] is the default because it is what a
+  /// runner that has done nothing special produces; a platform that overlays
+  /// the system's window buttons onto the view has to say so.
+  WindowChrome get windowChrome => WindowChrome.separateTitleBar;
 }

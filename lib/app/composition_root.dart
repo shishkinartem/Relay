@@ -11,6 +11,7 @@ import '../core/logging/file_log_sink.dart';
 import '../core/platform/app_directories.dart';
 import '../core/platform/url_launcher_folder_opener.dart';
 import '../core/settings/settings_repository.dart';
+import '../design_system/design_system.dart';
 import '../features/recorder/application/overlay_presenter.dart';
 import '../features/recorder/application/recorder_view_model.dart';
 import '../features/recorder/domain/local_recording_store.dart';
@@ -53,6 +54,26 @@ class CompositionRoot {
   final DestinationRegistry destinations;
   final RecorderViewModel recorder;
   final Uploads uploads;
+
+  /// The leading inset the window header has to leave clear (design `.tb`).
+  ///
+  /// A mapping, not a branch: the registered platform reports how its runner
+  /// framed the window and this turns that fact into the design system's own
+  /// token. No operating system is named here, and none can be — the answer
+  /// comes from whichever plugin registered itself (§28).
+  ///
+  /// A getter on the type rather than a field on the built graph: the shell
+  /// reads it while laying out the very first frame, and routing the number
+  /// through `main.dart` would leave a shell that can be mounted with the
+  /// wrong one. Before this existed the header hardcoded macOS's reservation,
+  /// and on Windows — whose runner leaves its caption alone — that room drew
+  /// as a dead gap down the leading edge of every screen.
+  static double get titleBarLeadingInset =>
+      switch (RecorderPlatform.instance.windowChrome) {
+        WindowChrome.separateTitleBar => AppSpacing.titleBarPadding,
+        WindowChrome.overlaidWindowButtons =>
+          AppSpacing.titleBarWindowButtonsInset,
+      };
 
   static Future<CompositionRoot> create() async {
     // Directories first, because the file sink needs a path and a shipped

@@ -21,5 +21,6 @@ export 'src/models/recording_file.dart';
 export 'src/models/recording_quality.dart';
 export 'src/models/resource_census.dart';
 export 'src/models/video_composition_configuration.dart';
+export 'src/models/window_chrome.dart';
 export 'src/recorder.dart';
 export 'src/unsupported_recorder_platform.dart';

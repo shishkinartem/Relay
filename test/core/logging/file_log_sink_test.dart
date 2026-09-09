@@ -180,6 +180,90 @@ void main() {
     });
   });
 
+  group('durability', () {
+    /// The flush rule is level-based, so the record under test has to be.
+    LogRecord atLevel(LogLevel level, String event) => LogRecord(
+      level: level,
+      event: event,
+      timestamp: DateTime.utc(2026, 9, 9, 12),
+    );
+
+    test('warn and error are flushed; debug and info are not', () async {
+      // The trade §26 asks for: a process that dies mid-recording keeps what
+      // reached the file and loses what was still buffered, and the tail is the
+      // evidence. Debug and info arrive several times a second while a session
+      // runs, so flushing those would put real I/O on the thread that logged.
+      final FileLogSink? sink = await FileLogSink.open(logFile);
+
+      sink!.write(atLevel(LogLevel.debug, 'recorder_stats'));
+      sink.write(atLevel(LogLevel.info, 'platform_state'));
+      await pumpEventQueue();
+      expect(sink.flushes, 0);
+
+      sink.write(atLevel(LogLevel.warn, 'capture_error'));
+      await pumpEventQueue();
+      expect(sink.flushes, 1);
+
+      sink.write(atLevel(LogLevel.error, 'capture_error'));
+      await pumpEventQueue();
+      expect(sink.flushes, 2);
+
+      await sink.close();
+    });
+
+    test('a record logged during a flush is kept, not dropped', () async {
+      // An IOSink is bound while it flushes and throws on a write, and this
+      // sink swallows a failed write — so the first attempt at this rule lost
+      // the two records that followed an error, which is the opposite of what
+      // flushing an error is for. They queue in the backlog instead.
+      final FileLogSink? sink = await FileLogSink.open(logFile);
+
+      sink!.write(atLevel(LogLevel.error, 'first_error'));
+      sink.write(atLevel(LogLevel.info, 'during_the_flush'));
+      sink.write(atLevel(LogLevel.error, 'second_error'));
+      await sink.close();
+
+      final List<String> events = logFile
+          .readAsLinesSync()
+          .where((String line) => line.isNotEmpty)
+          .map((String line) => line.split('] ').last)
+          .toList(growable: false);
+      expect(events, <String>[
+        'first_error',
+        'during_the_flush',
+        'second_error',
+      ], reason: 'the backlog preserves order as well as the records');
+    });
+
+    test('an error is on disk before anything closes the sink', () async {
+      // No `close()` here on purpose: this is the process that never gets to
+      // run one.
+      final FileLogSink? sink = await FileLogSink.open(logFile);
+      sink!.write(atLevel(LogLevel.error, 'capture_error'));
+      await pumpEventQueue();
+
+      expect(logFile.readAsStringSync(), contains('capture_error'));
+      await sink.close();
+    });
+
+    test('a record buffered by a rotation is flushed on its own level', () async {
+      // A record logged mid-rotation waits in the backlog, and losing its flush
+      // on the way through would lose exactly the error that a burst big enough
+      // to rotate the file was about to explain.
+      final FileLogSink? sink = await FileLogSink.open(logFile, maxBytes: 64);
+      sink!.write(
+        atLevel(LogLevel.info, 'a_line_long_enough_to_reach_the_cap'),
+      );
+      sink.write(atLevel(LogLevel.error, 'capture_error'));
+      expect(sink.flushes, 0, reason: 'the error is still in the backlog');
+
+      await sink.close();
+
+      expect(sink.flushes, 1);
+      expect(logFile.readAsStringSync(), contains('capture_error'));
+    });
+  });
+
   group('failure never reaches the caller', () {
     test(
       'a path that cannot be opened yields null, not an exception',

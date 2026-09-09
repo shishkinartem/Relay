@@ -51,6 +51,22 @@ abstract final class AppSpacing {
   /// `.tb` — window header height. Tall enough to host the system window
   /// buttons, which the transparent title bar overlays onto it.
   static const double titleBarHeight = 38.0;
+
+  /// `.tb { padding: 0 11px }` — the header's own horizontal inset.
+  ///
+  /// The whole of the leading inset on a host that draws its own title bar:
+  /// there is nothing of the system's over the view to keep clear of.
+  static const double titleBarPadding = 11.0;
+
+  /// What the header leaves clear when the system's window buttons are drawn
+  /// on top of it rather than above it.
+  ///
+  /// macOS puts the traffic lights at the leading edge of a full-size
+  /// transparent title bar; this is where the last of them ends, so the title
+  /// starts after them rather than underneath. Not a platform constant in
+  /// disguise — it is the room *this* header reserves, applied wherever a host
+  /// reports `WindowChrome.overlaidWindowButtons`.
+  static const double titleBarWindowButtonsInset = 78.0;
 }
 
 /// Corner radii.

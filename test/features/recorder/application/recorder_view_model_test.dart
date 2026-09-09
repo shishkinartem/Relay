@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:recorder_platform_interface/recorder_platform_interface.dart';
+import 'package:relay/core/logging/app_logger.dart';
 import 'package:relay/core/settings/app_settings.dart';
 import 'package:relay/features/recorder/application/recorder_view_model.dart';
 import 'package:relay/features/recorder/domain/session_state.dart';
@@ -1033,6 +1034,161 @@ void main() {
     });
   });
 
+  group('diagnostics (§26)', () {
+    /// Every `capture_error` the logger holds, oldest first.
+    List<LogRecord> captureErrors(TestHarness harness) => harness.logger.records
+        .where((LogRecord r) => r.event == 'capture_error')
+        .toList(growable: false);
+
+    RecorderErrorEvent compositionFailure({bool fatal = false}) =>
+        RecorderErrorEvent(
+          RecorderErrorCode.encodingFailed,
+          'Failed to compose a frame.',
+          fatal: fatal,
+        );
+
+    test('a non-fatal platform error reaches the log', () async {
+      // It used to be dispatched into the session and dropped: a Windows
+      // session that failed to compose a frame ~22 times a second logged 870
+      // lines and not one error, which §26 requires.
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      harness.recorder.emit(compositionFailure());
+      await pumpEventQueue();
+
+      final LogRecord logged = captureErrors(harness).single;
+      expect(logged.level, LogLevel.warn);
+      expect(logged.fields['code'], RecorderErrorCode.encodingFailed.name);
+      expect(logged.fields['fatal'], isFalse);
+      expect(logged.fields['suppressed'], 0);
+      expect(logged.fields['message'], contains('compose'));
+    });
+
+    test('a burst of one code is throttled and counted', () async {
+      // The first line dates the fault and the count carries the rate. An
+      // unthrottled log of this session would have been ~22 lines a second and
+      // useless for anything else.
+      DateTime now = DateTime.utc(2026, 9, 9, 12);
+      final TestHarness harness = await TestHarness.create(clock: () => now);
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      for (int i = 0; i < 40; i++) {
+        harness.recorder.emit(compositionFailure());
+      }
+      await pumpEventQueue();
+
+      expect(
+        captureErrors(harness),
+        hasLength(1),
+        reason: 'only the first of the burst is written',
+      );
+
+      now = now.add(RecorderViewModel.errorLogInterval);
+      harness.recorder.emit(compositionFailure());
+      await pumpEventQueue();
+
+      final List<LogRecord> logged = captureErrors(harness);
+      expect(logged, hasLength(2));
+      expect(
+        logged.last.fields['suppressed'],
+        39,
+        reason: 'the reader has to be able to see the true rate',
+      );
+    });
+
+    test('a second code is not silenced by the first', () async {
+      // The throttle is per code on purpose: a camera that went away and an
+      // encoder that stopped are two faults, and the second one is the one
+      // nobody would have guessed.
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      harness.recorder.emit(compositionFailure());
+      harness.recorder.emit(
+        const RecorderErrorEvent(
+          RecorderErrorCode.microphoneUnavailable,
+          'device removed',
+          fatal: false,
+        ),
+      );
+      await pumpEventQueue();
+
+      expect(
+        captureErrors(harness)
+            .map((LogRecord r) => r.fields['code'])
+            .toList(growable: false),
+        <String>[
+          RecorderErrorCode.encodingFailed.name,
+          RecorderErrorCode.microphoneUnavailable.name,
+        ],
+      );
+    });
+
+    test('a fatal error is never suppressed', () async {
+      // A fatal error ends the session, so there is no burst to throttle and
+      // holding it back would lose the only line that explains the failure.
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      for (int i = 0; i < 5; i++) {
+        harness.recorder.emit(compositionFailure());
+      }
+      harness.recorder.emit(compositionFailure(fatal: true));
+      await pumpEventQueue();
+
+      final List<LogRecord> logged = captureErrors(harness);
+      expect(logged, hasLength(2));
+      expect(logged.last.level, LogLevel.error);
+      expect(logged.last.fields['fatal'], isTrue);
+      expect(
+        logged.last.fields['suppressed'],
+        4,
+        reason: 'the warnings it followed belong on the line that matters most',
+      );
+      expect(harness.viewModel.state, isA<SessionFailed>());
+    });
+
+    test('the stats line reports capture as well as encode', () async {
+      // `capturedFrames` climbing while `encodedFrames` stands still is the one
+      // comparison that says composition rather than capture. The line used to
+      // report only the second half, and placing the Windows stall took hours.
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      harness.recorder.emit(
+        const RecorderStatsEvent(
+          capturedFrames: 660,
+          encodedFrames: 9,
+          droppedFrames: 0,
+          audioDiscontinuities: 14,
+          avDriftMs: 3.5,
+          encoderName: 'H.264 (software)',
+          hardwareEncoding: false,
+        ),
+      );
+      await pumpEventQueue();
+
+      final LogRecord stats = harness.logger.records.lastWhere(
+        (LogRecord r) => r.event == 'recorder_stats',
+      );
+      expect(stats.fields['capturedFrames'], 660);
+      expect(stats.fields['encodedFrames'], 9);
+      expect(stats.fields['droppedFrames'], 0);
+      expect(stats.fields['audioDiscontinuities'], 14);
+    });
+  });
+
   group('capability negotiation (§28)', () {
     /// A platform that reports an input it does not have.
     FakeRecorder recorderWithout({
@@ -1496,6 +1652,34 @@ void main() {
       );
 
       expect(harness.viewModel.state, isA<SessionReady>());
+    });
+
+    test('"Keep as is" survives the rescan a stop runs', () async {
+      // The Windows run of 2026-09-08 opened with one artefact waiting
+      // (`incomplete_artifacts_found count=1`). Dismissing it emptied only the
+      // pending list, and a stop rescans the folder on purpose — so the same
+      // `.part` was back in front of the user the moment the session went
+      // idle, and would have been after every stop for as long as the file sat
+      // there. §18 offers the artefact once; the answer has to stick.
+      final Directory directory = Directory.systemTemp.createTempSync(
+        'relay_recovery_kept_',
+      );
+      final File part = File('${directory.path}/recording-8f2a11.part')
+        ..writeAsBytesSync(List<int>.filled(4096, 3));
+      final TestHarness harness = await TestHarness.create(
+        directory: directory,
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      harness.viewModel.keepArtifacts();
+
+      harness.recorder.stopResult = seedRecording(harness);
+      await harness.viewModel.requestStart();
+      await harness.viewModel.stop();
+
+      expect(harness.viewModel.state, isA<SessionReady>());
+      expect(harness.viewModel.hasRecoverableArtifacts, isFalse);
+      expect(part.existsSync(), isTrue, reason: 'kept means kept (§18)');
     });
 
     test('discard removes only the artefact the user chose', () async {

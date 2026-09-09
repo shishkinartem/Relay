@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../core/logging/app_logger.dart';
 import '../design_system/design_system.dart';
+import 'composition_root.dart';
 
 /// Shown when the object graph could not be built.
 ///
@@ -55,59 +56,66 @@ class StartupFailureApp extends StatelessWidget {
           settings: settings,
           pageBuilder: (_, _, _) => builder(context),
         ),
-    home: RelayTheme(
-      child: AppPanel(
-        title: 'Recorder',
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            const AppKicker('Could not start'),
-            const SizedBox(height: 12),
-            BlueprintFrame(
-              borderColor: AppColors.accent,
-              padding: const EdgeInsets.all(11),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  const Padding(
-                    padding: EdgeInsets.only(top: 2),
-                    child: AppIcon(
-                      AppIcons.warning,
-                      size: 17,
-                      color: AppColors.accent700,
+    // The same window fact RelayApp installs. Without it this one screen — the
+    // one shown when nothing else could start — keeps the macOS traffic-light
+    // reservation on every host, which is the dead gap the capability exists to
+    // remove.
+    home: AppWindowChrome(
+      titleBarLeadingInset: CompositionRoot.titleBarLeadingInset,
+      child: RelayTheme(
+        child: AppPanel(
+          title: 'Recorder',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const AppKicker('Could not start'),
+              const SizedBox(height: 12),
+              BlueprintFrame(
+                borderColor: AppColors.accent,
+                padding: const EdgeInsets.all(11),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: AppIcon(
+                        AppIcons.warning,
+                        size: 17,
+                        color: AppColors.accent700,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        Text(
-                          'Relay could not set itself up',
-                          style: AppTypography.h5,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          'Nothing was recorded and nothing was deleted. The '
-                          'details below identify what failed.',
-                          style: AppTypography.bodyXSmall.copyWith(
-                            color: AppColors.ink(70),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Text(
+                            'Relay could not set itself up',
+                            style: AppTypography.h5,
                           ),
-                        ),
-                        const SizedBox(height: 6),
-                        AppMonoText(_redactor.redactText(error.toString())),
-                        if (_trace.isNotEmpty) ...<Widget>[
+                          const SizedBox(height: 2),
+                          Text(
+                            'Nothing was recorded and nothing was deleted. The '
+                            'details below identify what failed.',
+                            style: AppTypography.bodyXSmall.copyWith(
+                              color: AppColors.ink(70),
+                            ),
+                          ),
                           const SizedBox(height: 6),
-                          AppMonoText(_trace),
+                          AppMonoText(_redactor.redactText(error.toString())),
+                          if (_trace.isNotEmpty) ...<Widget>[
+                            const SizedBox(height: 6),
+                            AppMonoText(_trace),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     ),

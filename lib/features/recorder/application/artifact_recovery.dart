@@ -55,9 +55,27 @@ class PlatformArtifactRecovery implements ArtifactRecovery {
   @override
   List<IncompleteRecordingArtifact> get pending => _pending;
 
+  /// Artefacts the user has already answered "Keep as is" for.
+  ///
+  /// The scan runs again after every stop, so without this a dismissal lasts
+  /// until the next rescan and the offer returns the moment the session goes
+  /// idle again — the same artefact, over and over, for the life of the file.
+  /// Paths rather than ids, because the path is what identifies the file on
+  /// disk; an entry whose file is gone drops out with the scan that stops
+  /// reporting it.
+  final Set<String> _dismissed = <String>{};
+
   @override
   Future<void> scan() async {
-    _pending = await _store.findIncompleteArtifacts();
+    final List<IncompleteRecordingArtifact> found = await _store
+        .findIncompleteArtifacts();
+    _dismissed.retainWhere(
+      (String path) =>
+          found.any((IncompleteRecordingArtifact a) => a.path == path),
+    );
+    _pending = found
+        .where((IncompleteRecordingArtifact a) => !_dismissed.contains(a.path))
+        .toList(growable: false);
     if (_pending.isNotEmpty) {
       _logger.warn(
         'incomplete_artifacts_found',
@@ -96,5 +114,8 @@ class PlatformArtifactRecovery implements ArtifactRecovery {
   }
 
   @override
-  void dismiss() => _pending = const <IncompleteRecordingArtifact>[];
+  void dismiss() {
+    _dismissed.addAll(_pending.map((IncompleteRecordingArtifact a) => a.path));
+    _pending = const <IncompleteRecordingArtifact>[];
+  }
 }

@@ -120,6 +120,14 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
   final Future<void> Function(Duration) _delay;
   final SessionMachine _machine;
 
+  /// When a line was last written for each platform error code, and how many
+  /// of that code have arrived since — the two halves of the §26 throttle in
+  /// [_logPlatformError].
+  final Map<RecorderErrorCode, DateTime> _errorLoggedAt =
+      <RecorderErrorCode, DateTime>{};
+  final Map<RecorderErrorCode, int> _errorsSuppressed =
+      <RecorderErrorCode, int>{};
+
   /// Completed to end the pre-roll early — by `Start now`, by Cancel, or by
   /// disposal. Null when no countdown is running.
   Completer<void>? _countdownWake;
@@ -482,6 +490,16 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   /// A permission prompt is answered by a person, who may be reading it.
   static const Duration permissionPromptTimeout = Duration(minutes: 2);
+
+  /// How long one non-fatal error code stays quiet after a line for it reaches
+  /// the log.
+  ///
+  /// A Windows session failed to compose roughly 22 frames a second for its
+  /// whole length; logging each would have buried the log it was supposed to
+  /// explain. Long enough that a steady fault costs a handful of lines a
+  /// minute, short enough that the reader still sees when it started and when
+  /// it stopped.
+  static const Duration errorLogInterval = Duration(seconds: 5);
 
   bool get isInitialized => _initialized;
 
@@ -1286,6 +1304,12 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     final bool systemAudio = s.systemAudioEnabled && systemAudioAvailable;
     final String recordingId = newId();
     _activeRecordingId = recordingId;
+    // The throttle in `_logPlatformError` is per session, not per process: a
+    // code logged near the end of the previous recording would otherwise
+    // swallow the first occurrence of the same code in this one, which is the
+    // line that dates the fault.
+    _errorLoggedAt.clear();
+    _errorsSuppressed.clear();
     // Session-scoped, and it has to be. The flag used to be cleared only by
     // `_runCountdown`, so a cancel that was never consumed — `start()` threw
     // before the guard below could read it, or `dispose()` set it — survived
@@ -2115,6 +2139,7 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         :final String message,
         :final bool fatal,
       ):
+        _logPlatformError(code, message, fatal: fatal);
         if (fatal) {
           // The platform is expected to release its own capture on a fatal
           // error, but "expected to" is not a guarantee the application can
@@ -2159,8 +2184,15 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
         _logger.debug(
           'recorder_stats',
           fields: <String, Object?>{
-            'droppedFrames': event.droppedFrames,
+            // `capturedFrames` climbing while `encodedFrames` stands still
+            // says composition, not capture — the one comparison that names
+            // the failure a Windows run took hours to place, because this line
+            // reported only the second half. `audioDiscontinuities` is the
+            // same evidence for the audio track (§26).
+            'capturedFrames': event.capturedFrames,
             'encodedFrames': event.encodedFrames,
+            'droppedFrames': event.droppedFrames,
+            'audioDiscontinuities': event.audioDiscontinuities,
             'avDriftMs': event.avDriftMs,
             'encoder': event.encoderName,
             'hardwareEncoding': event.hardwareEncoding,
@@ -2171,6 +2203,51 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
           'platform_state',
           fields: <String, Object?>{'state': event.state.name},
         );
+    }
+  }
+
+  /// Writes a platform error to the log (§26), throttled per code.
+  ///
+  /// §26 asks for capture and encoder errors and the application logged
+  /// neither: a Windows session that failed to compose a frame about 22 times
+  /// a second produced 870 lines and not one error, and triage fell back to
+  /// reading the C++. Logging every occurrence would have replaced that with a
+  /// log nobody can read either, so the first of each code goes out
+  /// immediately — that line is what dates the fault — and afterwards at most
+  /// one per [errorLogInterval], carrying `suppressed` so the true rate is
+  /// still on the page.
+  ///
+  /// A fatal error ends the session, so there is no burst to throttle and it is
+  /// never held back. It also clears the counter, which puts the number of
+  /// warnings that led up to it on the line that matters most.
+  void _logPlatformError(
+    RecorderErrorCode code,
+    String message, {
+    required bool fatal,
+  }) {
+    final DateTime now = _clock();
+    final DateTime? lastLogged = _errorLoggedAt[code];
+    if (!fatal &&
+        lastLogged != null &&
+        now.difference(lastLogged) < errorLogInterval) {
+      _errorsSuppressed[code] = (_errorsSuppressed[code] ?? 0) + 1;
+      return;
+    }
+    _errorLoggedAt[code] = now;
+    final Map<String, Object?> fields = <String, Object?>{
+      'code': code.name,
+      'fatal': fatal,
+      'suppressed': _errorsSuppressed.remove(code) ?? 0,
+      'message': message,
+    };
+    // Warn rather than error for the non-fatal half, because the session is
+    // still recording — and because `FileLogSink` flushes both, which is what
+    // puts these lines on disk before a process that is about to die takes its
+    // buffer with it.
+    if (fatal) {
+      _logger.error('capture_error', fields: fields);
+    } else {
+      _logger.warn('capture_error', fields: fields);
     }
   }
 

@@ -119,28 +119,42 @@ class _InputMenuWindowState extends State<InputMenuWindow>
               },
             ),
           },
-          // A press in that surplus dismisses. An invisible region that
-          // silently ate clicks would be worse than the resize it replaced:
-          // this window floats over whatever the user is recording.
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (_) => _client.dismissInputMenu(),
-            child: Align(
-              alignment: Alignment.topLeft,
-              // Measured at its natural size, not at the window's: the window is
-              // sized from what this reports, and measuring inside it would let
-              // the two clamp each other at the host's first estimate.
-              child: OverflowBox(
-                alignment: Alignment.topLeft,
-                minWidth: 0,
-                maxWidth: double.infinity,
-                minHeight: 0,
-                maxHeight: double.infinity,
-                // Absorbs its own presses so the dismissal above never sees a
-                // click that landed on the sheet.
+          // The dismissal is a sibling *beneath* the sheet rather than a
+          // Listener wrapped around it. A hit-test path holds every
+          // `RenderPointerListener` from the pressed row up to the root and
+          // `dispatchEvent` calls all of them, so a wrapping dismissal fired on
+          // the very press that chose a row — and on Windows
+          // `OverlayWindows::HideInputMenu` destroys this window and its engine
+          // straight away, so the pointer-up that completes the tap never
+          // landed and the choice was lost (§33.4). Whether a given row won
+          // that race is chance, which is what "some rows I can pick, some I
+          // cannot" was. `Stack.hitTestChildren` walks children top-first and
+          // stops at the first hit, so a press on the sheet now never reaches
+          // the layer under it.
+          child: Stack(
+            children: <Widget>[
+              // A press in the surplus below the sheet still dismisses. An
+              // invisible region that silently ate clicks would be worse than
+              // the resize it replaced: this window floats over whatever the
+              // user is recording.
+              Positioned.fill(
                 child: Listener(
                   behavior: HitTestBehavior.opaque,
-                  onPointerDown: (_) {},
+                  onPointerDown: (_) => _client.dismissInputMenu(),
+                ),
+              ),
+              Align(
+                alignment: Alignment.topLeft,
+                // Measured at its natural size, not at the window's: the window
+                // is sized from what this reports, and measuring inside it
+                // would let the two clamp each other at the host's first
+                // estimate.
+                child: OverflowBox(
+                  alignment: Alignment.topLeft,
+                  minWidth: 0,
+                  maxWidth: double.infinity,
+                  minHeight: 0,
+                  maxHeight: double.infinity,
                   child: InputMenuSheet(
                     key: _menuKey,
                     state: _state,
@@ -159,7 +173,7 @@ class _InputMenuWindowState extends State<InputMenuWindow>
                   ),
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ),
