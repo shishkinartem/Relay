@@ -2,7 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../core/logging/app_logger.dart';
 import '../design_system/design_system.dart';
-import 'composition_root.dart';
+import 'window_chrome_inset.dart';
 
 /// Shown when the object graph could not be built.
 ///
@@ -61,7 +61,7 @@ class StartupFailureApp extends StatelessWidget {
     // reservation on every host, which is the dead gap the capability exists to
     // remove.
     home: AppWindowChrome(
-      titleBarLeadingInset: CompositionRoot.titleBarLeadingInset,
+      titleBarLeadingInset: titleBarLeadingInset,
       child: RelayTheme(
         child: AppPanel(
           title: 'Recorder',

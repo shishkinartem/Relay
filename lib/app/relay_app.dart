@@ -11,7 +11,7 @@ import '../features/recorder/presentation/preflight_screen.dart';
 import '../features/recorder/presentation/recovery_screen.dart';
 import '../features/recorder/presentation/transient_screens.dart';
 import 'app_scope.dart';
-import 'composition_root.dart';
+import 'window_chrome_inset.dart';
 
 /// The application shell.
 ///
@@ -40,7 +40,7 @@ class RelayApp extends StatelessWidget {
     // is laid out around the real window rather than around one of them.
     builder: (BuildContext context, Widget? child) => scope(
       AppWindowChrome(
-        titleBarLeadingInset: CompositionRoot.titleBarLeadingInset,
+        titleBarLeadingInset: titleBarLeadingInset,
         child: RelayTheme(child: child ?? const SizedBox.shrink()),
       ),
     ),
