@@ -66,6 +66,9 @@ class AudioRingBuffer {
   size_t Read(int64_t start_frame, size_t frames, float* out) const;
 
   int64_t write_end() const;
+  // Whether this endpoint has ever delivered a packet. A source that never
+  // started has no head to wait for, and must not hold the mix back.
+  bool started() const;
   uint64_t dropped_frames() const { return dropped_frames_.load(); }
   uint64_t discontinuities() const { return discontinuities_.load(); }
   void NoteDiscontinuity() { discontinuities_.fetch_add(1); }
@@ -79,6 +82,32 @@ class AudioRingBuffer {
   std::atomic<uint64_t> dropped_frames_{0};
   std::atomic<uint64_t> discontinuities_{0};
 };
+
+// Ordinary timestamp jitter that a packet's position is snapped through rather
+// than treated as a move on the timeline. Five milliseconds: WASAPI shared-mode
+// packets are about ten, so this absorbs the sub-packet noise and the integer
+// truncation in converting a QPC instant to a frame index, while a genuine
+// reposition — a device that stalled, a stream that restarted — is still larger
+// and still resynchronizes.
+constexpr int64_t kRingWriteSnapFrames = static_cast<int64_t>(kMixSampleRate) / 200;
+
+// How far the audio track may be encoded, in frames on the session timeline.
+//
+// `heads` holds the write head of every source that is enabled and has actually
+// delivered something. The ceiling is the SLOWEST of them, less `latency_frames`
+// of margin: encoding past a source's head reads frames it has not written yet,
+// AudioRingBuffer::Read fills those with zeros, and the encode position never
+// goes back — so the real samples that arrive a moment later are dropped on the
+// floor and the track is punched full of holes at the block rate. Taking the
+// fastest head instead of the slowest is what made the first Windows recording
+// sound like continuous crackling.
+//
+// The floor keeps a stalled or silent endpoint from stopping the track
+// altogether: past `max_lag_frames` behind the current instant, the mix moves on
+// without it. The result never exceeds `now_frames`, and never goes negative.
+int64_t AudioDrainCeilingFrames(int64_t now_frames, const int64_t* heads,
+                                size_t head_count, int64_t latency_frames,
+                                int64_t max_lag_frames);
 
 // Sums microphone and system audio into the single output track.
 //

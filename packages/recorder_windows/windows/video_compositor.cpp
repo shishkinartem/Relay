@@ -1,6 +1,7 @@
 #include "video_compositor.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace relay {
 
@@ -229,43 +230,61 @@ winrt::com_ptr<ID3D11VideoProcessorInputView> VideoCompositor::InputViewFor(
 }
 
 bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target,
-                           std::string* error) {
+                           std::string* error, size_t* dropped) {
   if (layers == nullptr || count == 0 || count > kMaskedTileStreams) {
     *error = "The compositor was asked to draw nothing.";
     return false;
   }
 
-  // Input views first, and all of them, so a surface that cannot be bound fails
-  // before any stream state has been touched.
+  // Input views first, and all of them, so a surface that cannot be bound is
+  // settled before any stream state has been touched. An optional layer that
+  // will not bind is left out and the rest of the frame is still drawn; only a
+  // required one fails the blit.
   winrt::com_ptr<ID3D11VideoProcessorInputView> inputs[kMaskedTileStreams];
+  const Layer* bound[kMaskedTileStreams] = {};
+  size_t drawn = 0;
   for (size_t i = 0; i < count; ++i) {
-    inputs[i] = InputViewFor(layers[i].texture);
-    if (!inputs[i]) {
-      *error = "A capture surface could not be bound to the video processor.";
-      return false;
+    winrt::com_ptr<ID3D11VideoProcessorInputView> view =
+        InputViewFor(layers[i].texture);
+    if (!view) {
+      if (layers[i].required) {
+        *error = "A capture surface could not be bound to the video processor.";
+        return false;
+      }
+      if (dropped != nullptr) {
+        ++*dropped;
+      }
+      continue;
     }
+    inputs[drawn] = std::move(view);
+    bound[drawn] = &layers[i];
+    ++drawn;
+  }
+  if (drawn == 0) {
+    *error = "No capture surface could be bound to the video processor.";
+    return false;
   }
 
   D3D11_VIDEO_PROCESSOR_STREAM streams[kMaskedTileStreams]{};
-  for (size_t i = 0; i < count; ++i) {
+  for (size_t i = 0; i < drawn; ++i) {
     const UINT index = static_cast<UINT>(i);
     video_context_->VideoProcessorSetStreamSourceRect(processor_.get(), index, TRUE,
-                                                      &layers[i].source);
+                                                      &bound[i]->source);
     video_context_->VideoProcessorSetStreamDestRect(processor_.get(), index, TRUE,
-                                                    &layers[i].dest);
+                                                    &bound[i]->dest);
     // Per-pixel alpha is what shapes the tile, and the planar alpha switch is
     // what asks the driver to blend the stream at all; at 1.0 it changes no
     // pixel the frame's own alpha did not already decide. Turned off again for
     // an unmasked layer, because this state is the processor's and outlives the
     // blit that set it.
     video_context_->VideoProcessorSetStreamAlpha(
-        processor_.get(), index, layers[i].blend_alpha ? TRUE : FALSE, 1.0f);
+        processor_.get(), index, bound[i]->blend_alpha ? TRUE : FALSE, 1.0f);
     if (video_context1_) {
       // Preview mirroring is the overlay's business; only mirrorOutput reaches
       // the file (spec 7).
       video_context1_->VideoProcessorSetStreamMirror(
           processor_.get(), index, TRUE,
-          layers[i].mirror_horizontal ? TRUE : FALSE, FALSE);
+          bound[i]->mirror_horizontal ? TRUE : FALSE, FALSE);
     }
     streams[i].Enable = TRUE;
     streams[i].OutputIndex = 0;
@@ -282,7 +301,7 @@ bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target
 
   const HRESULT hr = video_context_->VideoProcessorBlt(
       processor_.get(), canvas_views_[next_canvas_].get(), 0,
-      static_cast<UINT>(count), streams);
+      static_cast<UINT>(drawn), streams);
   if (FAILED(hr)) {
     *error = "VideoProcessorBlt failed (" + HResultToString(hr) + ").";
     return false;
@@ -293,7 +312,10 @@ bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target
 bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
                               uint32_t source_height,
                               winrt::com_ptr<ID3D11Texture2D>* out_canvas,
-                              std::string* error) {
+                              std::string* error, bool* camera_dropped) {
+  if (camera_dropped != nullptr) {
+    *camera_dropped = false;
+  }
   if (!processor_ || canvases_.empty()) {
     *error = "The compositor is not initialized.";
     return false;
@@ -354,15 +376,19 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
   tile.source = ToRect(pip.source);
   tile.dest = ToRect(pip.dest);
   tile.mirror_horizontal = camera_config.mirror_output;
+  // The one optional layer. A recording without the tile is a recording; a
+  // recording without the screen is not.
+  tile.required = false;
   // A rounded tile carries its shape in the frame's alpha channel, which only
   // the two-stream path composites (see the header). Everything else keeps the
   // two-blit path it has always used, so an ordinary recording is composed
   // exactly as it was before presets existed.
   const bool masked = pip.corner_radius > 0 && supports_masked_tile_;
+  size_t dropped = 0;
   if (masked) {
     tile.blend_alpha = true;
     const Layer layers[kMaskedTileStreams] = {desktop, tile};
-    if (!Blit(layers, kMaskedTileStreams, nullptr, error)) {
+    if (!Blit(layers, kMaskedTileStreams, nullptr, error, &dropped)) {
       return false;
     }
   } else {
@@ -370,10 +396,17 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
       return false;
     }
     // The target rectangle is the tile's own, so the rest of the canvas the
-    // first pass just wrote is not touched.
-    if (!Blit(&tile, 1, &tile.dest, error)) {
-      return false;
+    // first pass just wrote is not touched — which is what makes every failure
+    // of this second pass survivable, not only a surface that would not bind.
+    // The canvas already holds a complete desktop frame; discarding it because
+    // the tile could not be drawn would be the original defect reached by
+    // another route.
+    if (!Blit(&tile, 1, &tile.dest, error, &dropped)) {
+      dropped = 1;
     }
+  }
+  if (dropped > 0 && camera_dropped != nullptr) {
+    *camera_dropped = true;
   }
 
   *out_canvas = canvases_[next_canvas_];

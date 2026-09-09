@@ -11,9 +11,15 @@ namespace {
 // video, large enough to keep the sink writer call rate sane.
 constexpr size_t kAudioBlockFrames = kMixSampleRate / 50;
 // How far behind the session clock the audio drain may run when the endpoints
-// deliver nothing: 200 ms of silence written late costs nothing, a track that
-// stops advancing would desynchronize the file.
-constexpr int64_t kAudioCaptureLagFrames = static_cast<int64_t>(kMixSampleRate) / 5;
+// deliver nothing: half a second of silence written late costs nothing, a track
+// that stops advancing would desynchronize the file. Raised from 200 ms when
+// the ceiling moved to the slowest endpoint rather than the fastest — the floor
+// must sit below the margin the drain now keeps, or it becomes the binding
+// constraint and reintroduces the holes it exists to prevent.
+constexpr int64_t kAudioCaptureLagFrames = static_cast<int64_t>(kMixSampleRate) / 2;
+// The margin the drain keeps behind the slowest endpoint's write head. Matches
+// AudioMixer.swift's 250 ms on macOS, which is the platform that sounds right.
+constexpr int64_t kAudioDrainLatencyFrames = static_cast<int64_t>(kMixSampleRate) / 4;
 constexpr int64_t kTickIntervalMs = 250;
 constexpr int64_t kStatsEveryTicks = 4;
 // How long a swap waits for the replacement device to open before giving up and
@@ -278,6 +284,7 @@ bool RecordingSession::Prepare(const RecordingConfig& config, RecorderError* err
   composition_failures_.store(0);
   backpressure_drops_.store(0);
   fatal_error_.store(false);
+  camera_drop_reported_.store(false);
   camera_frames_seen_.store(false);
   last_accepted_frame_100ns_.store(-1);
   // Re-arms the queue: Stop() and Abort() close it, and a session prepared
@@ -687,18 +694,38 @@ void RecordingSession::OnCapturedFrame(const CaptureEngine::Frame& frame) {
 
   QueuedFrame queued;
   std::string detail;
+  bool camera_dropped = false;
   if (!compositor_.Compose(frame.texture, frame.width, frame.height, &queued.canvas,
-                           &detail)) {
-    composition_failures_.fetch_add(1);
-    RecorderError failure;
-    failure.code = RecorderErrorCode::kCaptureFailed;
-    failure.message = "A frame could not be composed.";
-    failure.details = detail;
-    failure.fatal = false;
-    if (events_.on_error) {
+                           &detail, &camera_dropped)) {
+    const uint64_t failures = composition_failures_.fetch_add(1);
+    // Reported once, not per frame. A fault that fails composition fails it for
+    // every frame, and this handler runs on the capture thread at the frame
+    // rate: the previous version posted 20-30 channel events a second at the
+    // platform thread for the whole session, which is a diagnostic flood on the
+    // one thread the entire UI is drawn on. The count still reaches the log
+    // through `droppedFrames` in the stats tick.
+    if (failures == 0 && events_.on_error) {
+      RecorderError failure;
+      failure.code = RecorderErrorCode::kCaptureFailed;
+      failure.message = "A frame could not be composed.";
+      failure.details = detail;
+      failure.fatal = false;
       events_.on_error(failure);
     }
     return;
+  }
+  // The screen was composed; only the tile was left out. Reported once, as a
+  // degraded input rather than a capture failure, because that is what the user
+  // sees: a recording that is fine except that the camera is not in it.
+  if (camera_dropped && !camera_drop_reported_.exchange(true) && events_.on_error) {
+    RecorderError degraded;
+    degraded.code = RecorderErrorCode::kCameraUnavailable;
+    degraded.message =
+        "The camera could not be drawn into the recording. The screen is still "
+        "being recorded.";
+    degraded.details = detail;
+    degraded.fatal = false;
+    events_.on_error(degraded);
   }
   queued.timestamp_100ns = media_100ns;
 
@@ -723,15 +750,29 @@ void RecordingSession::DrainAudio(bool flush) {
     // always lags the current instant by at least one device period. Encoding
     // up to `now` would write the tail of every block as silence and never
     // revisit it — audio_position_frames_ only moves forward — which chops the
-    // track at the block rate. The ceiling is therefore what was actually
-    // captured, with a bounded tolerance so two endpoints that deliver nothing
-    // at all (a silent loopback, a microphone that failed to open) cannot stop
-    // the audio track from advancing.
-    const int64_t captured_frames =
-        (std::max)(microphone_ring_.write_end(), system_audio_ring_.write_end());
-    ceiling_frames = (std::min)(
-        ceiling_frames,
-        (std::max)(captured_frames, ceiling_frames - kAudioCaptureLagFrames));
+    // track at the block rate.
+    //
+    // The ceiling is therefore the SLOWEST enabled endpoint's head, less a
+    // margin. Taking the fastest, as this did, meant the microphone was
+    // routinely read past its own head whenever the loopback ran ahead of it —
+    // the two endpoints are timestamped by different clocks and one is always
+    // ahead — and every one of those reads became zeros the real samples could
+    // never replace. That is the crackle the first Windows recording had.
+    //
+    // A source that is disabled or has never delivered contributes no head, so
+    // a microphone that failed to open cannot stall the track; a source that
+    // stalls after starting is bounded by the floor inside the helper.
+    int64_t heads[2] = {0, 0};
+    size_t head_count = 0;
+    if (mixer_.microphone_enabled() && microphone_ring_.started()) {
+      heads[head_count++] = microphone_ring_.write_end();
+    }
+    if (mixer_.system_audio_enabled() && system_audio_ring_.started()) {
+      heads[head_count++] = system_audio_ring_.write_end();
+    }
+    ceiling_frames =
+        AudioDrainCeilingFrames(ceiling_frames, heads, head_count,
+                                kAudioDrainLatencyFrames, kAudioCaptureLagFrames);
   }
   while (audio_position_frames_ + static_cast<int64_t>(kAudioBlockFrames) <=
          ceiling_frames) {

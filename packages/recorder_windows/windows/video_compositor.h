@@ -100,8 +100,16 @@ class VideoCompositor {
 
   // Composes into a canvas texture from the internal rotating pool. The
   // returned texture stays valid until the pool wraps around to it again.
+  //
+  // A camera surface this adapter refuses to bind is dropped from the frame,
+  // not made into a failure: capture, camera and encode are separate failure
+  // domains (spec 23, CLAUDE.md), and the alternative — which is what shipped —
+  // is a recording whose video track stops the moment the camera starts.
+  // `camera_dropped` says whether that happened, so the caller can report it
+  // once instead of per frame.
   bool Compose(ID3D11Texture2D* source, uint32_t source_width, uint32_t source_height,
-               winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error);
+               winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error,
+               bool* camera_dropped = nullptr);
 
   uint32_t canvas_width() const { return canvas_width_; }
   uint32_t canvas_height() const { return canvas_height_; }
@@ -116,6 +124,9 @@ class VideoCompositor {
     RECT dest{};
     bool mirror_horizontal = false;
     bool blend_alpha = false;
+    // False for a layer the frame is still worth drawing without. The desktop
+    // is required; the camera tile is not.
+    bool required = true;
   };
 
   winrt::com_ptr<ID3D11VideoProcessorInputView> InputViewFor(ID3D11Texture2D* texture);
@@ -123,8 +134,9 @@ class VideoCompositor {
   // restricts the area that is written at all, or is null for the whole canvas:
   // pixels outside it are not modified, and pixels inside it that no layer
   // covers are filled with the background colour.
+  // `dropped` counts optional layers that could not be bound and were left out.
   bool Blit(const Layer* layers, size_t count, const RECT* target,
-            std::string* error);
+            std::string* error, size_t* dropped = nullptr);
 
   winrt::com_ptr<ID3D11Device> device_;
   winrt::com_ptr<ID3D11DeviceContext> context_;

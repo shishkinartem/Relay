@@ -98,6 +98,11 @@ class CameraCapture {
   std::vector<winrt::com_ptr<ID3D11Texture2D>> textures_;
   size_t next_texture_ = 0;
   std::vector<uint8_t> flip_scratch_;
+  // One frame's worth of rows, masked and top-down, staged for the single
+  // UpdateSubresource that uploads it. A D3D11_USAGE_DEFAULT texture cannot be
+  // mapped, and it has to be DEFAULT to be legal as a video-processor input
+  // (see the descriptor in camera_capture.cpp).
+  std::vector<uint8_t> upload_scratch_;
 
   std::thread thread_;
   std::atomic<bool> running_{false};

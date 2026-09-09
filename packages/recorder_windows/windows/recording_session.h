@@ -256,6 +256,9 @@ class RecordingSession {
   std::atomic<bool> aborted_{false};
   std::atomic<bool> fatal_error_{false};
   std::atomic<uint64_t> composition_failures_{0};
+  // The camera tile being dropped from the composition is reported once per
+  // session, not once per frame (OnCapturedFrame).
+  std::atomic<bool> camera_drop_reported_{false};
   std::atomic<bool> camera_frames_seen_{false};
   std::atomic<int64_t> last_accepted_frame_100ns_{-1};
 

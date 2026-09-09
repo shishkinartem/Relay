@@ -40,6 +40,30 @@ LONG DefaultStrideFor(uint32_t width) {
   return stride;
 }
 
+// What the stream itself says its row order is, falling back to the format's
+// convention only when it declines to say.
+//
+// MF_MT_DEFAULT_STRIDE is the attribute Media Foundation uses to state
+// orientation, and it is the first thing Microsoft's own GetDefaultStride
+// helper reads. Deriving the sign from the subtype and width alone — which is
+// all DefaultStrideFor can do — asserts bottom-up for every BI_RGB format
+// whatever the reader actually negotiated, and that assertion is how a frame
+// gets flipped twice or not at all.
+LONG NegotiatedStrideFor(IMFSourceReader* reader, uint32_t width) {
+  winrt::com_ptr<IMFMediaType> current;
+  UINT32 declared = 0;
+  if (reader != nullptr &&
+      SUCCEEDED(reader->GetCurrentMediaType(
+          static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), current.put())) &&
+      SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &declared)) &&
+      declared != 0) {
+    // Stored as a UINT32 but defined as a signed stride: a bottom-up stream
+    // carries the two's-complement negative, which is what the cast recovers.
+    return static_cast<LONG>(static_cast<INT32>(declared));
+  }
+  return DefaultStrideFor(width);
+}
+
 }  // namespace
 
 CameraCapture::~CameraCapture() {
@@ -284,6 +308,35 @@ bool CameraCapture::OpenReader(std::string* error) {
     *error = "The camera did not report a usable frame size.";
     return false;
   }
+
+  // Now that the frame size is known, ask for top-down rows outright. Media
+  // Foundation treats every BI_RGB subtype as bottom-up by default, so the row
+  // order was previously decided by a convention nobody restated — and the
+  // first Windows run photographed the picture upside down. A positive
+  // MF_MT_DEFAULT_STRIDE on the requested type is the documented way to say
+  // "top-down", and the reader's own converter (enabled above) is what honours
+  // it.
+  //
+  // Best-effort by design: a camera that refuses is not a camera this
+  // application drops, and the previously negotiated type is still in force
+  // when the call fails. Whatever the outcome, NegotiatedStride reads back what
+  // was actually agreed rather than assuming the request won.
+  //
+  // The frame size is pinned into the request and read back afterwards.
+  // SetCurrentMediaType does not write the negotiated attributes into the
+  // caller's type, so this partial type would otherwise send the reader back
+  // through its whole native-type search — and a camera that offers several
+  // resolutions could settle on a different one, leaving width_/height_
+  // describing a frame that is no longer being delivered.
+  ::MFSetAttributeSize(output.get(), MF_MT_FRAME_SIZE, width, height);
+  output->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(width * 4));
+  if (SUCCEEDED(reader_->SetCurrentMediaType(
+          static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr,
+          output.get())) &&
+      !ReadFrameSize(reader_.get(), &width, &height)) {
+    *error = "The camera did not report a usable frame size.";
+    return false;
+  }
   width_.store(width);
   height_.store(height);
   if (fell_back && on_error_) {
@@ -311,6 +364,20 @@ bool CameraCapture::EnsureTexturePool(uint32_t width, uint32_t height) {
     textures_.clear();
     next_texture_ = 0;
   }
+  // These textures are bound as an input stream of the D3D11 video processor
+  // (VideoCompositor::InputViewFor), and that imposes the whole descriptor.
+  // CreateVideoProcessorInputView requires D3D11_USAGE_DEFAULT and accepts only
+  // bind flags drawn from DECODER / VIDEO_ENCODER / RENDER_TARGET /
+  // UNORDERED_ACCESS (or none at all); a DYNAMIC texture bound
+  // SHADER_RESOURCE — which is what this was — is rejected, and the rejection
+  // is silent, a null view rather than a device-removed. That failure took the
+  // entire video track down with it in every Windows recording with the camera
+  // on: the compose step failed for every frame from the camera's first one
+  // onwards, so the file held ~9 frames of picture and 46 seconds of audio.
+  //
+  // RENDER_TARGET is the flag from the allowed set that a colour-conversion
+  // blit is entitled to; SHADER_RESOURCE is kept because it costs nothing and
+  // keeps the surface usable if the tile is ever drawn some other way.
   D3D11_TEXTURE2D_DESC desc{};
   desc.Width = width;
   desc.Height = height;
@@ -318,9 +385,9 @@ bool CameraCapture::EnsureTexturePool(uint32_t width, uint32_t height) {
   desc.ArraySize = 1;
   desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
   desc.SampleDesc.Count = 1;
-  desc.Usage = D3D11_USAGE_DYNAMIC;
-  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+  desc.Usage = D3D11_USAGE_DEFAULT;
+  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+  desc.CPUAccessFlags = 0;
   for (size_t i = 0; i < kTexturePoolSize; ++i) {
     winrt::com_ptr<ID3D11Texture2D> texture;
     if (FAILED(device_->CreateTexture2D(&desc, nullptr, texture.put()))) {
@@ -369,18 +436,18 @@ void CameraCapture::PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t
   // costs a compare per pixel (video_compositor.h).
   const CameraFrameMask mask = compositor_->CameraMask(width, height);
 
-  D3D11_MAPPED_SUBRESOURCE mapped{};
-  if (FAILED(context_->Map(texture.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-    return;
-  }
+  // Staged in system memory and uploaded in one call: the pool is
+  // D3D11_USAGE_DEFAULT, which cannot be mapped, because that is what the video
+  // processor requires of an input surface. Three textures rotate, so the copy
+  // does not land in the one the compositor is reading.
+  upload_scratch_.resize(static_cast<size_t>(row_bytes) * height);
   // A rectangular mask needs no shape in the alpha channel at all: the crop is
   // the stream's source rectangle, so what lies outside it is never read, and
   // the compositor does not blend an unrounded tile. Only the fourth byte still
   // has to be written, because Media Foundation leaves it undefined.
   const bool rectangular = CameraMaskIsRectangular(mask);
-  auto* destination = static_cast<uint8_t*>(mapped.pData);
   for (uint32_t row = 0; row < height; ++row) {
-    uint8_t* line = destination + static_cast<size_t>(row) * mapped.RowPitch;
+    uint8_t* line = upload_scratch_.data() + static_cast<size_t>(row) * row_bytes;
     std::memcpy(line,
                 top_down + static_cast<size_t>(row) * static_cast<uint32_t>(stride),
                 row_bytes);
@@ -392,7 +459,8 @@ void CameraCapture::PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t
     }
     ApplyCameraMaskRow(mask, static_cast<double>(row) + 0.5, width, line);
   }
-  context_->Unmap(texture.get(), 0);
+  context_->UpdateSubresource(texture.get(), 0, nullptr, upload_scratch_.data(),
+                              row_bytes, 0);
   compositor_->SetCameraFrame(texture, width, height);
 }
 
@@ -415,7 +483,7 @@ void CameraCapture::CaptureThread() {
     ReportFailure(error, E_FAIL);
   } else {
     SettleOpen(true);
-    LONG default_stride = DefaultStrideFor(width_.load());
+    LONG default_stride = NegotiatedStrideFor(reader_.get(), width_.load());
 
     while (running_.load() && !stopping_.load()) {
       DWORD stream_flags = 0;
@@ -444,7 +512,7 @@ void CameraCapture::CaptureThread() {
         }
         width_.store(new_width);
         height_.store(new_height);
-        default_stride = DefaultStrideFor(new_width);
+        default_stride = NegotiatedStrideFor(reader_.get(), new_width);
       }
       if (!sample) {
         continue;  // a gap, not an error

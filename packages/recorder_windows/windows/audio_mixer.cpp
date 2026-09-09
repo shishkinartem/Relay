@@ -142,6 +142,18 @@ void AudioRingBuffer::Write(int64_t start_frame, const float* interleaved_stereo
   if (!started_) {
     started_ = true;
     write_end_ = start_frame;
+  } else if (start_frame != write_end_ &&
+             start_frame - write_end_ <= kRingWriteSnapFrames &&
+             write_end_ - start_frame <= kRingWriteSnapFrames) {
+    // Ordinary jitter, snapped onto the cursor instead of believed. Each packet
+    // arrives with a position derived from its own QPC timestamp, so
+    // consecutive packets are never exactly `frames` apart: a few frames early
+    // and the tail of the previous packet is discarded below, a few frames late
+    // and the gap branch writes zeros into the seam. Either way it is one click
+    // per packet — a hundred a second — which is what a continuous scraping
+    // sounds like. Beyond the snap window the timestamp is telling the truth
+    // about a real move, and the branches below still handle it.
+    start_frame = write_end_;
   }
 
   int64_t frame = start_frame;
@@ -182,7 +194,10 @@ void AudioRingBuffer::Write(int64_t start_frame, const float* interleaved_stereo
   for (size_t i = offset; i < frames; ++i) {
     const int64_t target = start_frame + static_cast<int64_t>(i);
     if (target < write_end_) {
-      // Overlapping re-delivery: the newest sample for a position wins.
+      // Overlapping re-delivery: the position is already written, and what is
+      // there stays. First writer wins, not last — re-deriving a position from
+      // a second timestamp is no more trustworthy than the first, and rewriting
+      // a frame the mixer may already have read would be the louder mistake.
       continue;
     }
     const size_t slot =
@@ -220,6 +235,29 @@ size_t AudioRingBuffer::Read(int64_t start_frame, size_t frames, float* out) con
 int64_t AudioRingBuffer::write_end() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return write_end_;
+}
+
+bool AudioRingBuffer::started() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return started_;
+}
+
+int64_t AudioDrainCeilingFrames(int64_t now_frames, const int64_t* heads,
+                                size_t head_count, int64_t latency_frames,
+                                int64_t max_lag_frames) {
+  const int64_t floor_frames = now_frames - max_lag_frames;
+  int64_t ceiling = floor_frames;
+  if (heads != nullptr && head_count > 0) {
+    int64_t slowest = heads[0];
+    for (size_t i = 1; i < head_count; ++i) {
+      if (heads[i] < slowest) {
+        slowest = heads[i];
+      }
+    }
+    ceiling = (std::max)(slowest - latency_frames, floor_frames);
+  }
+  ceiling = (std::min)(ceiling, now_frames);
+  return ceiling < 0 ? 0 : ceiling;
 }
 
 AudioMixer::AudioMixer(AudioRingBuffer* microphone, AudioRingBuffer* system_audio)
