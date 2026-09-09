@@ -6,8 +6,17 @@
 | Platform | Minimum version | Display capture | Window capture | System audio | Microphone | Camera | Cursor | 30 FPS | 60 FPS |
 |---|---|---|---|---|---|---|---|---|---|
 | macOS | 13.5 *(provisional, §30.8)* | built + run | built + run | built | built | built | built | built | built |
-| Windows | 10 build 19041 *(provisional, §30.9)* | built, not run | built, not run | built, not run | built, not run | built, not run | built, not run | built, not run | built, not run |
+| Windows | 10 build 19041 *(provisional, §30.9)* | run, defective | run, defective | run, defective | run, defective | run, defective | built, not checked | built, not measured | built, not run |
 | Linux | — | deferred (§2) | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
+
+Every Windows cell that says `run` was exercised on **2026-09-08**, on Windows 11,
+in one visit that made three recordings across three process launches — see *The
+first Windows run* below for what each of them did, and for which of these cells
+rests on the log and which on the tester's account of the files. `defective` is
+not `not run` and it is not `built` either: the code path executed, and what came
+out was wrong. The fixes are in this change set — eight of them, with a lettered
+check each in `windows-smoke-test.md` — and **none has been re-run on Windows**,
+so no cell moves back to `built + run` on the strength of them.
 
 ## What "built + run" covers on macOS
 
@@ -46,6 +55,170 @@ Only then does the second gate apply: the recording test skips when
 If you have granted screen recording and still see zero tests, it is the first gate,
 not a permission problem.
 
+## The first Windows run
+
+2026-09-08, Windows 11, the `relay-windows-x64` build CI publishes. It is the
+first time the application has been started on Windows at all, which is why the
+row above changed shape rather than a single cell.
+
+**It was not one session.** `relay.log` holds three process launches and three
+recordings, and the distinction is worth making because two of the three ended
+well:
+
+| | Process | Recording | How it ended |
+|---|---|---|---|
+| 1 | started 18:29:30 | 18:29:52 → 18:33:00, three pauses, the last of them 2m20s long | `stopping → finalizing → ready`, renamed `recording-2026-09-08-2333` |
+| 2 | the same process | 18:34:34 → 18:34:56, stopped **from `paused`** | `stopping → finalizing → ready`, renamed `recording-2026-09-08-2334` |
+| 3 | started 18:37:00 | 18:37:05 → the log stops mid-recording at 18:37:11 | no stop was ever logged; the process died under it |
+| — | started 18:37:15 | none | `incomplete_artifacts_found count=1`, fifty milliseconds after `platform_registered` |
+
+All times are the log's UTC. The host runs five hours ahead of it, which the two
+finalized recordings encode independently in their own names — `2333` and `2334`
+are the local clock at 18:33 and 18:34 UTC — so the file names and the timestamps
+disagree by five hours and neither is wrong. The date is the same in both:
+2026-09-08.
+
+**That is Windows evidence for two paths this file has never been able to
+claim.** §18's finalize path ran twice and worked: the sink writer finalized, the
+`.part` was renamed to its final name, and the application reached Ready — once
+from `recording` and once from `paused`, which are two different entries into it.
+The startup recovery scan works too: the third recording's process ended without
+a stop, and the next launch's `findIncompleteArtifacts` found exactly the one
+`.part` it had left behind. Pause and Resume also ran for the first time — five
+pauses and four resumes across the two finished recordings, the fifth pause
+running straight into the stop — with the session machine rejecting
+`RecordingTicked` in `paused` throughout, which is most of what those 870 lines
+actually are.
+
+None of that says the *files* are good. They are not.
+
+**Exercised, and on whose word.** The three recordings cover both capture
+sources, and the log names neither. What it does show is that recording 2 is the
+only one the source picker precedes — `selectingSource` at 18:34:05, ten seconds,
+then back to `idle` — which is where the window-capture cell comes from: the
+picker opening and closing is on the page, what was chosen in it is not. About
+the inputs the log says **nothing whatever**: no camera state, no microphone, no
+system audio, no device enumeration, and no per-session configuration beyond
+`destination=telegram quality=native frameRate=30` at launch. Those three cells
+rest on the tester's account of the run and on the files themselves — a track of
+crackle is a microphone that ran, an inverted tile is a camera that ran — and not
+on `relay.log`. This is the half of the diagnostics defect below that the change
+set does **not** close: the log now carries what a session did, and still not
+what it was configured to do. Not exercised at all, and still
+unmeasured: whether the cursor is in the frame, and whether the file holds the
+frame rate it was configured for. The video track stopped in all three
+recordings, so neither question had an answer.
+
+**What came out:** eight defects, and a ninth that is why finding the other
+eight took hours instead of minutes. The re-check column names the lettered
+check in `windows-smoke-test.md` that settles each one on the next run.
+
+| What the run showed | Cause | In this change set | Re-check |
+|---|---|---|---|
+| The video track **stops after eight or nine frames** and never advances again, in every one of the three recordings | one cause was found and is real: `VideoCompositor::Blit` treated every layer as required, so a camera surface that would not bind failed the whole frame — and then every frame after it. Whether it is the whole cause is *not* settled by this log; see *The stalled encoder* below | **fixed** — an optional layer that will not bind is dropped and counted, and the rest of the frame is still drawn (`video_compositor.cpp`) | A |
+| The microphone track is **full of holes** — continuous crackling rather than speech | the drain ceiling took the *fastest* source's write head, so the mix encoded past the microphone's head, `AudioRingBuffer::Read` zero-filled the gap, and the real samples that arrived a moment later were behind an encode position that never goes back | **fixed** — the ceiling is the slowest head of the sources that are enabled and have actually started, less a 250 ms margin, with a floor so a stalled endpoint cannot stop the track (`audio_mixer.cpp`) | C |
+| The camera picture is **vertically inverted** in the file | the frame is uploaded to a `D3D11_USAGE_DEFAULT` texture, which cannot be mapped, and the row order was never turned around on the way in | **fixed** — the masked, top-down rows are staged and uploaded in one `UpdateSubresource` (`camera_capture.cpp`) | B |
+| The **main window stays on screen** during a recording, so it is in the recording | `SetMainWindowVisible` returned early on a null handle: the plugin registers before the runner's window exists, and the handle it was given at registration was never anything else | **fixed** — the handle is resolved lazily through a provider and re-asked when the memo goes stale (`overlay_windows.cpp`) | E |
+| Rows in the strip's input sheet **mostly would not take a click**, and which ones did seemed random | the dismissal was a `Listener` *wrapped around* the sheet, and a hit-test path holds every listener from the pressed row up to the root: the same press both chose a row and dismissed the menu, and `HideInputMenu` destroys the window and its engine at once, so the pointer-up that completes the tap never landed (§33.4) | **fixed** — the dismissal is a sibling *beneath* the sheet in a `Stack`, whose hit test stops at the first child hit (`input_menu_window.dart`) | D |
+| Toggling the camera **freezes the whole interface** for a moment | `setCameraEnabled` ran inline on the platform thread; turning the camera off joins the capture thread, and `ReadSample` blocks until the next frame. macOS had moved the same arm off its main thread for the same reason | **fixed** — the arm is posted to the plugin's serial COM worker, with the preview refresh hopped back to the platform thread (`recorder_windows_plugin.cpp`). It gains a rejection macOS does not have; see *Where the two halves actually diverge* | F |
+| The header row has a **dead gap down its leading edge**, and a recovery offer outranks every session state | the header hardcoded macOS's reservation for the system window buttons, which a plain `WS_OVERLAPPEDWINDOW` does not draw over the view; and `hasRecoverableArtifacts` was checked ahead of the session state, so a scan that re-runs after every stop took the screen away from a live recording | **fixed** — the runner reports `WindowChrome` and the composition root maps it to the inset (`window_chrome.dart`, `app_panel.dart`); the recovery screen is gated to the launch states and a dismissal is remembered per path (`relay_app.dart`, `artifact_recovery.dart`) | H |
+| The taskbar, Alt+Tab and Explorer all show the **Flutter logo** | `windows/runner/resources/app_icon.ico` was the template's | **fixed** — the icon is generated from the application's own mark at every size the file carries (`tool/make-windows-icon.py`) | G |
+| **870 log lines, one warning and not a single error**, while the compositor was failing about twenty frames a second for most of two recordings | §26 requires capture and encoder errors to be logged. Non-fatal `RecorderErrorEvent`s were dispatched into the session and dropped; `recorder_stats` reported `encodedFrames` and not `capturedFrames`, so the log could not distinguish a stopped capture from a stopped compositor; and `FileLogSink` flushed only on rotation and close, so a process that died mid-recording lost its tail | **fixed** — `recorder_view_model.dart` logs every platform error, rate-limited per code with a `suppressed` count and never throttling a fatal one, and reports `capturedFrames` and `audioDiscontinuities`; `file_log_sink.dart` flushes warn and error records as they are written | the log itself |
+
+The diagnostics defect is the one worth generalizing, because the information
+was already crossing the channel. The plugin *did* report the composition
+failure — a non-fatal `captureFailed` event, about twenty times a second — and
+the application dispatched every one of them into the session and logged none.
+Two of the recording defects become legible in a single `recorder_stats` line
+once it carries both frame counts: `capturedFrames` climbing while
+`encodedFrames` sits at nine is *composition*, not capture, and
+`audioDiscontinuities` counts the holes in the microphone track. The upside-down
+tile and the visible main window are things only an eye catches. A run that logs
+its own failure is the difference between a triage that reads a log and one that
+reads C++.
+
+### The stalled encoder: one cause found, two profiles seen
+
+The row above claims a cause, not a proof, and the difference is the whole
+point of this subsection. The cause is real and is in the source: `Blit` failed
+a frame over a layer the frame did not need. What the log cannot say is whether
+that accounts for all three recordings, because the two profiles in it are a
+factor of twenty apart.
+
+| | Recordings 1 (18:29) and 3 (18:37) | Recording 2 (18:34) |
+|---|---|---|
+| `encodedFrames` | 9, then 8 — pinned from the first stats line to the last | 9 — pinned the same way |
+| `droppedFrames` | 10 → 869 across ~46 s of recording, and 10 → 124 across 5 s: **about twenty a second**, steadily | 5 → 16 across ~16 s: **about one a second**, and not steadily — three bursts with fifteen flat seconds between them |
+| `avDriftMs` | falls by ~1000 ms per second of recording | falls by ~1000 ms per second of recording |
+
+The drift is what ties them together. Audio advanced a second per second in all
+three recordings while video advanced not at all, so the video track stopped in
+recording 2 exactly as it stopped in the other two; what differs between them is
+only how many frames arrived to be dropped. In its first second recording 2's
+counters moved like the other two's — fourteen frames, nine encoded and five
+dropped, against nineteen and eighteen — and only then went nearly flat.
+
+**The likely reading** is that a nearly static application window simply
+delivered almost nothing to compose. `Windows.Graphics.Capture` delivers on
+change, and a window nobody is touching changes rarely; the bursts in that column
+are three moments when something in it redrew. On that reading the two profiles
+are one defect seen at two capture rates, and the fix covers both.
+
+**Nothing in the log proves it.** `recorder_stats` reported `encodedFrames` and
+not `capturedFrames`, and a compositor failing every frame it is handed and a
+capture handing it nothing are the same two numbers. That is why this row is not
+written as settled.
+
+**What settles it on the next run** is check A, and it needs one comparison:
+`capturedFrames` climbing while `encodedFrames` stands still is composition, and
+this fix is the right one. Both flat is a starved capture — a second defect
+wearing the first one's symptoms, which nothing in this change set touches.
+
+Keep the two claims apart when quoting this file. *The cause we found and fixed*
+is a compositor that failed a whole frame over an optional layer; it was in the
+source, it is gone, and it explains the two steady-drop recordings without
+strain. *The evidence we will have next time* is the pair of counters that says
+whether it explained the third one too.
+
+```text
+NOT RUN, as of 2026-09-09: every fix above, on Windows
+(The date on a NOT RUN header is when the entry was written, which for this one is the
+day the fixes were. The run they answer was the day before, 2026-09-08.)
+Reason: no Windows host here, and no MSVC toolchain, Windows SDK or cmake on this
+machine — unchanged, and the same reason the rest of this file gives. What each fix
+does have:
+
+- the audio mixer's drain ceiling, resampler and ring buffer are now a second
+  self-contained ctest binary (`windows/test/audio_mixer_test.cpp`, wired into
+  `windows/test/CMakeLists.txt`). The defect was entirely inside two pure functions and
+  no suite could have caught it while they were compiled by nothing but the application
+  build;
+- the compositor, the camera upload, the lazy main-window handle and the camera toggle's
+  move onto the serial worker have **no automated coverage at all**.
+  `video_compositor.cpp` needs D3D11, `camera_capture.cpp` needs Media Foundation, and
+  `overlay_windows.cpp` and the plugin need a real HWND and a Flutter registrar, so none
+  of them can be reached from `windows/test`, which links none of it. They are read, not
+  measured;
+- the Dart half runs everywhere and does have tests: the error throttle, the two new
+  stats fields and the file sink's flush rule in
+  `test/features/recorder/application/recorder_view_model_test.dart` (group
+  *diagnostics (§26)*) and `test/core/logging/file_log_sink_test.dart` (group
+  *durability*); the header inset in `test/app/window_chrome_wiring_test.dart` and
+  `test/design_system/app_title_bar_test.dart`; the sheet's hit test in
+  `test/features/recorder/presentation/input_menu_window_test.dart`; the recovery
+  gating in `test/features/recorder/presentation/recovery_routing_test.dart`; and the
+  icon file's own contents in `test/tools/windows_icon_test.dart`.
+
+Re-running the session is what closes this, and the script for it is already written —
+`docs/development/windows-smoke-test.md` gained a section of lettered checks, A through
+H, one per fix, each saying what to do, what a fix looks like, what the original defect
+looks like, and the log line that settles a disagreement between the two. Follow the
+numbered smoke test first, because that is what catches a fix that broke something else,
+then A through H. That list is deliberately not repeated here: the version that stood in
+this block named four checks when eight things had been fixed, which is exactly how a
+checklist kept in two files goes wrong.
+```
+
 ## Input devices (§33.2)
 
 What each platform reports in `selectableDeviceKinds` / `meterableDeviceKinds`.
@@ -54,7 +227,7 @@ The UI reads those capabilities, never the platform name.
 | Platform | Camera choice | Microphone choice | System-audio choice | Metering |
 |---|---|---|---|---|
 | macOS | selectable | selectable | **none** — ScreenCaptureKit delivers the system mix, so there is no endpoint to pick | microphone only |
-| Windows *(not built)* | selectable | selectable | selectable — WASAPI loopback is per render endpoint | microphone only |
+| Windows *(run once, 2026-09-08)* | selectable | selectable | selectable — WASAPI loopback is per render endpoint | microphone only |
 | Linux | deferred (§2) | deferred | deferred | deferred |
 
 Only the microphone is meterable on either platform. System audio carries no
@@ -66,20 +239,28 @@ The Dart half of the contract is unit-tested by
 `packages/recorder_platform_interface/test/contract_test.dart`, group
 *input devices (§33.2)*. The table above is what each platform is contracted to
 report (§33.8), not a measurement: live enumeration against attached hardware
-was not exercised while it was written, and the Windows half has been neither
-compiled nor run on this host — see *Not verified*.
+was not exercised while it was written. The Windows half compiles in CI only —
+never on this host — and nothing in this table has been measured on that side
+either. The 2026-09-08 run did open the strip's input sheet, which is more than
+this paragraph used to claim: a sheet cannot list rows without an enumeration
+behind them, and defect D — rows that would not take a click — is an account of
+pressing them. What the enumeration returned went unrecorded on both sides of
+the channel, because the log carries no device fields at all, so the run
+exercised this path without measuring one row of it. See *Not verified*.
 
 ### Where the two halves actually diverge
 
-Read off the sources on 2026-08-30, not intended behaviour. Anything here that
-disagrees with `../architecture/platform-channel-contract.md` is a gap in a
-platform, not a second reading of the contract.
+Read off the sources, not intended behaviour — the table on 2026-08-30, the
+`setCameraEnabled` row on 2026-09-09. Anything here that disagrees with
+`../architecture/platform-channel-contract.md` is a gap in a platform, not a
+second reading of the contract.
 
 | Behaviour | macOS | Windows |
 |---|---|---|
 | `startInputMetering`'s `deviceId` | **ignored.** `InputMeter.openTap()` opens `InputDeviceEnumerator.defaultDevice(kind: .microphone)` whatever id arrived | **ignored.** `OpenDefaultCaptureMeter()` takes the default `eCapture` endpoint whatever id arrived |
 | `getInputDevices` with an absent or unrecognised `kind` | `[]` — `MediaDeviceKind(name:)` yields nil and the plugin answers with an empty list | **rejects** with `unknown` ("An input device kind is required.") |
 | `getInputDevices` under load | always answers; no queue between the call and AVFoundation | **rejects** with `unknown` ("busy with an earlier request") once the 16-deep serial COM worker is full |
+| `setCameraEnabled` under load | always answers; the arm runs on an unbounded `Task`, so a toggle can be slow and can fail on the device, but is never refused for being late | **rejects** with `unknown` ("The recorder is busy with an earlier request.") once that same 16-deep worker is full. The arm moved onto it on 2026-09-09 because turning the camera off joins the capture thread and `ReadSample` blocks until the next frame, which froze every overlay while it ran inline — the fix for defect F. Its sibling toggles, `setMicrophoneEnabled` and `setSystemAudioEnabled`, stayed inline: they only re-point the mixer and cannot block |
 | `start`/`stopInputMetering` with an absent or unrecognised `kind` | silent no-op | **rejects** with `unknown`, before the meter is reached |
 | `isAvailable` on a media-device map | **computed**: `isConnected && !isSuspended && !isInUseByAnotherApplication` | **constant `true`** for every row. Only `DEVICE_STATE_ACTIVE` endpoints are enumerated at all, and openability is never probed — so §33.7's "device busy or held exclusively by another application: the meter says so rather than reading zero" cannot be satisfied from this field on Windows |
 | `isSystemDefault` | the device `AVCaptureDevice.default(for:)` would return | audio: the endpoint `GetDefaultAudioEndpoint(…, eConsole)` names. Cameras: **index 0**, because Media Foundation names no default and the recorder opens the first source |
@@ -101,7 +282,10 @@ platform, not a second reading of the contract.
 
 Neither platform's `devicesChanged` is exercised by an automated test: macOS's
 observers need real hardware to arrive or leave, and the Windows half — which
-compiles in CI since 2026-08-31 — has never been run.
+compiles in CI since 2026-08-31 — has never had a device arrive or leave under
+it. The 2026-09-08 recordings ran the application, not this code path: on
+Windows the watcher is registered by the first `getInputDevices`, which the
+input sheet did make, and then nothing was plugged in or unplugged.
 
 ## Provisional minimum versions
 
@@ -180,8 +364,10 @@ CI's `build-windows` is for the C++ half.
 ```
 
 **How to change any of this:** `docs/development/windows-smoke-test.md` is the ordered script for
-the first Windows run, written for a machine with no development tools. CI now publishes
+a Windows run, written for a machine with no development tools. CI now publishes
 `relay-windows-x64` on every green run, so getting a build no longer needs a Windows dev setup.
+It has been followed once, on 2026-09-08 — *The first Windows run* is what it found — and it
+has since gained a lettered section, A through H, aimed at what that run found.
 
 ```text
 NOT RUN 2026-09-08: whether the published Windows build starts on a clean machine
@@ -206,10 +392,11 @@ macOS opens the AVAssetWriter inside `start()`, so cancelling the countdown crea
 Windows opens the sink writer and calls `BeginWriting()` back in `Prepare` (`media_writer.cpp`),
 so the file exists before the count even begins. Recovery is protected only by
 `findIncompleteArtifacts` discarding zero-length files — and whether the writer has flushed
-anything into it by cancel time is unknown, because nobody has run Relay on Windows.
+anything into it by cancel time is unknown. Still unknown after 2026-09-08: those three
+recordings all started, and not one of them cancelled a countdown.
 
 If it can be non-empty, a cancelled countdown would offer the user a "repair" for a recording
-that never started. Verify on the first real Windows run: start a countdown, cancel it, relaunch,
+that never started. Verify on the next Windows run: start a countdown, cancel it, relaunch,
 and see whether the recovery screen appears.
 ```
 
@@ -252,21 +439,27 @@ length because this file confidently said the opposite, and was wrong in both di
 
 **What this settles, and what it does not.** The Windows half now compiles, links and
 passes its pure-arithmetic suite against a real MSVC toolchain and Windows SDK, which is
-more than this file could claim before. It remains true that **nobody has run the
-application on Windows**: every runtime row in this section stays unverified, and no
-amount of green CI reaches them. A compiler proves the code is well-formed, not that a
-recording comes out. The DPI question under *The movable control strip* still needs a
+more than this file could claim before. What it does not settle was demonstrated on
+2026-09-08, when the application was run on Windows for the first time and produced three
+recordings that were broken in eight separate ways (*The first Windows run*). A compiler
+proves the code is well-formed, not that a recording comes out — this section said exactly
+that, and the run is the receipt. Every runtime row in this section that those recordings
+did not touch stays unverified. The DPI question under *The movable control strip* still needs a
 physical two-monitor machine, which CI's single virtual display cannot provide.
 
 NOT RUN: the Windows native build on the development host
 Reason: no MSVC toolchain, no Windows SDK and no cmake on this machine (macOS). Unchanged,
 and now the lesser gap — CI covers the compile on every push.
 
-NOT RUN: fragmented MP4 output on Windows
-Reason: same. docs/adr/2026-08-23-fragmented-mp4-on-both-platforms.md changes
-the sink writer's container type so an aborted `.part` is recoverable; it must
-now be confirmed on a Windows host: it compiles, but no mid-session abort has been
-taken and no `.part` recovered there.
+NOT RUN: recovering a fragmented `.part` on Windows
+Reason: same. docs/adr/2026-08-23-fragmented-mp4-on-both-platforms.md changes the sink
+writer's container type so an aborted `.part` is recoverable. Half of that is no longer
+unrun: on 2026-09-08 a process did die mid-recording, and the next launch's
+`findIncompleteArtifacts` found the `.part` it left (*The first Windows run*). Finding is
+not repairing. Nothing in that log calls `recoverArtifact`, so whether the fragmented
+container actually yields a playable file on this platform is still unknown — and it is
+the half the ADR is about. Take it on the next run: kill Relay mid-recording, relaunch,
+press `Try to repair`, and play what comes out.
 
 NOT RUN: Windows native input-device enumeration and metering (§33.2)
 Reason: same. input_devices.cpp/.h and the plugin arms that call them have never
@@ -519,21 +712,33 @@ keeping because they are not documented anywhere else:
 
 ## Known gaps
 
-- **Windows is written but not built.** No MSVC toolchain on the development
-  host, and — the half that is actually actionable — the branch carrying the
-  work has never been pushed, so CI's `native-windows` and `build-windows` jobs
-  have never seen it. See *Not verified* above.
+- **Windows is built, run once, and defective.** It compiles and passes its
+  native suite in CI (green since `d187db7`), and it has now been run: three
+  recordings on Windows 11 on 2026-09-08, of which two finalized and one was
+  left as a `.part` by a process that died. All three have a video track that
+  stops after eight or nine frames, and the tester's account of the files adds a
+  perforated microphone track, an upside-down camera tile and the main window in
+  the picture. Eight fixes are in this change set and none has been re-run
+  there. This bullet previously said the work had never been pushed and CI had
+  never seen it; both were wrong, and it then said "one session", which was
+  wrong too. See *The first Windows run* and *Not verified*.
 - ~~**`deviceId` on `startInputMetering` is not honoured by either platform.**~~
   **Closed.** Both hosts now take the id from the call — macOS at
   `RecorderMacosPlugin.startInputMetering` → `meter.start(kind:deviceId:)`,
   Windows at `meter_.Start(kind, StringAt(*arguments, "deviceId"))` — and a
   start naming a different device re-points the tap instead of opening a second
-  one. Read off the source on both sides; measured on neither, because the
-  Windows half has never been run — it compiles in CI, which is not the same
-  thing — and the macOS half needs a second microphone to tell the two taps apart.
+  one. Read off the source on both sides; measured on neither. The 2026-09-08
+  recordings logged nothing about devices at all — and the sheet whose rows
+  would not take a click (defect D) is a reason to doubt that any selection
+  reached the platform — while the macOS half needs a second microphone to tell
+  the two taps apart.
 - **`getInputDevices` can fail on Windows**, where the contract says it always
   answers: an absent or unrecognised `kind` and a full COM worker queue are both
-  rejections there and empty lists (or impossible) on macOS.
+  rejections there and empty lists (or impossible) on macOS. `setCameraEnabled`
+  joined it on 2026-09-09, for the queue half only: the contract gives that call
+  a `null` reply and no rejection, and on Windows it now shares the same 16-deep
+  worker. `../architecture/platform-channel-contract.md` documents the
+  `getInputDevices` divergence and not yet this one.
 - **`cameraPreviewMoved` is written on both hosts and exercised on one.** The
   application no longer pulls the tile's position back at teardown, so a host
   that does not raise this event stops remembering drags (§33.5). macOS raises

@@ -26,6 +26,42 @@ abstract interface class Recorder {
 
 Exact API may evolve, but Flutter/domain code must not depend directly on native capture types.
 
+### The window the runner already made
+
+Not every platform fact travels over the channel. `RecorderPlatform.windowChrome`
+(`packages/recorder_platform_interface/lib/src/recorder.dart`, with the enum in
+`lib/src/models/window_chrome.dart`) says how the host framed the Flutter view:
+`overlaidWindowButtons` when the system draws its window buttons on top of it,
+`separateTitleBar` when the window keeps a caption of its own and the view sits
+below it in the client area.
+
+Each runner answers for its own window, which is the entire reason the value
+exists. `macos/Runner/MainFlutterWindow.swift` makes the title bar full-size and
+transparent, so the traffic lights land over the view and the application's
+header row has to leave the room they occupy free; `windows/runner/win32_window.cpp`
+creates a plain `WS_OVERLAPPEDWINDOW`, so nothing of the system's is painted over
+the view and that same reservation is a dead gap down the leading edge — which is
+what Windows shipped with. A runner that stopped making its title bar transparent
+would change the answer without changing platform, and a Linux runner would answer
+from its own window in the same way. That is why the property belongs to the
+registered plugin rather than to an `if (Platform.isMacOS)`, which *Platform
+checks* below forbids and `test/architecture_test.dart` enforces.
+
+**It is deliberately not a `RecorderCapabilities` field.** Capabilities describe
+what the *recorder* can do and are fetched asynchronously over the method channel;
+this is a synchronous property of a window that existed before Dart started, and
+the first frame of the first screen is laid out around it. A `Future` is the wrong
+shape for a value that can neither change nor arrive late — a header that reflowed
+once the channel answered would be a visible jump on every launch. Hence a plain
+getter with a default: `separateTitleBar`, because it is what a runner that has
+done nothing special produces, and overlaying the buttons is the thing a platform
+has to declare.
+
+The design system may not import this package, so the composition root is the
+one place that turns the enum into the header's inset token
+(`CompositionRoot.titleBarLeadingInset` → `AppWindowChrome`) — the same
+dependency direction every other platform fact takes to reach a widget.
+
 ## Platform implementations
 
 ### macOS
@@ -85,10 +121,18 @@ copies the plugin directory into `macos/Flutter/ephemeral/.packages/` at build
 time. A sibling package would not be copied and the path dependency would
 break; a child travels with its parent.
 
-On Windows the same pure code lives in `recorder_types.cpp`, which includes only
-its own header, `<algorithm>` and `<sstream>`. A standalone CTest project at
-`packages/recorder_windows/windows/test` compiles it without Flutter or Media
-Foundation.
+On Windows the pure half is not a package but a pair of translation units, which
+the standalone CTest project at `packages/recorder_windows/windows/test` compiles
+without Flutter, WASAPI or Media Foundation, each into its own binary.
+`recorder_types.cpp` is the mirror of `RecorderCore` and includes only its own
+header, `<algorithm>` and `<sstream>`. `audio_mixer.cpp` joined it after the
+first real Windows run, adding `<algorithm>` and `<cstring>` to its own header;
+it holds the resampler, the audio ring buffer and the drain ceiling, and it has
+no counterpart in the macOS pure half — `AudioMixer.swift` sits outside
+`RecorderCore`, where `swift test` cannot reach it. The mixer was outside this
+project entirely until a recording came back with a microphone track punched full
+of holes by a defect living in two of those pure functions: untestable only
+because nothing but the application build was compiling them.
 
 **Both suites assert the same properties on purpose.** The two platforms
 hand-write the same wire spellings and re-implement the same geometry, and

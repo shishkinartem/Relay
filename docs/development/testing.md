@@ -73,10 +73,22 @@ both assert the mirrored areas — the wire contract, the picture-in-picture geo
 the canvas arithmetic and the session clock — which is what catches contract drift
 between the two platforms, and which nothing in Dart can observe.
 
+The Windows side now builds **two** binaries from two pure translation units, not
+one: `recorder_types_test` over `recorder_types.cpp`, and `audio_mixer_test` over
+`audio_mixer.cpp` — which takes `recorder_types.cpp` beside it for the mix rate
+and channel count (`windows/test/CMakeLists.txt`). `ctest` runs both, so the
+commands above are unchanged. The mixer joined the project after the first real
+Windows recording came back with a microphone track full of holes — a defect
+entirely inside two pure functions that nothing but the application build had ever
+compiled.
+
 The mirroring is not total. `LetterboxRect` is asserted on Windows only; the macOS
 counterpart lives in `VideoCompositor.swift` outside `RecorderCore`, so `swift test`
-cannot reach it. Treat an assertion present on one side only as an untested area on
-the other, not as parity.
+cannot reach it. The audio ring buffer, the resampler and the drain ceiling are now
+in exactly that position: `audio_mixer_test` asserts all three, and `AudioMixer.swift`
+sits outside `RecorderCore` too, so nothing on the macOS side answers them —
+including the 250 ms drain margin the two platforms are supposed to share. Treat an
+assertion present on one side only as an untested area on the other, not as parity.
 
 A change to the wire contract, the picture-in-picture geometry, the canvas
 arithmetic or the session clock must be made and asserted on **both** sides.
