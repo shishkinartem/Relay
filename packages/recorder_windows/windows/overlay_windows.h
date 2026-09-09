@@ -124,7 +124,14 @@ class OverlayWindows {
   OverlayWindows(const OverlayWindows&) = delete;
   OverlayWindows& operator=(const OverlayWindows&) = delete;
 
-  void SetMainWindow(HWND main_window);
+  // The host window is resolved on demand, not captured once.
+  //
+  // Plugin registration runs before the runner's Flutter view has been parented
+  // into the top-level window, so asking for it there returns null — and a null
+  // stored here made SetMainWindowVisible a silent no-op for the life of the
+  // process. The main window then stayed on screen for the whole recording,
+  // showing the frozen frame it had painted before it was told to leave (§6).
+  void SetMainWindowProvider(std::function<HWND()> provider);
   void SetCommandHandler(CommandHandler handler);
   void SetMenuSelectionHandler(MenuSelectionHandler handler);
   void SetMenuDismissHandler(DismissHandler handler);
@@ -210,6 +217,13 @@ class OverlayWindows {
   void DisposeAll();
 
  private:
+  // The host window, resolved lazily and memoized. Callers must already hold
+  // `mutex_`. Const because the frame resolvers are, and memoizing is the
+  // textbook reason for `mutable`.
+  HWND MainWindowLocked() const;
+  // The display an overlay falls back to when it has no better anchor.
+  HMONITOR MonitorForHostWindow() const;
+
   // Which overlay a window is. The three behave differently once they are on
   // screen — only the strip re-clamps itself to the usable area, only the
   // preview is the picture-in-picture, only the menu re-places itself when it
@@ -439,7 +453,10 @@ class OverlayWindows {
   // a button nobody pressed.
   static UINT swallowed_button_up_;
 
-  HWND main_window_ = nullptr;
+  // Resolved through main_window_provider_ and memoized once it answers; see
+  // SetMainWindowProvider. Never read directly — call MainWindowLocked().
+  mutable HWND main_window_ = nullptr;
+  std::function<HWND()> main_window_provider_;
   bool main_window_hidden_ = false;
   // Installed once by the plugin's constructor, before any overlay exists and
   // before any thread but the platform thread can reach this object. Read

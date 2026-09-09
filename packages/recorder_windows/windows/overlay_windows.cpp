@@ -276,9 +276,30 @@ OverlayWindows::~OverlayWindows() {
   DisposeAll();
 }
 
-void OverlayWindows::SetMainWindow(HWND main_window) {
+void OverlayWindows::SetMainWindowProvider(std::function<HWND()> provider) {
   std::lock_guard<std::mutex> lock(mutex_);
-  main_window_ = main_window;
+  main_window_provider_ = std::move(provider);
+  main_window_ = nullptr;
+}
+
+// The display an overlay falls back to when it has no better anchor: the one
+// the host window is on, or the primary when there is no host window to ask.
+HMONITOR OverlayWindows::MonitorForHostWindow() const {
+  const HWND main_window = MainWindowLocked();
+  return main_window != nullptr
+             ? ::MonitorFromWindow(main_window, MONITOR_DEFAULTTONEAREST)
+             : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+}
+
+HWND OverlayWindows::MainWindowLocked() const {
+  // Memoized once it answers, and re-asked whenever the memo has gone stale:
+  // the handle outlives every overlay, but a window that has been destroyed
+  // must not be shown again through a dangling one.
+  if (main_window_ != nullptr && ::IsWindow(main_window_)) {
+    return main_window_;
+  }
+  main_window_ = main_window_provider_ ? main_window_provider_() : nullptr;
+  return main_window_;
 }
 
 void OverlayWindows::SetCommandHandler(CommandHandler handler) {
@@ -435,9 +456,7 @@ RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement,
   const bool on_remembered = MonitorGeometry(remembered, &info);
   const HMONITOR monitor =
       on_remembered ? remembered
-                    : (main_window_ != nullptr
-                           ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
-                           : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+                    : MonitorForHostWindow();
   if (!on_remembered) {
     info = GeometryOrPrimary(monitor);
   }
@@ -631,9 +650,7 @@ RECT OverlayWindows::ResolveMenuFrame(const OverlayPlacement& placement) const {
   const HWND strip = control_strip_ ? control_strip_->window() : nullptr;
   const HMONITOR monitor =
       strip != nullptr ? MonitorForStrip(strip)
-                       : (main_window_ != nullptr
-                              ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
-                              : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+                       : MonitorForHostWindow();
   const MONITORINFO info = GeometryOrPrimary(monitor);
   const double scale = MonitorScale(monitor);
   const LONG width = static_cast<LONG>(placement.width * scale + 0.5);
@@ -888,18 +905,19 @@ std::vector<std::string> OverlayWindows::ExcludedWindowIds() const {
 
 void OverlayWindows::SetMainWindowVisible(bool visible) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (main_window_ == nullptr) {
+  const HWND main_window = MainWindowLocked();
+  if (main_window == nullptr) {
     return;
   }
   if (visible) {
     if (main_window_hidden_) {
-      ::ShowWindow(main_window_, SW_SHOW);
+      ::ShowWindow(main_window, SW_SHOW);
       main_window_hidden_ = false;
     }
     return;
   }
   if (!main_window_hidden_) {
-    ::ShowWindow(main_window_, SW_HIDE);
+    ::ShowWindow(main_window, SW_HIDE);
     main_window_hidden_ = true;
   }
 }
@@ -922,8 +940,10 @@ void OverlayWindows::DisposeAll() {
     camera_preview_.reset();
   }
   has_command_anchor_.store(false);
-  if (main_window_hidden_ && main_window_ != nullptr) {
-    ::ShowWindow(main_window_, SW_SHOW);
+  if (main_window_hidden_) {
+    if (const HWND main_window = MainWindowLocked()) {
+      ::ShowWindow(main_window, SW_SHOW);
+    }
     main_window_hidden_ = false;
   }
 }
