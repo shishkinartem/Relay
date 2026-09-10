@@ -237,6 +237,89 @@ Then: force-quit Relay mid-recording (**Task Manager → End task**) and start i
 offer to repair the unfinished recording **at launch**, and once you dismiss or repair it, that
 offer must not come back over a later recording or over the Ready screen.
 
+## Checking the 2026-09-10 fixes
+
+The second Windows run, on 2026-09-09, recorded video and audio cleanly — that part is done. What
+it exposed instead was three ways to end up with no way back to the application: a second copy of
+Relay could be launched over the first, Relay left the taskbar entirely while recording, and the
+control strip did not come back for a second recording in the same process. These three checks are
+aimed at those.
+
+Reading the log for them needs one thing said first: **`relay.log` is a single file appended across
+every run.** It is not truncated at launch. Find the *last* line reading
+
+```
+environment_loaded source=… keys=…
+```
+
+and read from there down; everything above it is an earlier session. That line, with
+`settings_loaded` and `platform_registered` immediately after it, is what one launch of Relay looks
+like in the log, and checks I and K both turn on counting them.
+
+One line is new since the last build, written once where each session is prepared:
+
+```
+session_source recordingId=… sourceType=… sourceId=… pixelWidth=… pixelHeight=… microphone=… camera=… systemAudio=…
+```
+
+The previous log could not say what a session had recorded — display or window, which one, how big
+— or which inputs were live for it, and both facts had to be asked for by hand while triaging.
+
+### I. Only one Relay runs at a time
+
+With Relay already open, go back to the unzipped folder and run `relay.exe` again. Then try it once
+more from a shortcut or the taskbar, if you made one.
+
+- **Fixed:** no second window appears. The copy already running comes to the front, and if it was
+  minimized it restores.
+- **Not fixed:** a second Relay window opens beside the first. Two processes then share one
+  `settings.json`, one log file and one recordings folder, and the last one to write wins — which
+  is a defect that produces confusing results everywhere else in this script, so stop here.
+
+**The line that settles it:** the launch triple above. Count the `environment_loaded` /
+`settings_loaded` / `platform_registered` blocks in the log — there must be exactly one per launch
+you *meant*. A second block seconds after the first, with no crash and no relaunch between them, is
+a second process however the screen looked.
+
+### J. Relay keeps its taskbar button while recording
+
+Start a recording and look at the taskbar, not the desktop. This is the second half of check E: E
+asks whether the window leaves the screen, this one asks whether the application leaves with it.
+
+- **Fixed:** the Relay window is off the screen, and Relay is still listed in the taskbar. It now
+  minimizes rather than hides, so the button stays put for the whole recording. Leave it alone
+  while recording — you are only checking that it is there.
+- **Not fixed:** no Relay button anywhere in the taskbar between Start and Stop. That is the state
+  that makes a missing control strip unrecoverable: with no strip and no taskbar button, Task
+  Manager is the only way to end the recording, and the file is lost with it.
+
+**The line that settles it:** none — nothing in the log observes the taskbar, and this one is
+decided by your eyes. `session_phase from=preparing to=recording` dates the moment the window left
+the screen, so if the button disappeared at some *other* moment, say which.
+
+### K. The strip comes back for the second recording
+
+Record for ten seconds and stop. Then, **without quitting Relay**, record again. Then a third time.
+The strip's engine used to be destroyed and rebuilt for every session, which is the leading suspect
+for the strip being invisible on the second recording in a process.
+
+- **Fixed:** the strip appears every time, where you left it, with the clock starting from zero.
+  Its toggles and its Stop square work on the third recording exactly as on the first.
+- **Not fixed:** the first recording shows the strip and a later one does not — you are recording
+  with nothing on screen to stop it. Say which attempt was the first to go dark, and whether
+  quitting and relaunching Relay makes the strip come back for one more recording.
+- **Partly fixed:** the strip appears but arrives blank, frozen, or still showing the previous
+  session's clock. That is the same window with a stale engine rather than a missing one, and it is
+  worth reporting as a different thing.
+
+**The line that settles it:** `session_source`. One per session, so two of them under a single
+launch triple is proof that both recordings ran in the same process, which is the case under
+test; if a crash restarted Relay in between there is a second launch triple, and the check did
+not actually run. With the strip missing, a `session_phase from=preparing to=recording` that
+arrives anyway means the session is healthy and only the window is not showing, whereas
+`strip_command_timed_out` or `strip_command_failed` means the host stopped answering, which is a
+different fault.
+
 ## What to send back
 
 The log, which holds the structured record of everything above:
@@ -262,7 +345,9 @@ differently from the description.
 
 Send it even when everything looked right. `recorder_stats` and `capture_error` now carry the
 numbers that separate "the recording worked" from "the recording worked this time": a fault that
-degrades instead of failing is one the log reports and the screen does not.
+degrades instead of failing is one the log reports and the screen does not. `session_source` says
+what each of those recordings was actually of, which is what makes the rest of the log readable
+weeks later.
 
 `settings.json` sits in the same folder. Recordings go to `%USERPROFILE%\Videos\Relay`, which
 Explorer also reaches as **Videos → Relay** in the sidebar.

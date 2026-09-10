@@ -124,10 +124,22 @@ break; a child travels with its parent.
 On Windows the pure half is not a package but a pair of translation units, which
 the standalone CTest project at `packages/recorder_windows/windows/test` compiles
 without Flutter, WASAPI or Media Foundation, each into its own binary.
-`recorder_types.cpp` is the mirror of `RecorderCore` and includes only its own
-header, `<algorithm>` and `<sstream>`. `audio_mixer.cpp` joined it after the
-first real Windows run, adding `<algorithm>` and `<cstring>` to its own header;
-it holds the resampler, the audio ring buffer and the drain ceiling, and it has
+`recorder_types.cpp` is mostly the mirror of `RecorderCore` and includes only its
+own header, `<algorithm>` and `<sstream>`. Mostly, because it also holds what has
+no macOS counterpart to mirror: the frame pacing added after the second Windows
+run — `FrameInterval100ns`, `FrameIsDue`, `NextFrameDeadline100ns` and
+`RepeatFrameTimestamp100ns`. A macOS session is paced end to end by
+ScreenCaptureKit's `minimumFrameInterval`, which is asked for the configured rate
+and delivers on it; `Windows.Graphics.Capture` delivers when the source *changes*
+and never otherwise, so the Windows session has to pace itself in both directions
+— decimate a source faster than the configured rate, hold the last picture for one
+that has gone quiet. Both directions are timeline arithmetic and neither needs a
+window, an encoder or a device, which is the whole reason they live in the
+translation unit ctest can compile rather than inside `RecordingSession`.
+
+`audio_mixer.cpp` joined the project after the first real Windows run, adding
+`<algorithm>` and `<cstring>` to its own header; it holds the resampler, the
+audio ring buffer and the drain ceiling, and it has
 no counterpart in the macOS pure half — `AudioMixer.swift` sits outside
 `RecorderCore`, where `swift test` cannot reach it. The mixer was outside this
 project entirely until a recording came back with a microphone track punched full
