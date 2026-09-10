@@ -1304,6 +1304,40 @@ class RecorderViewModel extends ChangeNotifier with WidgetsBindingObserver {
     final bool systemAudio = s.systemAudioEnabled && systemAudioAvailable;
     final String recordingId = newId();
     _activeRecordingId = recordingId;
+    // What was actually captured, which the log has never said (§26). Triaging
+    // the second Windows run needed the source's kind and its pixel size — the
+    // whole "the video looks stretched" diagnosis turned on them — and both had
+    // to be inferred from `preferredSourceType` in the settings file, which
+    // remembers only the most recent choice and nothing about the session that
+    // produced the file. The three inputs ride along because
+    // `docs/development/compatibility-matrix.md` records their Windows cells as
+    // resting on the tester's account rather than on a line in the log.
+    //
+    // Once per session, at the point the configuration is settled: everything
+    // below this either succeeds with these values or fails, and neither
+    // outcome changes them. The title is deliberately absent — §26 permits
+    // source *identifiers* where safe, and a window's title is the document the
+    // user had open rather than an identifier.
+    _logger.info(
+      'session_source',
+      fields: <String, Object?>{
+        'recordingId': recordingId,
+        'sourceType': source.type.name,
+        'sourceId': source.id,
+        // Null rather than zero when the platform enumerated the source without
+        // a size: `MethodChannelRecorder` defaults the pixel fields to 0, and a
+        // logged `0` reads as a measurement instead of as a gap in what the
+        // catalogue was told.
+        'pixelWidth': source.pixelWidth == 0 ? null : source.pixelWidth,
+        'pixelHeight': source.pixelHeight == 0 ? null : source.pixelHeight,
+        // Effective, not requested. What the reader is trying to settle is
+        // whether a track exists in the file, and an input the permission or
+        // the capability gate above dropped produces none.
+        'microphone': microphone,
+        'camera': camera,
+        'systemAudio': systemAudio,
+      },
+    );
     // The throttle in `_logPlatformError` is per session, not per process: a
     // code logged near the end of the previous recording would otherwise
     // swallow the first occurrence of the same code in this one, which is the

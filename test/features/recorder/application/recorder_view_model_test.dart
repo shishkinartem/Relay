@@ -1187,6 +1187,86 @@ void main() {
       expect(stats.fields['droppedFrames'], 0);
       expect(stats.fields['audioDiscontinuities'], 14);
     });
+
+    /// Every `session_source` the logger holds, oldest first.
+    List<LogRecord> sessionSources(TestHarness harness) => harness
+        .logger
+        .records
+        .where((LogRecord r) => r.event == 'session_source')
+        .toList(growable: false);
+
+    test('a display session says which display, and how big', () async {
+      // The 1320-line Windows log never said what was being captured, so "the
+      // video looks stretched" had to be diagnosed from `preferredSourceType`
+      // in the settings file — which remembers the last choice, not the one
+      // this session used.
+      final TestHarness harness = await TestHarness.create();
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      final LogRecord logged = sessionSources(harness).single;
+      expect(logged.level, LogLevel.info);
+      expect(logged.fields['sourceType'], CaptureSourceType.display.name);
+      expect(logged.fields['sourceId'], 'display:1');
+      expect(logged.fields['pixelWidth'], 2560);
+      expect(logged.fields['pixelHeight'], 1600);
+      expect(
+        logged.fields['recordingId'],
+        isNotNull,
+        reason: 'it is what joins this line to the artefact lines below it',
+      );
+    });
+
+    test('a window session says which window, and which inputs', () async {
+      // Three Windows cells in `docs/development/compatibility-matrix.md` rest
+      // on the tester's account rather than on the log, which is what the three
+      // input fields are for.
+      final TestHarness harness = await TestHarness.create(
+        settings: const AppSettings(
+          microphoneEnabled: true,
+          cameraEnabled: true,
+          systemAudioEnabled: false,
+        ),
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      final CaptureSource window = harness.viewModel.sources.firstWhere(
+        (CaptureSource source) => source.type == CaptureSourceType.window,
+      );
+      harness.viewModel.selectSource(window);
+      await harness.viewModel.requestStart();
+
+      final LogRecord logged = sessionSources(harness).single;
+      expect(logged.fields['sourceType'], CaptureSourceType.window.name);
+      expect(logged.fields['sourceId'], window.id);
+      expect(logged.fields['pixelWidth'], window.pixelWidth);
+      expect(logged.fields['pixelHeight'], window.pixelHeight);
+      expect(logged.fields['microphone'], isTrue);
+      expect(logged.fields['camera'], isTrue);
+      expect(logged.fields['systemAudio'], isFalse);
+    });
+
+    test('a refused start writes no session line', () async {
+      // The line has to mean a session began. A blocking preflight is a
+      // question, and answering it with a `session_source` would put a
+      // recording in the log that never existed.
+      final TestHarness harness = await TestHarness.create(
+        permissions: FakeRecorderPermissions(
+          statuses: <PermissionKind, PermissionStatus>{
+            PermissionKind.screenRecording: PermissionStatus.denied,
+            PermissionKind.microphone: PermissionStatus.granted,
+            PermissionKind.camera: PermissionStatus.granted,
+          },
+        ),
+      );
+      addTearDown(harness.dispose);
+      await harness.initialize();
+      await harness.viewModel.requestStart();
+
+      expect(harness.viewModel.state, isA<SessionPreflight>());
+      expect(sessionSources(harness), isEmpty);
+    });
   });
 
   group('capability negotiation (§28)', () {
