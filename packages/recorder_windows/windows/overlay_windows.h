@@ -197,10 +197,12 @@ class OverlayWindows {
 
   // The overlay layer's rows of spec 19.1's census.
   //
-  // This host destroys each window and its engine on hide, so both the
-  // engines and the preview's texture return to zero after a session — a
-  // different lifetime from macOS's, and 19.1's second table permits either.
-  // `docs/development/compatibility-matrix.md` records which is which.
+  // Each window and its engine are kept for the life of the process, as
+  // docs/adr/2026-08-23-overlay-windows-as-secondary-flutter-engines.md
+  // requires and as macOS has always done, so `overlay_engines` settles at what
+  // has been shown once and stays there. 19.1's first table is the one that
+  // must return to zero, and `overlay_engines` is deliberately not in it; the
+  // preview's texture is, and `OverlayWindow::Hide` gives it back.
   //
   // The low-level hooks are counted as event monitors: they are installed for
   // exactly as long as a menu is open and are what 19.1 means by "low-level
@@ -243,6 +245,14 @@ class OverlayWindows {
                 std::function<void(double, double)> on_content_size, bool wants_texture,
                 std::string* error);
     void Destroy();
+    // Takes the window off the screen and leaves everything behind it standing:
+    // the HWND, the hosted engine, its widget tree and its last rendered frame.
+    // The counterpart of Destroy, and the one the session lifecycle uses — see
+    // OverlayWindows::HideControlStrip.
+    void Hide();
+    // Puts it back, re-asserting the topmost band a hidden window drops out of.
+    void Show();
+
     // Whether this window has a platform texture registered against its engine
     // — the camera preview's, today (spec 19.1).
     bool has_texture() const { return texture_ != nullptr; }
@@ -296,6 +306,11 @@ class OverlayWindows {
                                        LPARAM lparam);
     LRESULT HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
     void ApplyPendingContentSize();
+    // Taken when the window is shown and given back when it is hidden, so a
+    // retained overlay does not hold a registered texture between sessions
+    // (spec 19.1).
+    void AcquirePreviewTexture();
+    void ReleasePreviewTexture();
     // Hands the gesture to the operating system's own window-drag loop and
     // snaps when it ends (spec 33.3).
     void BeginMove();
@@ -340,6 +355,10 @@ class OverlayWindows {
     std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
     std::unique_ptr<flutter::TextureVariant> texture_;
     int64_t texture_id_ = -1;
+    // Whether this overlay is the one that draws camera frames. Remembered so
+    // the texture can be taken and released across a hide without the window
+    // having to be built again.
+    bool wants_texture_ = false;
     CommandHandler on_command_;
     std::function<void(double, double)> on_content_size_;
     CameraMovedHandler on_camera_moved_;
@@ -445,13 +464,22 @@ class OverlayWindows {
   static LRESULT CALLBACK MouseHook(int code, WPARAM wparam, LPARAM lparam);
   static LRESULT CALLBACK KeyboardHook(int code, WPARAM wparam, LPARAM lparam);
 
+  // The hooks are global and their callbacks are static, so the object they
+  // report to has to be reachable without an instance. Installed, removed and
+  // read only on the platform thread, which is why none of the three takes a
+  // lock — see InstallMenuHooks.
   static OverlayWindows* hooked_;
   static HHOOK mouse_hook_;
   static HHOOK keyboard_hook_;
-  // The button whose release still has to be swallowed, because its press was.
-  // Letting the release through on its own leaves the window underneath holding
-  // a button nobody pressed.
-  static UINT swallowed_button_up_;
+
+  // The last snapshot pushed to the strip, rewound at the end of a session.
+  //
+  // The strip's engine and its last rendered frame now outlive the session
+  // (docs/adr/2026-08-23-overlay-windows-as-secondary-flutter-engines.md), so
+  // without this the next session opens on the frame the previous one stopped
+  // at: a frozen clock, and a Pause and Stop that belong to a recording that
+  // has already ended. macOS rewinds the same fields for the same reason.
+  flutter::EncodableMap last_strip_state_;
 
   // Resolved through main_window_provider_ and memoized once it answers; see
   // SetMainWindowProvider. Never read directly — call MainWindowLocked().
