@@ -127,7 +127,8 @@ class RecordingSession {
   // Every row is read from the thing that owns it rather than from a flag
   // kept beside it, so a resource released without the flag being cleared
   // still reads as released. Safe from any thread: each predicate takes the
-  // lock its own object already uses, and `camera_` takes `camera_mutex_`.
+  // lock its own object already uses, `camera_` takes `camera_mutex_` and the
+  // two audio captures take `audio_mutex_`.
   ResourceCensus DebugCensus() const;
   double camera_aspect_ratio() const;
   uint32_t camera_frame_width() const;
@@ -140,8 +141,11 @@ class RecordingSession {
   // is what keeps it the same object as the tile (design 1p).
   PipDraw camera_pip_draw() const;
 
-  // Finalizes an orphaned `.part` artefact into a playable file. Returns false
-  // when nothing recoverable is in it. Never deletes the artefact (spec 18).
+  // Finalizes an orphaned `.part` artefact into a playable file, by renaming it
+  // exactly as a successful finalize would (spec 18, 19). Returns false when
+  // nothing recoverable is in it — and leaves it where it was, under its own
+  // name — and false rather than overwriting an `.mp4` that is already there.
+  // Nothing is ever deleted here (spec 18).
   static bool RecoverArtifact(const std::wstring& artifact_path, RecordingResult* result);
 
  private:
@@ -153,6 +157,20 @@ class RecordingSession {
   void SetState(SessionState state);
   void OnCapturedFrame(const CaptureEngine::Frame& frame);
   void OnPipelineError(const RecorderError& error);
+  // One optional input has stopped reaching the recording. Clears the flag that
+  // input is announced from, so EmitInputs reports what the session achieved
+  // rather than what it was configured with
+  // (docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md).
+  void OnInputLost(MediaDeviceKind kind);
+  // Opens one audio endpoint, if that input is switched on and is not already
+  // capturing. Shared by Start and the runtime toggle, so an input switched on
+  // mid-session opens exactly the way it would have at Start (spec 8, 33.2).
+  void StartAudioInput(MediaDeviceKind kind);
+  // Reports the audio inputs as unavailable when the file has no audio track to
+  // put them in (MediaWriter::audio_stream_error).
+  void ReportMissingAudioTrack();
+  // The mid-swap marker for one input. See `microphone_swap_`.
+  std::atomic<bool>& SwapFlag(MediaDeviceKind kind);
   // Starts a camera on `device_id`, wired to this session's compositor and
   // preview. Shared by prepare-time start, the runtime toggle and the swap, so
   // all three open a camera the same way.
@@ -162,6 +180,11 @@ class RecordingSession {
   bool SwapAudio(MediaDeviceKind kind, const std::string& device_id,
                  RecorderError* error);
   void EncodeLoop();
+  // Writes the last composed frame again when the source has delivered nothing
+  // for long enough that the video timeline has stopped advancing. False only
+  // when the writer refused the frame, which ends the encode loop exactly as a
+  // refused captured frame does.
+  bool RepeatLastComposedFrame(int64_t interval_100ns);
   void TimerLoop();
   void DrainAudio(bool flush);
   void StopInputs();
@@ -222,9 +245,27 @@ class RecordingSession {
   AudioRingBuffer microphone_ring_{kAudioRingFrames};
   AudioRingBuffer system_audio_ring_{kAudioRingFrames};
   AudioMixer mixer_{&microphone_ring_, &system_audio_ring_};
+
+  // Guards the two audio captures, on the terms `camera_mutex_` guards the
+  // camera: they are written by the serial worker (a device swap) and by the
+  // platform thread (an input switched on, which has to open the endpoint that
+  // was never opened for it), and read by both. Never held while a capture is
+  // stopped — that joins a thread which can be inside an error or lost callback
+  // of its own.
+  mutable std::mutex audio_mutex_;
   std::unique_ptr<AudioCapture> microphone_;
   LevelAccumulator* microphone_meter_ = nullptr;
   std::unique_ptr<AudioCapture> system_audio_;
+
+  // Set while a swap of that input is holding two devices open at once
+  // (SelectInputDevice). A capture that dies inside that window is the
+  // candidate, not the input the strip is showing — the incumbent is still
+  // recording — so the input must not be taken off the strip for it (spec
+  // 33.2). macOS spells the same rule `swapsInFlight`
+  // (RecordingSession.swift).
+  std::atomic<bool> microphone_swap_{false};
+  std::atomic<bool> system_audio_swap_{false};
+  std::atomic<bool> camera_swap_{false};
 
   // Composed frames waiting for the encoder. Capacity 2, and a frame arriving
   // at a full queue is dropped *before* it is composed: composing hands out
@@ -260,7 +301,29 @@ class RecordingSession {
   // session, not once per frame (OnCapturedFrame).
   std::atomic<bool> camera_drop_reported_{false};
   std::atomic<bool> camera_frames_seen_{false};
-  std::atomic<int64_t> last_accepted_frame_100ns_{-1};
+  // Frames the encoder refused because their instant had already been written —
+  // a captured frame that lost its slot to a repeat. Counted into
+  // `droppedFrames` with the other losses, because that is what it is: a frame
+  // that never reached the encoded timeline (spec 22).
+  std::atomic<uint64_t> stale_frame_drops_{0};
+  // When the next video frame is due on the session timeline, in the clock's
+  // 100 ns units, or -1 before the first captured frame has established a
+  // schedule. A deadline rather than the last accepted frame's instant: see
+  // NextFrameDeadline100ns. Written only by the capture thread, and reset by
+  // Prepare while no capture is running.
+  std::atomic<int64_t> next_frame_due_100ns_{-1};
+
+  // Where the encoded video timeline ends, and the canvas it ends with — what a
+  // repeat is published from and measured against (RepeatLastComposedFrame).
+  //
+  // Both belong to the encoder thread alone, which needs no lock for them: it is
+  // the only thing that writes a video sample. The canvas is one of the
+  // compositor's pooled textures, and it is only ever read while the frame queue
+  // is empty, which is what keeps the compositor from having wrapped back onto
+  // it. Prepare resets both, and Stop and Abort release the canvas — all three
+  // with that thread stopped.
+  int64_t last_written_video_100ns_ = -1;
+  winrt::com_ptr<ID3D11Texture2D> last_encoded_canvas_;
 
   int64_t audio_position_frames_ = 0;
   std::vector<float> audio_block_;

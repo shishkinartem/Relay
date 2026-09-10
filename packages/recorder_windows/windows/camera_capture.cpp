@@ -86,7 +86,7 @@ double CameraCapture::aspect_ratio() const {
 
 bool CameraCapture::Start(ID3D11Device* device, VideoCompositor* compositor,
                           PreviewHandler on_preview, ErrorHandler on_error,
-                          std::string* error) {
+                          LostHandler on_lost, std::string* error) {
   if (running_.load()) {
     return true;
   }
@@ -115,6 +115,7 @@ bool CameraCapture::Start(ID3D11Device* device, VideoCompositor* compositor,
   compositor_ = compositor;
   on_preview_ = std::move(on_preview);
   on_error_ = std::move(on_error);
+  on_lost_ = std::move(on_lost);
   stopping_.store(false);
   running_.store(true);
   {
@@ -183,16 +184,22 @@ void CameraCapture::ReleaseResources() {
 }
 
 void CameraCapture::ReportFailure(const std::string& message, HRESULT hr) {
-  if (!on_error_) {
-    return;
+  if (on_error_) {
+    RecorderError error;
+    error.code = RecorderErrorCode::kCameraUnavailable;
+    error.message = message;
+    error.details = HResultToString(hr);
+    // The camera is optional: losing it degrades the session, it does not end it.
+    error.fatal = false;
+    on_error_(error);
   }
-  RecorderError error;
-  error.code = RecorderErrorCode::kCameraUnavailable;
-  error.message = message;
-  error.details = HResultToString(hr);
-  // The camera is optional: losing it degrades the session, it does not end it.
-  error.fatal = false;
-  on_error_(error);
+  // After the error, not before it: the owner's answer to this is to take the
+  // camera off the control strip, and the reason for it should already be in
+  // the log by then (spec 23, 26). macOS orders the two the same way —
+  // `emitError` and then the reverted `emitInputs` (RecordingSession.swift).
+  if (on_lost_) {
+    on_lost_();
+  }
 }
 
 bool CameraCapture::OpenReader(std::string* error) {
@@ -352,7 +359,8 @@ bool CameraCapture::OpenReader(std::string* error) {
   return true;
 }
 
-bool CameraCapture::EnsureTexturePool(uint32_t width, uint32_t height) {
+bool CameraCapture::EnsureTexturePool(uint32_t width, uint32_t height,
+                                      std::string* error) {
   if (!textures_.empty()) {
     D3D11_TEXTURE2D_DESC existing{};
     textures_.front()->GetDesc(&existing);
@@ -390,8 +398,16 @@ bool CameraCapture::EnsureTexturePool(uint32_t width, uint32_t height) {
   desc.CPUAccessFlags = 0;
   for (size_t i = 0; i < kTexturePoolSize; ++i) {
     winrt::com_ptr<ID3D11Texture2D> texture;
-    if (FAILED(device_->CreateTexture2D(&desc, nullptr, texture.put()))) {
+    const HRESULT hr = device_->CreateTexture2D(&desc, nullptr, texture.put());
+    if (FAILED(hr)) {
       textures_.clear();
+      // Said out loud rather than returned as a bare false. Without a pool no
+      // camera pixel can reach the compositor, and this used to fail in
+      // silence: the preview went on showing a live picture for the whole
+      // recording while the file held none of it, and nothing was logged
+      // (CLAUDE.md "Camera is composited into the final video", spec 26).
+      *error = "The camera's frame buffers could not be allocated (" +
+               HResultToString(hr) + ").";
       return false;
     }
     textures_.push_back(std::move(texture));
@@ -419,11 +435,28 @@ void CameraCapture::PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t
     stride = static_cast<int32_t>(row_bytes);
   }
 
-  if (on_preview_) {
-    on_preview_(top_down, width, height, static_cast<uint32_t>(stride));
+  // The compositor is served first and the preview only afterwards. The preview
+  // used to go first and the compose path return in silence, which is how a
+  // recording ended up with a live camera on screen for its whole length and
+  // not one camera pixel in the file — the one thing the preview is not allowed
+  // to be is the livelier of the two
+  // (docs/adr/2026-08-30-user-adjustable-camera-pip.md, CLAUDE.md "Camera is
+  // composited into the final video").
+  if (compositor_ == nullptr) {
+    return;  // nothing to compose into: this frame belongs to no recording
   }
-
-  if (compositor_ == nullptr || !EnsureTexturePool(width, height)) {
+  std::string pool_error;
+  if (!EnsureTexturePool(width, height, &pool_error)) {
+    // Reported once and the capture ended, not retried per frame. The
+    // descriptor does not change between frames, so a pool that cannot be
+    // allocated for this frame cannot be allocated for the next one either, and
+    // reporting per frame would post a channel event at the camera's frame rate
+    // onto the thread the whole UI is drawn on (RecordingSession::
+    // OnCapturedFrame makes the same argument about composition failures).
+    // Ending the capture is also what takes the tile off the control strip and
+    // stops the preview, so the two go on agreeing (spec 23).
+    ReportFailure(pool_error, E_FAIL);
+    running_.store(false);
     return;
   }
   const winrt::com_ptr<ID3D11Texture2D> texture = textures_[next_texture_];
@@ -462,6 +495,13 @@ void CameraCapture::PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t
   context_->UpdateSubresource(texture.get(), 0, nullptr, upload_scratch_.data(),
                               row_bytes, 0);
   compositor_->SetCameraFrame(texture, width, height);
+
+  // Reached only by a frame the compositor already holds, which is what lets
+  // the owner read this as the camera reaching the recording rather than as the
+  // camera reaching a window (RecordingSession::StartCamera).
+  if (on_preview_) {
+    on_preview_(top_down, width, height, static_cast<uint32_t>(stride));
+  }
 }
 
 void CameraCapture::CaptureThread() {

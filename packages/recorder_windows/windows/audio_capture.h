@@ -38,6 +38,13 @@ class AudioCapture {
   enum class Kind { kMicrophone, kSystemAudio };
 
   using ErrorHandler = std::function<void(const RecorderError&)>;
+  // Raised once, after the error handler, when this endpoint has stopped
+  // reaching the recording for good. Separate from the error handler because
+  // not every error ends the capture: falling back to the default endpoint
+  // reports one and goes on recording, and an owner that took the input off the
+  // strip for that would announce a microphone that is running as unavailable
+  // (docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md).
+  using LostHandler = std::function<void()>;
 
   // `meter` is the level accumulator the plugin's input meter drains while a
   // recording is under way, so a level never costs a second handle on a device
@@ -50,7 +57,12 @@ class AudioCapture {
 
   // `clock` places every packet on the session timeline; packets captured while
   // the session is paused are discarded rather than queued.
-  bool Start(const SessionClock* clock, ErrorHandler on_error, std::string* error);
+  //
+  // Restartable: an input switched off and on again re-opens this same object,
+  // so a run that ended is joined and re-armed here rather than left behind
+  // (spec 8).
+  bool Start(const SessionClock* clock, ErrorHandler on_error, LostHandler on_lost,
+             std::string* error);
 
   // Waits for the capture thread to settle on whether it has a running stream,
   // and reports what it settled on. False on a timeout as well as on a failure.
@@ -76,7 +88,13 @@ class AudioCapture {
   void CaptureThread();
   bool OpenEndpoint(std::string* error);
   void CloseEndpoint();
+  // Reports a failure that ends this capture, and tells the owner so through
+  // `on_lost_`. Every caller stops capturing, so this clears `running_` first:
+  // an input that is about to be switched on again must not find a stream that
+  // says it is still running.
   void ReportFailure(const std::string& message, HRESULT hr);
+  // Reports a *degraded* open — the chosen endpoint is gone and the default is
+  // being recorded instead. The capture is running, so `on_lost_` is not raised.
   void ReportFallback();
   // Releases whoever is waiting in WaitUntilOpen with the answer.
   void SettleOpen(bool opened);
@@ -87,6 +105,7 @@ class AudioCapture {
   std::string device_id_;
   const SessionClock* clock_ = nullptr;
   ErrorHandler on_error_;
+  LostHandler on_lost_;
 
   winrt::com_ptr<IMMDevice> device_;
   winrt::com_ptr<IAudioClient> client_;

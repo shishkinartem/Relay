@@ -145,12 +145,26 @@ void AudioCapture::CloseEndpoint() {
 }
 
 bool AudioCapture::Start(const SessionClock* clock, ErrorHandler on_error,
-                         std::string* error) {
+                         LostHandler on_lost, std::string* error) {
   if (running_.load()) {
     return true;
   }
+  // The capture thread self-exits on every failure path — no endpoint, access
+  // denied, the device stopped delivering — leaving `running_` false but the
+  // thread still joinable. Assigning over a joinable std::thread calls
+  // std::terminate, so an input switched back on after a failure would take the
+  // process down; and the stop event of that run would leak behind the new one.
+  // CameraCapture::Start guards its own restart the same way.
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+  if (stop_event_ != nullptr) {
+    ::CloseHandle(stop_event_);
+    stop_event_ = nullptr;
+  }
   clock_ = clock;
   on_error_ = std::move(on_error);
+  on_lost_ = std::move(on_lost);
   stop_event_ = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (stop_event_ == nullptr) {
     *error = "The audio capture thread could not be created.";
@@ -211,18 +225,29 @@ void AudioCapture::Stop() {
 }
 
 void AudioCapture::ReportFailure(const std::string& message, HRESULT hr) {
-  if (!on_error_) {
-    return;
+  // Cleared before either handler runs, because every caller of this is on its
+  // way out of the capture loop. An owner that reacts by re-opening the input
+  // must see a stream that says it has stopped, not one whose thread has merely
+  // not reached its last line yet.
+  running_.store(false);
+  if (on_error_) {
+    RecorderError error;
+    error.code = kind_ == Kind::kSystemAudio ? RecorderErrorCode::kSystemAudioUnavailable
+                                             : RecorderErrorCode::kMicrophoneUnavailable;
+    error.message = message;
+    error.details = HResultToString(hr);
+    // An optional input dropping out degrades the session; the video track and
+    // the file are untouched (spec 19, 23).
+    error.fatal = false;
+    on_error_(error);
   }
-  RecorderError error;
-  error.code = kind_ == Kind::kSystemAudio ? RecorderErrorCode::kSystemAudioUnavailable
-                                           : RecorderErrorCode::kMicrophoneUnavailable;
-  error.message = message;
-  error.details = HResultToString(hr);
-  // An optional input dropping out degrades the session; the video track and
-  // the file are untouched (spec 19, 23).
-  error.fatal = false;
-  on_error_(error);
+  // After the error, not before it: the owner's answer to this is to take the
+  // input off the control strip, and the reason should already be in the log by
+  // then (spec 23, 26). macOS orders the two the same way — `emitError` and
+  // then the reverted `emitInputs` (RecordingSession.swift).
+  if (on_lost_) {
+    on_lost_();
+  }
 }
 
 void AudioCapture::ReportFallback() {
@@ -363,6 +388,12 @@ void AudioCapture::CaptureThread() {
   if (SUCCEEDED(com)) {
     ::CoUninitialize();
   }
+  // Last line of the run, so nothing that outlives it reads this capture as
+  // running. Without it an endpoint that never opened stayed `running()` for
+  // ever — the flag is set by Start and only the packet-loop failures cleared
+  // it — and an input switched back on afterwards would be skipped as already
+  // capturing (RecordingSession::StartAudioInput).
+  running_.store(false);
 }
 
 }  // namespace relay
