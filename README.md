@@ -46,71 +46,47 @@ remote copy is confirmed.
 
 ## Install
 
-Download the build for your computer from the newest entry on the
-**[Releases page](https://github.com/shishkinartem/Relay/releases)** — a `.dmg` for macOS 13.5
-or later, a `.zip` for 64-bit Windows 10 (version 2004) or later and Windows 11.
-**[The installation guide](docs/install.md)** walks through every step below, and what to do
-when one of them goes wrong.
-
 ### macOS
 
-1. Open the `.dmg` and drag **relay** onto **Applications**.
-2. Relay is not notarized by Apple, so macOS reports it as damaged until the download flag is
-   cleared:
+Requires **macOS 13.5+**.
+
+1. Download `relay-<version>-macos.dmg` from the [Releases](https://github.com/shishkinartem/Relay/releases) page.
+2. Drag **relay.app** into **Applications**.
+3. The app is not notarized, so macOS blocks the first launch. Run:
    ```bash
    xattr -dr com.apple.quarantine /Applications/relay.app
    ```
-3. Open Relay from Applications, press **Allow screen recording…**, switch **relay** on in
-   **System Settings → Privacy & Security → Screen & System Audio Recording**, then **Quit and
-   reopen Relay**. Microphone and camera are asked for when first used, and are optional.
+4. Open Relay, press **Allow screen recording…**, switch Relay on in System Settings, then
+   **Quit and reopen Relay**.
 
 ### Windows
 
-1. Extract the `.zip` and keep the **Relay** folder together — `relay.exe` needs the files beside
-   it. The Visual C++ runtime is included.
-2. Run `relay.exe`. SmartScreen does not know the publisher: **More info → Run anyway**.
-3. Screen capture needs no permission; microphone and camera follow **Settings → Privacy &
-   security**.
+Requires **Windows 10 (2004) or 11**, x64.
 
-### Then, on either
+1. Download `relay-<version>-windows-x64.zip` from the [Releases](https://github.com/shishkinartem/Relay/releases) page.
+2. Extract it and run `relay.exe` from the **Relay** folder — keep the folder together.
+3. SmartScreen does not know the publisher: **More info → Run anyway**.
 
-Open **Settings → Upload destination → Set up** and connect **Telegram** (a bot token and a chat
-id, both obtained inside the messenger) or **WebDAV** (address, user name, app password) — see
-[Connecting an upload destination](docs/upload-destinations.md). Credentials are checked before
-they are stored, and until one is connected, Send keeps the file and says why.
+To send recordings, connect Telegram or WebDAV in **Settings** —
+[how](docs/upload-destinations.md).
 
 ## Build from source
 
-Requires **Flutter 3.47.1** (the version CI pins) and the platform's own toolchain: Xcode for
-macOS, Visual Studio 2022 with the *Desktop development with C++* workload for Windows. Flutter
-does not cross-compile desktop targets — each platform is built on itself.
+Requires Flutter 3.47.1, and Xcode or Visual Studio 2022 (*Desktop development with C++*).
 
 ```bash
 flutter pub get
-flutter build macos --release
-open build/macos/Build/Products/Release/relay.app
-
-./tool/package-dmg.sh --build   # wrap it for someone else -> build/relay-<version>.dmg
-./tool/validate.sh              # format, analyze, every package's tests
+flutter build macos --release   # or: flutter build windows --release
+./tool/validate.sh              # format, analyze, tests
 ```
 
-```powershell
-# on a Windows machine
-flutter pub get
-flutter build windows --release
-```
-
-Building with no Apple account works — put `CODE_SIGN_IDENTITY = -` in a git-ignored
-`macos/Runner/Configs/Signing.local.xcconfig` — at the price of re-granting screen recording
-after every rebuild, because an ad-hoc designated requirement is the code's own hash.
-`./tool/package-dmg.sh --sign "Developer ID Application: …" --notarize <profile>` is the one
-combination that opens with a double click on any Mac, and it needs a paid membership.
+No Apple certificate? Put `CODE_SIGN_IDENTITY = -` in a git-ignored
+`macos/Runner/Configs/Signing.local.xcconfig`.
 
 ## Documentation
 
 | | |
 |---|---|
-| [Installing Relay](docs/install.md) | downloading, first launch, updating, uninstalling, troubleshooting |
 | [Connecting Telegram or WebDAV](docs/upload-destinations.md) | step-by-step setup, and lifting Telegram's 50 MB limit |
 | [Running locally](docs/development/running-locally.md) | Xcode, permissions, tests, packaging a build to send |
 | [Releasing](docs/development/releasing.md) | turning a tag into a published release |

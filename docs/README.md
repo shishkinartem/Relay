@@ -29,7 +29,7 @@ Then load only the topic relevant to the task.
 | `development/code-quality.md` | modularity, contracts, resource ownership, security |
 | `development/compatibility-matrix.md` | what is actually built and verified, per platform |
 | `development/macos-tcc-and-launchservices.md` | permission and launch-attribution diagnosis |
-| `development/how-to-install.md` | how a Flutter desktop build is made and why the Windows one is a folder — **in Russian**; installing a published build is `install.md` |
+| `development/how-to-install.md` | how a Flutter desktop build is made and why the Windows one is a folder — **in Russian**; installing a published build is the root README's *Install* |
 | `development/releasing.md` | turning a version tag into a published GitHub Release, and replacing its macOS DMG |
 | `development/windows-smoke-test.md` | the ordered first-run script for Windows, for a machine with no development tools |
 
@@ -37,7 +37,6 @@ Then load only the topic relevant to the task.
 
 | Doc | Covers |
 |---|---|
-| `install.md` | installing a published build on macOS or Windows, updating, uninstalling, troubleshooting |
 | `upload-destinations.md` | connecting Telegram or WebDAV, and lifting Telegram's 50 MB limit |
 
 ## Decisions
