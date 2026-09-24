@@ -1,12 +1,14 @@
 # Running Relay on Windows for the first time
 
-Nobody has ever started this application on Windows. CI compiles it and runs its native unit
-tests; neither tells you a recording comes out. This is the script for the first person to try,
-written for a machine with **no development tools installed**.
+This was written before anybody had started the application on Windows, as the script for the
+first person to try, on a machine with **no development tools installed**. It has since been run
+three times — 2026-09-08, 2026-09-09 and, reported on 2026-09-24, a third time — and each visit
+added the lettered checks further down for the fixes it prompted. CI compiles the application and
+runs its native unit tests; neither tells you a recording comes out, which is why this script
+still exists.
 
 Work through it in order and stop at the first step that fails — later steps assume the earlier
-ones worked. Everything here is a thing that has never been observed, so a failure is
-information, not a surprise.
+ones worked. A failure is information, not a surprise.
 
 ## Before you start
 
@@ -319,6 +321,73 @@ not actually run. With the strip missing, a `session_phase from=preparing to=rec
 arrives anyway means the session is healthy and only the window is not showing, whereas
 `strip_command_timed_out` or `strip_command_failed` means the host stopped answering, which is a
 different fault.
+
+## Checking the 2026-09-24 fixes
+
+The third run reported the build as much better, and four things with it. Two had causes that
+could be read off the source and are fixed; the other two could not, and the checks for them ask
+for what would settle them rather than for a verdict.
+
+### L. The source list shows pictures
+
+Press **Change** on the Recorder screen.
+
+- **Fixed:** every display and every window has a small picture of itself above its name.
+- **Not fixed:** the picture area is an empty frame — no hatching, no picture. The thumbnails were
+  being produced all along; GDI leaves the alpha byte of every pixel at 0, the PNG kept it, and a
+  PNG whose alpha is 0 is drawn as fully transparent.
+- **Partly fixed:** displays have pictures and some windows do not. That is expected for a window
+  that refuses to paint itself into a bitmap, and the list is allowed to show those without one —
+  say which applications.
+
+### M. The camera moves over a still window
+
+Turn the camera **On**, pick a **window** as the source — one you will not touch, a document or
+a settings page — and record for twenty seconds while moving your head and hands. Keep the mouse
+off that window. Then play the file.
+
+- **Fixed:** the camera tile moves as smoothly in the file as it did in the preview, the whole
+  time.
+- **Not fixed:** the tile stands still, or jumps only when something in the window changes — the
+  cursor passing over it, a caret blinking. That was the cause: for a window, Windows delivers a
+  frame only when the window's content changes, and the recorder held the whole last picture —
+  camera tile included — rather than just the window.
+
+Then, still over the still window, turn the camera **off** mid-recording: the tile must leave the
+file at that moment, not at the next change in the window.
+
+### N. The controls in the first seconds
+
+Not fixed — this one needs measuring first. The report was that the controls lag at first and
+then seem to warm up. Two causes fit that and the log can tell them apart, so note:
+
+- **which controls**: the control strip during a recording, the main window, or the camera sheet;
+- **when**: right after launch, during the countdown, in the first seconds of the *first*
+  recording only, or of every recording;
+- **how**: a single freeze of a second or so, or several seconds of everything feeling sluggish.
+
+A single freeze at the moment the countdown ends, on every recording, points at `start`: it runs
+on the one Win32 thread that takes the input for every Relay window, and it opens the camera and
+both audio endpoints there before it returns. Sluggishness on the first recording only, gone by the second, points at
+the strip's and the preview's own Flutter engines, which are created on their first show and then
+kept for the life of the process. The first is a code change with a known shape; the second needs
+the timing before anything is worth changing.
+
+### O. A window recording's size
+
+Record a window with Quality on **Native**, then compare the file's resolution (Explorer →
+right-click → **Properties → Details**) with that session's `session_source` line.
+
+- **Expected:** the file is exactly `pixelWidth × pixelHeight` — the window's own pixels, not
+  stretched to the screen and not scaled up. A small window makes a small video, which a player
+  may then blow up to fill its own window; that is the player.
+- **Also expected:** if the window changes size *during* the recording, the picture is fitted into
+  the size it had at the start, with black bars and scaled to fit. The output never changes size
+  mid-file.
+
+The third run reported that a Telegram window "did not swell" when recorded and a File Explorer
+window did. What "swelled" means is not yet known, and it may be either expectation above. A
+screenshot of each file playing, and the two `session_source` lines, would settle it.
 
 ## What to send back
 

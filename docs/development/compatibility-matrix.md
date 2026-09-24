@@ -14,7 +14,8 @@ Every Windows cell that says `run` was exercised on **2026-09-08** and again on
 Windows run* below for what each visit did, and for which of these cells rests on
 the log and which on the tester's account of the files. `defective` is not `not
 run` and it is not `built` either: the code path executed, and what came out was
-wrong.
+wrong. A third visit was reported on **2026-09-24** without its log, so it moves
+no cell; *The third Windows run* says what it did say.
 
 The 30 FPS cell moved on 2026-09-09, and downwards: it had been `built, not
 measured` because the first run's video track stopped after nine frames and there
@@ -386,6 +387,39 @@ K for the three fixes that answer what a user saw; the two frame-rate rows are s
 check A's numbers rather than by a check of their own.
 ```
 
+## The third Windows run
+
+Reported 2026-09-24, on the `relay-windows-x64` build of `234d7f6` — the one carrying every fix
+above. **No `relay.log` came back with it**, so everything in this section rests on the tester's
+account and on the source, and no cell in the table at the top moves on its strength: not up for
+what the tester called "much better", and not down for the four things they reported.
+
+| What the run showed | Cause | In this change set | Re-check |
+|---|---|---|---|
+| The source picker shows **no picture** for any display or window | the thumbnails were produced all along and were invisible. `BitBlt`, `StretchBlt` and `PrintWindow` write colour and leave the fourth byte of every 32 bpp pixel at 0, because to GDI it means nothing; `EncodePng` then wrote that buffer as 32 bpp **BGRA**, where it means alpha, and a PNG whose alpha is 0 everywhere is drawn as fully transparent. The card saw a non-empty thumbnail and drew it — an empty frame, not even the hatching an absent thumbnail gets. §4.1 requires the picture | **fixed** — `ForceOpaqueBgra` (`recorder_types.{h,cpp}`, three ctest cases) sets that byte before the encode, in `capture_source_enumerator.cpp` | L |
+| The camera is **sluggish in window recordings** | the repeat added after the second run held the last *composed canvas*, camera tile and all. For a window, `Windows.Graphics.Capture` delivers a frame only when the window's content changes, so over a still window the tile stood still in the file while the preview stayed live, and it stepped only when the window changed | **fixed** — the compositor keeps a copy of the last source frame and the repeat redraws it under the camera whenever a camera frame, the toggle or the tile's geometry has moved on (`VideoCompositor::Recompose`, `RecordingSession::RepeatLastComposedFrame`). Composition now happens on two threads, serialized with the queue check under one lock (`composition_mutex_`) | M |
+| The controls **lag at first, then seem to warm up** | **not settled.** Two causes fit the words and the report does not say which controls or when. `start` runs inline on the platform thread and opens the camera and both audio endpoints before it returns — the row *When the camera is opened* below — which would freeze every window once, at the end of the countdown. And the strip's and the preview's engines are created on their first show in a process and kept after it, which would make the first recording's controls slow and every later one's not | **unchanged** — the first is a known change (open the inputs in `prepare`, on the worker, as macOS does) and is not made on a guess; the second needs a timing first | N |
+| A Telegram window **"did not swell"** when recorded, and a File Explorer window did | **not understood.** At `native` quality a window records at its own pixel size, and a window resized mid-recording is fitted, scaled either way, into the canvas fixed at `prepare` (§4.4's letterbox). Either could be what was seen, and so could a player blowing a small video up to its own size | **unchanged** | O |
+
+**A finding for macOS, read off the source and not run.** The camera defect above is not
+Windows-only in shape. `RecordingSession.swift` encodes only `SCFrameStatus.complete` frames, and
+Apple documents `.idle` as the status of a frame the system did not generate "because the display
+didn't change". The camera tile is composed only into encoded frames, so over a still window a
+macOS recording should hold a still tile as well, with a variable-rate file hiding the gap rather
+than a repeat filling it. Nobody has looked; it belongs on the macOS suite, not on an assumption
+written from this side.
+
+```text
+NOT RUN, as of 2026-09-24: both fixes above, on Windows
+Reason: no Windows host here, and no MSVC toolchain or Windows SDK on this machine.
+What each has:
+- ForceOpaqueBgra is pure and in recorder_types.cpp; its three ctest cases were compiled with
+  clang and run on the development host against a stand-in <windows.h>, and a mutation that
+  makes the function a no-op fails two of them;
+- the redraw has no automated coverage. It needs a Direct3D device, a video processor and a
+  capture pool, none of which windows/test can reach. CI compiles it; check M is its test.
+```
+
 ## Input devices (§33.2)
 
 What each platform reports in `selectableDeviceKinds` / `meterableDeviceKinds`.
@@ -542,7 +576,7 @@ the Flutter- and OS-bound half so it can be executed on its own.
 | Platform | Where | How to run | State |
 |---|---|---|---|
 | macOS | `packages/recorder_macos/macos/recorder_macos/core` | `swift test` | green — **run the command for the count**, do not quote one from here. It has been hand-copied to three files and drifted three ways |
-| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | **never compiled on this host** — `cmake`, `ctest` and `cl` are all absent. CI configures, builds and runs it under MSVC on windows-2022, and it has been **green since `d187db7`** (2026-08-31); before that it had failed on every run the repository had |
+| Windows | `packages/recorder_windows/windows/test` | `cmake -S … -B build/win-tests && ctest --test-dir build/win-tests` | **never built by its own project on this host** — `cmake`, `ctest` and `cl` are all absent. The two translation units have been compiled with clang against a stand-in `<windows.h>` and a GoogleTest-shaped header and run here (last on 2026-09-24, all passing), which checks the arithmetic, not MSVC. CI configures, builds and runs it under MSVC on windows-2022, and it has been **green since `d187db7`** (2026-08-31); before that it had failed on every run the repository had |
 
 Both suites assert the same properties on purpose. The two platforms hand-write
 the same wire spellings and re-implement the same geometry, and nothing in the
@@ -969,9 +1003,12 @@ keeping because they are not documented anywhere else:
 
 ## Known gaps
 
-- **Windows is built, run twice, and defective.** It compiles and passes its
+- **Windows is built, run three times, and defective.** It compiles and passes its
   native suite in CI (green since `d187db7`), and it has now been run twice on
-  Windows 11: three recordings on 2026-09-08 and five on 2026-09-09. The first
+  Windows 11 with a log to show for it: three recordings on 2026-09-08 and five on
+  2026-09-09. A third visit, reported on 2026-09-24 without a log, found the
+  build much better and four more things, two of them fixed since — see *The
+  third Windows run*. The first
   visit's files had a video track that stopped after eight or nine frames, a
   perforated microphone track, an upside-down camera tile and the main window in
   the picture; eight fixes answered those and the second visit cleared the two
@@ -979,10 +1016,12 @@ keeping because they are not documented anywhere else:
   `audioDiscontinuities` flat. The second visit found its own five, of which the
   worst were procedural rather than in the pipeline: nothing stopped a second
   launch, three Relays recorded at once and two of the three finalizations
-  failed. Four of those five are fixed in this change set, and **none of it has
-  been re-run there**. This bullet has been wrong twice before — it once said the
-  work had never been pushed, and then that there had been "one session". See
-  *The first Windows run*, *The second Windows run* and *Not verified*.
+  failed. Four of those five were fixed after it, and the third visit ran that
+  build — but without a log, so **none of those four is confirmed by one**, and
+  nor are the two fixed after the third. This bullet has been wrong twice before
+  — it once said the work had never been pushed, and then that there had been
+  "one session". See *The first Windows run*, *The second Windows run*, *The
+  third Windows run* and *Not verified*.
 - **A `.part` is selected for recovery on its size alone, and discarding one is
   unguarded across processes.** `findIncompleteArtifacts`
   (`local_recording_store.dart`) takes every `.part` in the folder with a non-zero
