@@ -617,9 +617,14 @@ void main() {
   });
 
   testWidgets('1i ready', (WidgetTester tester) async {
-    final TestHarness harness = await TestHarness.create();
+    // A folder that reads like the real default rather than the harness's temp
+    // directory, which is what the screen prints under `On this computer` — and
+    // this render is also the README's picture of the screen. Not initialized:
+    // that would create the folder, and nothing on this screen needs it.
+    final TestHarness harness = await TestHarness.create(
+      directory: Directory('/Users/you/Movies/Relay'),
+    );
     addTearDown(harness.dispose);
-    await harness.initialize();
     await capture(
       tester,
       '1i_ready',
