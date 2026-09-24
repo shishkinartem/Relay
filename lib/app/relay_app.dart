@@ -11,6 +11,7 @@ import '../features/recorder/presentation/preflight_screen.dart';
 import '../features/recorder/presentation/recovery_screen.dart';
 import '../features/recorder/presentation/transient_screens.dart';
 import 'app_scope.dart';
+import 'window_chrome_inset.dart';
 
 /// The application shell.
 ///
@@ -32,8 +33,17 @@ class RelayApp extends StatelessWidget {
           transitionDuration: AppMotion.quick,
           pageBuilder: (BuildContext context, _, _) => builder(context),
         ),
-    builder: (BuildContext context, Widget? child) =>
-        scope(RelayTheme(child: child ?? const SizedBox.shrink())),
+    // The header row cannot work out for itself whether the host draws its
+    // own title bar, and it must not ask an operating system (§28). The
+    // composition root reads the answer off the registered platform and this
+    // is where it enters the tree: above every screen, so the very first frame
+    // is laid out around the real window rather than around one of them.
+    builder: (BuildContext context, Widget? child) => scope(
+      AppWindowChrome(
+        titleBarLeadingInset: titleBarLeadingInset,
+        child: RelayTheme(child: child ?? const SizedBox.shrink()),
+      ),
+    ),
     home: const RelayHome(),
   );
 }
@@ -48,7 +58,22 @@ class RelayHome extends StatelessWidget {
     return ListenableBuilder(
       listenable: vm,
       builder: (BuildContext context, _) {
-        if (vm.hasRecoverableArtifacts) {
+        // §18 puts this screen up *at launch*, and only there (design `1n`).
+        // The scan is repeated after every stop, so an artefact some earlier
+        // crash left behind is pending again in the middle of an ordinary
+        // session — and an ungated check outranked every session state, taking
+        // the screen away from a live recording and from the Ready screen the
+        // stop had just produced.
+        //
+        // Idle *and* preflight, because both are launch states and neither has
+        // a screen of its own worth keeping. Preflight is the one a first
+        // launch actually lands in: `initialize` scans for artefacts and then
+        // raises the blocking permission screen, so gating on idle alone would
+        // hide the offer on exactly the machine most likely to have crashed —
+        // one where screen recording has not been granted yet. Recovering an
+        // artefact finalizes a file and needs no capture permission.
+        if ((vm.state is SessionIdle || vm.state is SessionPreflight) &&
+            vm.hasRecoverableArtifacts) {
           return RecoveryScreen(artifact: vm.pendingArtifacts.first);
         }
         return switch (vm.state) {

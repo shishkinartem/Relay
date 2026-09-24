@@ -72,15 +72,57 @@ refusal reports `systemAudioUnavailable` rather than recording silence. Turning
 it *off* mid-session still only stops the contribution, so a toggle never
 restarts capture — and once a tap is open it stays open for the session.
 
-**Windows has not been brought to this rule yet.** `RecordingSession::Start`
-(`recording_session.cpp`) starts the WASAPI loopback capture — and the microphone — unconditionally,
-reading `system_audio_enabled` only in the mixer, so a Windows session records
-with both taps open whatever the strip says, and `SetSystemAudioEnabled` cannot
-fail. The two platforms therefore have different failure models for the same
-`setSystemAudioEnabled` call. Closing that gap needs a Windows toolchain to
-build and verify against; until then the behaviour above is macOS-only.
+**Windows was brought to the same rule on 2026-09-10.**
+`RecordingSession::StartAudioInput` (`recording_session.cpp`) is the only path to
+a WASAPI endpoint, and it opens nothing unless that input's flag is already set —
+the guard macOS applies in `prepare`. `Start` calls it once per input, and
+`SetMicrophoneEnabled` / `SetSystemAudioEnabled` call it again when they are
+switched on, so an input the session started without opens exactly as it would
+have at the start. Switching one *off* still leaves its stream running and only
+stops its contribution to the mix, which is §8's rule that a toggle never
+restarts capture.
+
+**What still differs is when a refusal arrives.** `AudioCapture::Start` returns as
+soon as its capture thread exists and the endpoint is opened on that thread, so on
+Windows neither toggle can fail in the call: a refused open comes back afterwards
+as a non-fatal `microphoneUnavailable` / `systemAudioUnavailable` error, with the
+`inputChanged` correction `OnInputLost` raises behind it — the degrade path of
+`../adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md` rather than a
+failed call. macOS answers `setMicrophoneEnabled` itself: `startMicrophone()`
+throws inside the call, the flag goes back to off and the error is emitted before
+it returns. It is asynchronous only for system audio, where opening the tap is an
+`SCStream.updateConfiguration` the stream applies in its own time — the shape
+Windows now has for both inputs. Neither host fails the toggle on the wire; both
+are contracted to answer `null` (`platform-channel-contract.md`).
+
+The consequence a user sees is that the Windows microphone-in-use indicator
+follows the switch too. The process holds a capture endpoint only for a recording
+the microphone was on for, so Relay should be expected under recent microphone
+activity in the privacy settings for those recordings and not for the others,
+which is the same match between what the operating system reports and what the
+strip says that the macOS paragraph above promises. A user who never switched the
+microphone on is no longer told mid-recording that it stopped responding either:
+nothing opens an endpoint for it, so nothing can fail for it. Reasoned from the
+sources, not observed — nothing on this side has been run on a Windows host
+(`../development/compatibility-matrix.md`).
 
 Use monotonic timestamps for A/V synchronization. Do not synchronize media using wall-clock time.
+
+## A source that goes quiet
+
+A window nobody is touching produces no new frames. `Windows.Graphics.Capture` delivers a frame
+only when the source's content changes, so the Windows session paces its own timeline: when the
+encoder's queue has been empty for two frame intervals it writes the last picture again
+(`RecordingSession::RepeatLastComposedFrame`). What it holds is the **source**, not the finished
+canvas — the compositor keeps a GPU copy of the last source frame and redraws it under the camera
+whenever the camera has a new frame, is toggled, or the tile moves (`VideoCompositor::Recompose`).
+Holding the canvas instead held the camera tile with it, and a still window froze the camera in
+the file while the preview stayed live. The copy is one texture-to-texture copy per composed
+frame, on the GPU, and is the one frame copy this path makes on purpose.
+
+macOS writes a variable-rate file instead: ScreenCaptureKit marks a frame with nothing new as
+`.idle`, and only `.complete` frames are encoded. Whether a still source holds a still camera tile
+there too has not been checked (`../development/compatibility-matrix.md`, *The third Windows run*).
 
 ## Backpressure
 

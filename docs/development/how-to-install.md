@@ -3,6 +3,10 @@
 Коротко и на пальцах: что происходит, когда вы говорите `flutter build`, что
 получается на выходе, и что с этим делать дальше — на macOS и на Windows.
 
+Как поставить уже готовую сборку со страницы Releases — в
+[`../install.md`](../install.md) (по-английски). Как выпустить релиз — в
+[`releasing.md`](releasing.md). Этот файл о том, откуда сборки берутся.
+
 ---
 
 ## 1. Что вообще такое «сборка» Flutter-приложения на десктопе
@@ -123,10 +127,11 @@ Security → Screen & System Audio Recording, **и после этого при�
 
 ## 3. Windows
 
-> **Важно:** на Windows этот проект **ни разу не собирался** — на машине
-> разработки нет MSVC. Код написан (`packages/recorder_windows/`, ~9 600 строк
-> C++), но не скомпилирован и не проверен. Ниже — как это устроено, а не отчёт
-> о том, что оно работает.
+> **Где это сейчас:** Windows-часть (`packages/recorder_windows/`) собирается
+> в CI на каждом прогоне и прошла три ручных прогона на Windows 11 — что
+> проверено, а что нет, записано в
+> [`compatibility-matrix.md`](compatibility-matrix.md). На машине разработки
+> (macOS) MSVC нет, так что собрать Windows-версию локально здесь нельзя.
 
 ### Что нужно на машине
 
@@ -176,12 +181,14 @@ build\windows\x64\runner\Release\
 | **Живая Windows-машина** | единственный честный способ проверить рекордер | нужна машина |
 | **Облачная Windows с GPU** (Azure, Paperspace, Shadow) | то же самое, посуточно | платно |
 
-**Начинать надо с первого.** В репозитории уже есть workflow
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) с job `build-windows`,
-который делает ровно `flutter build windows`. Он ни разу не запускался —
-проект не в git. Довести код до GitHub и один раз прогнать этот job — самый
-дешёвый способ узнать, компилируется ли Windows-часть вообще; ничего
-устанавливать не нужно.
+**Так и сделано.** Job `build-windows` в
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) делает ровно
+`flutter build windows` на каждом пуше в `main` и в каждом pull request и
+выкладывает папку `Release` артефактом `relay-windows-x64` (14 дней, нужен вход
+в GitHub). Для людей, а не для проверки изменений, сборки публикуются на
+странице Releases — их собирает
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml) по тегу
+версии.
 
 На Apple Silicon в виртуалке ставится Windows 11 ARM. Visual Studio 2022 там
 есть в ARM64-версии, и Flutter умеет `--target-platform windows-arm64`; x64
@@ -232,7 +239,11 @@ build\windows\x64\runner\Release\
 
 Отдельно про подпись: чтобы SmartScreen молчал, нужен сертификат Authenticode
 (OV или EV). Это платно и по смыслу — тот же сюжет, что Developer ID на macOS.
-В проекте ни установщик, ни подпись пока не настроены.
+В проекте ни установщик, ни подпись пока не настроены. Релизы выходят первым
+вариантом — ZIP папки `Relay` — и рядом с `relay.exe` в нём лежат DLL рантайма
+Visual C++ (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll` и соседи):
+Microsoft разрешает класть их в папку приложения, и тогда ставить
+Redistributable отдельно не нужно.
 
 Разрешений в стиле macOS на Windows нет: захват экрана не спрашивает ничего,
 микрофон и камера управляются в *Параметры → Конфиденциальность*.

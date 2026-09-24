@@ -16,7 +16,7 @@ it decides. Where the two disagree, the ADR is current and the spec is stale.
 | [Destinations are connected in the application, not in `.env`](2026-08-23-destination-credentials-in-app.md) | Accepted; the Google Drive parts superseded |
 | [Both platforms write fragmented MP4](2026-08-23-fragmented-mp4-on-both-platforms.md) | Accepted |
 | [A denied microphone or camera degrades the session instead of blocking it](2026-08-23-optional-inputs-degrade-instead-of-blocking.md) | Accepted |
-| [Overlay windows are native panels hosting secondary Flutter engines](2026-08-23-overlay-windows-as-secondary-flutter-engines.md) | Accepted |
+| [Overlay windows are native panels hosting secondary Flutter engines](2026-08-23-overlay-windows-as-secondary-flutter-engines.md) | Accepted — its engines-live-for-the-process consequence was macOS-only until 2026-09-10. Windows destroyed each window and its engine on hide and rebuilt them on the next show, which is the leading suspect for a control strip that did not come back for the second recording in a process |
 | [Telegram is the only upload destination](2026-08-23-telegram-only-destination.md) | Accepted — removed Google Drive |
 | [WebDAV is the second destination](2026-08-23-webdav-second-destination.md) | Accepted — amends the above |
 | [Overlay panels are sized once per show](2026-08-24-overlay-panels-are-sized-once-per-show.md) | Accepted — **headline rule superseded** by `2026-08-31-overlay-panels-never-shrink.md`; the rest still stands |
@@ -24,7 +24,8 @@ it decides. Where the two disagree, the ADR is current and the spec is stale.
 | [Overlay panels never shrink](2026-08-31-overlay-panels-never-shrink.md) | Accepted — amends the 2026-08-24 sizing rule |
 | [Native-resolution recording, and one bitrate rule for both platforms](2026-09-08-native-resolution-recording.md) | Accepted — amends §10, §12, §29, §31 and the `CLAUDE.md` quality invariant |
 | [Keeping the local copy after a confirmed send](2026-09-08-keeping-the-local-copy-after-sending.md) | Accepted — amends §2, §13, §24, §29, §31; implements the 2026-08-22 delete-confirmation rule rather than reopening it |
-| [A pre-recording countdown, drawn on the control strip](2026-09-08-pre-recording-countdown.md) | Accepted — amends §6, §10, §19, §29, §31; constrained by the never-shrink rule, which it does not reopen |
+| [A pre-recording countdown, drawn on the control strip](2026-09-08-pre-recording-countdown.md) | Accepted — amends §6, §10, §19, §29, §31; constrained by the never-shrink rule, which it does not reopen. **Amended in place 2026-09-10:** *Windows needs no equivalent … keeps no snapshot* stopped being true when the Windows strip started outliving its session and gained the same rewind, `countdownMs` included |
+| [A recovered artefact is renamed, not copied](2026-09-10-recovery-renames-the-artefact.md) | Accepted — decides §18's *do not silently delete* question for the recovery path, and makes §19.1's `.part` row true on Windows. **The path has never run on Windows**, in either form |
 
 ## Accepted 2026-08-30, shipped and folded
 

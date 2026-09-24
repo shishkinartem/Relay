@@ -33,11 +33,20 @@ namespace relay {
 // media-pipeline "Camera").
 class CameraCapture {
  public:
-  // Receives top-down BGRA. Called on the camera thread; implementations must
-  // copy and return, never block.
+  // Receives top-down BGRA, and only for a frame the compositor has already
+  // been given (PublishFrame): the preview and the file show the same camera or
+  // neither does (docs/adr/2026-08-30-user-adjustable-camera-pip.md). Called on
+  // the camera thread; implementations must copy and return, never block.
   using PreviewHandler = std::function<void(const uint8_t* bgra, uint32_t width,
                                             uint32_t height, uint32_t stride)>;
   using ErrorHandler = std::function<void(const RecorderError&)>;
+  // Raised once, after the error handler, when this camera has stopped reaching
+  // the recording for good. Separate from the error handler because not every
+  // error ends the capture: falling back to the default camera reports one and
+  // goes on recording, and an owner that took the camera off the strip for that
+  // would announce a camera that is running as unavailable
+  // (docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md).
+  using LostHandler = std::function<void()>;
 
   CameraCapture() = default;
   ~CameraCapture();
@@ -46,7 +55,8 @@ class CameraCapture {
   CameraCapture& operator=(const CameraCapture&) = delete;
 
   bool Start(ID3D11Device* device, VideoCompositor* compositor,
-             PreviewHandler on_preview, ErrorHandler on_error, std::string* error);
+             PreviewHandler on_preview, ErrorHandler on_error, LostHandler on_lost,
+             std::string* error);
 
   // Waits for the capture thread to settle on whether it has a stream, and
   // reports what it settled on. False on a timeout as well as on a failure.
@@ -76,9 +86,11 @@ class CameraCapture {
  private:
   void CaptureThread();
   bool OpenReader(std::string* error);
-  bool EnsureTexturePool(uint32_t width, uint32_t height);
+  bool EnsureTexturePool(uint32_t width, uint32_t height, std::string* error);
   void PublishFrame(const uint8_t* pixels, uint32_t width, uint32_t height,
                     int32_t stride);
+  // Reports a failure that ends this camera's contribution to the recording,
+  // and tells the owner so through `on_lost_`. Every caller stops capturing.
   void ReportFailure(const std::string& message, HRESULT hr);
   void ReleaseResources();
   // Releases whoever is waiting in WaitUntilOpen with the answer.
@@ -91,6 +103,7 @@ class CameraCapture {
   std::string device_id_;
   PreviewHandler on_preview_;
   ErrorHandler on_error_;
+  LostHandler on_lost_;
 
   // Three staging textures rotate so the compositor can hold the newest frame
   // while the next one is uploaded. Bounded and allocated once.
@@ -98,6 +111,11 @@ class CameraCapture {
   std::vector<winrt::com_ptr<ID3D11Texture2D>> textures_;
   size_t next_texture_ = 0;
   std::vector<uint8_t> flip_scratch_;
+  // One frame's worth of rows, masked and top-down, staged for the single
+  // UpdateSubresource that uploads it. A D3D11_USAGE_DEFAULT texture cannot be
+  // mapped, and it has to be DEFAULT to be legal as a video-processor input
+  // (see the descriptor in camera_capture.cpp).
+  std::vector<uint8_t> upload_scratch_;
 
   std::thread thread_;
   std::atomic<bool> running_{false};

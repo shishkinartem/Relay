@@ -171,11 +171,15 @@ bool MediaWriter::OpenInternal(bool allow_hardware, ID3D11Device* device,
   }
 
   has_audio_stream_ = false;
+  audio_stream_error_.clear();
   if (config_.has_audio) {
     winrt::com_ptr<IMFMediaType> audio_out;
     winrt::com_ptr<IMFMediaType> audio_in;
-    if (SUCCEEDED(::MFCreateMediaType(audio_out.put())) &&
-        SUCCEEDED(::MFCreateMediaType(audio_in.put()))) {
+    HRESULT audio_hr = ::MFCreateMediaType(audio_out.put());
+    if (SUCCEEDED(audio_hr)) {
+      audio_hr = ::MFCreateMediaType(audio_in.put());
+    }
+    if (SUCCEEDED(audio_hr)) {
       audio_out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
       audio_out->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
       audio_out->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, kAudioBitsPerSample);
@@ -194,10 +198,24 @@ bool MediaWriter::OpenInternal(bool allow_hardware, ID3D11Device* device,
       audio_in->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
                           kMixSampleRate * kMixChannels * kAudioBitsPerSample / 8);
 
-      if (SUCCEEDED(writer_->AddStream(audio_out.get(), &audio_stream_)) &&
-          SUCCEEDED(writer_->SetInputMediaType(audio_stream_, audio_in.get(), nullptr))) {
-        has_audio_stream_ = true;
+      audio_hr = writer_->AddStream(audio_out.get(), &audio_stream_);
+      if (SUCCEEDED(audio_hr)) {
+        audio_hr = writer_->SetInputMediaType(audio_stream_, audio_in.get(), nullptr);
       }
+    }
+    // The failure is kept, not swallowed. An installation with no AAC encoder —
+    // the Windows editions docs/development/compatibility-matrix.md names, where
+    // the Media Feature Pack is absent — answers MF_E_TOPO_CODEC_NOT_FOUND
+    // here, and every WriteAudioFrames after it returns true for a stream that
+    // does not exist. That produced a soundless recording, a normal Ready
+    // screen, and not one line in the log (spec 26). Video is untouched: this
+    // is an optional input degrading, not a failed Open (spec 23).
+    if (SUCCEEDED(audio_hr)) {
+      has_audio_stream_ = true;
+    } else {
+      audio_stream_error_ =
+          "No AAC audio encoder accepted the mixed track (" + HResultToString(audio_hr) +
+          ").";
     }
   }
 
@@ -293,7 +311,7 @@ bool MediaWriter::CopyTextureToBuffer(ID3D11Texture2D* nv12,
 }
 
 bool MediaWriter::WriteVideoFrame(ID3D11Texture2D* nv12, int64_t timestamp_100ns,
-                                  int64_t duration_100ns, RecorderError* error) {
+                                  RecorderError* error) {
   if (!writing_ || nv12 == nullptr) {
     return false;
   }
@@ -324,8 +342,10 @@ bool MediaWriter::WriteVideoFrame(ID3D11Texture2D* nv12, int64_t timestamp_100ns
     hr = sample->AddBuffer(buffer.get());
   }
   if (SUCCEEDED(hr)) {
+    // No SetSampleDuration: see the declaration. The encoder still knows its
+    // nominal rate — MF_MT_FRAME_RATE is on both media types — so rate control
+    // is unaffected.
     sample->SetSampleTime(timestamp_100ns);
-    sample->SetSampleDuration(duration_100ns);
     hr = writer_->WriteSample(video_stream_, sample.get());
   }
   if (FAILED(hr)) {
@@ -426,6 +446,7 @@ void MediaWriter::ResetForRetry() {
   device_manager_ = nullptr;
   use_dxgi_buffers_ = false;
   has_audio_stream_ = false;
+  audio_stream_error_.clear();
   writing_ = false;
 }
 

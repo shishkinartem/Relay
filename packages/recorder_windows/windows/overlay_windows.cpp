@@ -230,7 +230,6 @@ bool PointIsOverOwnOverlay(POINT point) {
 OverlayWindows* OverlayWindows::hooked_ = nullptr;
 HHOOK OverlayWindows::mouse_hook_ = nullptr;
 HHOOK OverlayWindows::keyboard_hook_ = nullptr;
-UINT OverlayWindows::swallowed_button_up_ = 0;
 
 OverlayPlacement OverlayPlacement::FromMap(const flutter::EncodableMap& map) {
   OverlayPlacement placement;
@@ -276,9 +275,30 @@ OverlayWindows::~OverlayWindows() {
   DisposeAll();
 }
 
-void OverlayWindows::SetMainWindow(HWND main_window) {
+void OverlayWindows::SetMainWindowProvider(std::function<HWND()> provider) {
   std::lock_guard<std::mutex> lock(mutex_);
-  main_window_ = main_window;
+  main_window_provider_ = std::move(provider);
+  main_window_ = nullptr;
+}
+
+// The display an overlay falls back to when it has no better anchor: the one
+// the host window is on, or the primary when there is no host window to ask.
+HMONITOR OverlayWindows::MonitorForHostWindow() const {
+  const HWND main_window = MainWindowLocked();
+  return main_window != nullptr
+             ? ::MonitorFromWindow(main_window, MONITOR_DEFAULTTONEAREST)
+             : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+}
+
+HWND OverlayWindows::MainWindowLocked() const {
+  // Memoized once it answers, and re-asked whenever the memo has gone stale:
+  // the handle outlives every overlay, but a window that has been destroyed
+  // must not be shown again through a dangling one.
+  if (main_window_ != nullptr && ::IsWindow(main_window_)) {
+    return main_window_;
+  }
+  main_window_ = main_window_provider_ ? main_window_provider_() : nullptr;
+  return main_window_;
 }
 
 void OverlayWindows::SetCommandHandler(CommandHandler handler) {
@@ -325,7 +345,6 @@ void OverlayWindows::InstallMenuHooks() {
     return;
   }
   hooked_ = this;
-  swallowed_button_up_ = 0;
   const HINSTANCE instance = ::GetModuleHandleW(nullptr);
   mouse_hook_ =
       ::SetWindowsHookExW(WH_MOUSE_LL, &OverlayWindows::MouseHook, instance, 0);
@@ -350,7 +369,6 @@ void OverlayWindows::RemoveMenuHooks() {
     keyboard_hook_ = nullptr;
   }
   hooked_ = nullptr;
-  swallowed_button_up_ = 0;
 }
 
 LRESULT CALLBACK OverlayWindows::MouseHook(int code, WPARAM wparam, LPARAM lparam) {
@@ -360,22 +378,10 @@ LRESULT CALLBACK OverlayWindows::MouseHook(int code, WPARAM wparam, LPARAM lpara
     return ::CallNextHookEx(nullptr, code, wparam, lparam);
   }
   const UINT message = static_cast<UINT>(wparam);
-  if (swallowed_button_up_ != 0 && message == swallowed_button_up_) {
-    // The press that closed the menu was swallowed, so its release is too: a
-    // window left holding a button nobody pressed is worse than a lost click.
-    swallowed_button_up_ = 0;
-    return 1;
-  }
-  UINT release = 0;
   switch (message) {
     case WM_LBUTTONDOWN:
-      release = WM_LBUTTONUP;
-      break;
     case WM_RBUTTONDOWN:
-      release = WM_RBUTTONUP;
-      break;
     case WM_MBUTTONDOWN:
-      release = WM_MBUTTONUP;
       break;
     default:
       return ::CallNextHookEx(nullptr, code, wparam, lparam);
@@ -386,12 +392,18 @@ LRESULT CALLBACK OverlayWindows::MouseHook(int code, WPARAM wparam, LPARAM lpara
     // that replaces it both have to receive their click.
     return ::CallNextHookEx(nullptr, code, wparam, lparam);
   }
-  swallowed_button_up_ = release;
   hooked_->RequestMenuDismissal(/*host_initiated=*/true);
-  // Not forwarded to what is underneath (spec 33.7): the click closed a sheet
-  // the user had open, and pressing whatever was behind it as well is a second
-  // action they did not ask for.
-  return 1;
+  // Observed and passed on. §33.7 settles this in bold — "The click outside is
+  // deliberately not swallowed" — and gives the reason: consuming it makes a
+  // click-eating surface out of the very application being recorded, where a
+  // swallowed click is indistinguishable from the recorder having frozen. The
+  // sheet closing AND the click landing is the lesser surprise, and it is what
+  // macOS does by construction: `addGlobalMonitorForEvents` cannot consume an
+  // event at all, and the local monitor returns every one it sees.
+  //
+  // This hook used to return 1 here, and swallow the matching button-up after
+  // it, while citing the section that forbids both.
+  return ::CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
 LRESULT CALLBACK OverlayWindows::KeyboardHook(int code, WPARAM wparam,
@@ -405,9 +417,13 @@ LRESULT CALLBACK OverlayWindows::KeyboardHook(int code, WPARAM wparam,
     return ::CallNextHookEx(nullptr, code, wparam, lparam);
   }
   hooked_->RequestMenuDismissal(/*host_initiated=*/true);
-  // Esc closed the sheet and nothing else. Forwarding it as well would also
-  // cancel whatever dialog the recorded application happens to have open.
-  return 1;
+  // Passed on for the same reason the click is. A low-level keyboard hook is
+  // global, so swallowing Esc swallows it everywhere — including in the
+  // application being recorded, which is exactly the harm §33.7 rules out for
+  // the click. macOS never has the choice: it watches for Esc with a *local*
+  // monitor, so a press aimed at another application is not its business, and
+  // the one press it does see it returns.
+  return ::CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
 RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement,
@@ -435,9 +451,7 @@ RECT OverlayWindows::ResolveFrame(const OverlayPlacement& placement,
   const bool on_remembered = MonitorGeometry(remembered, &info);
   const HMONITOR monitor =
       on_remembered ? remembered
-                    : (main_window_ != nullptr
-                           ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
-                           : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+                    : MonitorForHostWindow();
   if (!on_remembered) {
     info = GeometryOrPrimary(monitor);
   }
@@ -490,6 +504,17 @@ bool OverlayWindows::ShowControlStrip(const OverlayPlacement& placement,
   const RECT frame = ResolveFrame(resolved, &from_remembered_position);
   if (control_strip_) {
     control_strip_->SetFrame(frame);
+    // The window survives a session now, so a show is a re-show: it has to come
+    // back out of hiding and back into the topmost band.
+    control_strip_->Show();
+    // And it has to be told what to draw. The rewind at the end of the previous
+    // session corrected the snapshot; pushing it here is what makes the strip
+    // render the corrected one rather than whatever frame it was hidden on.
+    // macOS pushes at show for the same reason.
+    if (!last_strip_state_.empty()) {
+      control_strip_->Invoke("controlStripState",
+                             flutter::EncodableValue(last_strip_state_));
+    }
     RememberStripPlacement(resolved, from_remembered_position);
     return true;
   }
@@ -550,17 +575,34 @@ void OverlayWindows::RememberStripPlacement(const OverlayPlacement& placement,
 void OverlayWindows::HideControlStrip() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (control_strip_) {
-    control_strip_->Destroy();
-    control_strip_.reset();
+    // Rewound before the window goes, while the engine can still draw it. The
+    // session-scoped fields only: the input flags are the user's settings and
+    // the next session's first push corrects them anyway. Without this the
+    // strip comes back on the frame it stopped at — Stop already pressed, a
+    // frozen clock — for the whole of the next session's start (macOS rewinds
+    // exactly these three, OverlayWindows.swift hideControlStrip).
+    if (!last_strip_state_.empty()) {
+      last_strip_state_[flutter::EncodableValue("isStopping")] =
+          flutter::EncodableValue(false);
+      last_strip_state_[flutter::EncodableValue("isPaused")] =
+          flutter::EncodableValue(false);
+      last_strip_state_[flutter::EncodableValue("elapsedMs")] =
+          flutter::EncodableValue(static_cast<int64_t>(0));
+      // Erased rather than nulled: a present null decodes as a value and would
+      // open the next session's strip mid-countdown.
+      last_strip_state_.erase(flutter::EncodableValue("countdownMs"));
+      control_strip_->Invoke("controlStripState",
+                             flutter::EncodableValue(last_strip_state_));
+    }
+    control_strip_->Hide();
   }
-  // The menu hangs off the strip and cannot outlive it: the session ending is
-  // exactly the case 33.7 spells "the sheet closes with the session". Closed
-  // here rather than deferred, because the call that asked for it is on the
-  // platform thread and nothing of the menu's is on the stack.
+  // The menu hangs off the strip and cannot outlive it on screen: the session
+  // ending is exactly the case 33.7 spells "the sheet closes with the session".
+  // The hooks are global and must come off with it; the window and its engine
+  // stay, like the strip's.
   if (input_menu_) {
     RemoveMenuHooks();
-    input_menu_->Destroy();
-    input_menu_.reset();
+    input_menu_->Hide();
   }
   has_command_anchor_.store(false);
 }
@@ -572,6 +614,9 @@ bool OverlayWindows::ShowCameraPreview(const OverlayPlacement& placement,
   if (camera_preview_) {
     camera_preview_->SetPreviewGeometry(preview_geometry_);
     camera_preview_->SetFrame(frame);
+    // Re-asserts the topmost band, which is shared and re-ordered by whichever
+    // topmost window called SetWindowPos last.
+    camera_preview_->Show();
     return true;
   }
   auto window = std::make_unique<OverlayWindow>(kCameraPreviewEntrypoint,
@@ -605,8 +650,11 @@ bool OverlayWindows::MoveCameraPreview(const OverlayPlacement& placement) {
 void OverlayWindows::HideCameraPreview() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (camera_preview_) {
-    camera_preview_->Destroy();
-    camera_preview_.reset();
+    // Hidden, not destroyed: the ADR has the overlay engines living for the
+    // process, and a camera toggle rebuilding this one is exactly what it says
+    // must not happen. Hide releases the texture, so the census still reads
+    // zero between sessions.
+    camera_preview_->Hide();
   }
 }
 
@@ -631,9 +679,7 @@ RECT OverlayWindows::ResolveMenuFrame(const OverlayPlacement& placement) const {
   const HWND strip = control_strip_ ? control_strip_->window() : nullptr;
   const HMONITOR monitor =
       strip != nullptr ? MonitorForStrip(strip)
-                       : (main_window_ != nullptr
-                              ? ::MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST)
-                              : ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+                       : MonitorForHostWindow();
   const MONITORINFO info = GeometryOrPrimary(monitor);
   const double scale = MonitorScale(monitor);
   const LONG width = static_cast<LONG>(placement.width * scale + 0.5);
@@ -675,6 +721,10 @@ bool OverlayWindows::ShowInputMenu(const OverlayPlacement& placement,
     const RECT frame = ResolveMenuFrame(placement);
     input_menu_->SetFrame(frame);
     input_menu_->Invoke("inputMenuState", flutter::EncodableValue(state));
+    input_menu_->Show();
+    // Idempotent, and needed on the path where the sheet was hidden with the
+    // session rather than re-placed while open.
+    InstallMenuHooks();
     return true;
   }
   auto window = std::make_unique<OverlayWindow>(kInputMenuEntrypoint, "input_menu",
@@ -697,7 +747,7 @@ bool OverlayWindows::ShowInputMenu(const OverlayPlacement& placement,
   }
   input_menu_->Invoke("inputMenuState", flutter::EncodableValue(state));
   // Only once the window is really on screen: a hook installed for a menu that
-  // failed to open would swallow the next click the user made anywhere.
+  // failed to open would report a dismissal for a sheet that never appeared.
   InstallMenuHooks();
   return true;
 }
@@ -717,12 +767,11 @@ void OverlayWindows::HideInputMenu() {
     return;
   }
   RemoveMenuHooks();
-  input_menu_->Destroy();
-  input_menu_.reset();
+  input_menu_->Hide();
 }
 
 void OverlayWindows::NudgeControlStrip(double dx, double dy) {
-  std::unique_ptr<OverlayWindow> menu;
+  bool dismissed = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!control_strip_ || control_strip_->window() == nullptr) {
@@ -732,15 +781,17 @@ void OverlayWindows::NudgeControlStrip(double dx, double dy) {
     // actually on: eight points is eight points on every monitor.
     const double scale = MonitorScale(MonitorForStrip(control_strip_->window()));
     control_strip_->Nudge(RoundToPixel(dx * scale), RoundToPixel(dy * scale));
-    // The strip moved, so the sheet closes (spec 33.4). Taken out under the
-    // lock and destroyed outside it, like every other teardown here.
+    // The strip moved, so the sheet closes (spec 33.4). Hidden rather than
+    // destroyed — the window and its engine outlive the session now — and safe
+    // to do under the lock, because hiding a window is a ShowWindow and not a
+    // teardown that could run inside a stack that window owns.
     if (input_menu_) {
       RemoveMenuHooks();
-      menu = std::move(input_menu_);
+      input_menu_->Hide();
+      dismissed = true;
     }
   }
-  if (menu) {
-    menu->Destroy();
+  if (dismissed) {
     // The strip moved out from under a sheet the application still believes is
     // open, and a keyboard nudge is the strip moving exactly as a drag is
     // (spec 33.3, 33.4). Reported after the lock is released, like every other
@@ -785,6 +836,9 @@ bool OverlayWindows::ControlStripPosition(std::string* display_id, double* x,
 
 void OverlayWindows::UpdateControlStrip(const flutter::EncodableMap& state) {
   std::lock_guard<std::mutex> lock(mutex_);
+  // Remembered whether or not there is a window to draw it, so the rewind at
+  // the end of the session has something to rewind.
+  last_strip_state_ = state;
   if (control_strip_) {
     control_strip_->Invoke("controlStripState", flutter::EncodableValue(state));
   }
@@ -888,18 +942,29 @@ std::vector<std::string> OverlayWindows::ExcludedWindowIds() const {
 
 void OverlayWindows::SetMainWindowVisible(bool visible) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (main_window_ == nullptr) {
+  const HWND main_window = MainWindowLocked();
+  if (main_window == nullptr) {
     return;
   }
   if (visible) {
     if (main_window_hidden_) {
-      ::ShowWindow(main_window_, SW_SHOW);
+      ::ShowWindow(main_window, SW_RESTORE);
       main_window_hidden_ = false;
     }
     return;
   }
   if (!main_window_hidden_) {
-    ::ShowWindow(main_window_, SW_HIDE);
+    // Minimized, not hidden. §6 wants the panel off the screen for the length
+    // of the recording, and both do that — but SW_HIDE takes the taskbar button
+    // with it, and then Relay is not on screen, not in the taskbar and not in
+    // Alt+Tab. That is indistinguishable from having crashed, and on the second
+    // Windows run the user reasonably concluded it had and launched three more
+    // copies. A minimized window is still rendered by nothing, so it cannot
+    // reach a display recording, and it is still somewhere to click to get back.
+    //
+    // macOS has never had to choose: `orderOut` takes the window off the screen
+    // and the application keeps its Dock tile regardless.
+    ::ShowWindow(main_window, SW_SHOWMINNOACTIVE);
     main_window_hidden_ = true;
   }
 }
@@ -922,8 +987,10 @@ void OverlayWindows::DisposeAll() {
     camera_preview_.reset();
   }
   has_command_anchor_.store(false);
-  if (main_window_hidden_ && main_window_ != nullptr) {
-    ::ShowWindow(main_window_, SW_SHOW);
+  if (main_window_hidden_) {
+    if (const HWND main_window = MainWindowLocked()) {
+      ::ShowWindow(main_window, SW_RESTORE);
+    }
     main_window_hidden_ = false;
   }
 }
@@ -1011,6 +1078,15 @@ bool OverlayWindows::OverlayWindow::Create(
   window_class.hInstance = instance;
   window_class.lpszClassName = kOverlayClassName;
   window_class.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+  // A background brush, so that an overlay whose engine has not presented yet
+  // is a blank panel rather than nothing at all. Left zero, WM_ERASEBKGND does
+  // nothing and the window is see-through: it is on screen, it is topmost and
+  // it takes the clicks aimed at whatever is behind it, and the user cannot see
+  // that any of that is happening. That is what a strip nobody could find
+  // looked like on the second Windows run, and it is worth ruling out by
+  // construction whatever else goes wrong in an engine.
+  window_class.hbrBackground =
+      reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_WINDOW + 1));
   ::RegisterClassExW(&window_class);
 
   const int width = (std::max)(1L, frame.right - frame.left);
@@ -1065,33 +1141,91 @@ bool OverlayWindows::OverlayWindow::Create(
         HandleCall(call, std::move(result));
       });
 
-  if (wants_texture) {
-    texture_ = std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
-        [this](size_t /*width*/, size_t /*height*/) -> const FlutterDesktopPixelBuffer* {
-          frame_mutex_.lock();
-          if (frame_pixels_.empty()) {
-            frame_mutex_.unlock();
-            return nullptr;
-          }
-          descriptor_.buffer = frame_pixels_.data();
-          descriptor_.width = frame_width_;
-          descriptor_.height = frame_height_;
-          descriptor_.release_context = this;
-          descriptor_.release_callback = [](void* context) {
-            static_cast<OverlayWindow*>(context)->frame_mutex_.unlock();
-          };
-          return &descriptor_;
-        }));
-    texture_id_ = registrar_->texture_registrar()->RegisterTexture(texture_.get());
-  }
-
-  ::ShowWindow(window_, SW_SHOWNOACTIVATE);
-  ::SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  wants_texture_ = wants_texture;
+  AcquirePreviewTexture();
+  Show();
   // The fraction to re-resolve this window against is seeded by the caller,
   // which is the only place that knows whether the placement restored a
   // position or fell back to the anchor.
   return true;
+}
+
+// Registers the preview's pixel-buffer texture with this engine's registry.
+//
+// Split out of Create because the window now outlives a session: the texture is
+// released when the preview is hidden and taken again when it comes back, so
+// §19.1's census still reads zero registered textures between sessions while
+// the engine behind it stays up. Idempotent.
+void OverlayWindows::OverlayWindow::AcquirePreviewTexture() {
+  if (!wants_texture_ || texture_ != nullptr || registrar_ == nullptr) {
+    return;
+  }
+  texture_ = std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
+      [this](size_t /*width*/, size_t /*height*/) -> const FlutterDesktopPixelBuffer* {
+        frame_mutex_.lock();
+        if (frame_pixels_.empty()) {
+          frame_mutex_.unlock();
+          return nullptr;
+        }
+        descriptor_.buffer = frame_pixels_.data();
+        descriptor_.width = frame_width_;
+        descriptor_.height = frame_height_;
+        descriptor_.release_context = this;
+        descriptor_.release_callback = [](void* context) {
+          static_cast<OverlayWindow*>(context)->frame_mutex_.unlock();
+        };
+        return &descriptor_;
+      }));
+  texture_id_ = registrar_->texture_registrar()->RegisterTexture(texture_.get());
+}
+
+// The counterpart. The id is meaningful only inside this engine's registry, so
+// the widget that was drawing it is told by the next state push, which carries
+// whatever id the following Acquire produced.
+void OverlayWindows::OverlayWindow::ReleasePreviewTexture() {
+  if (texture_id_ >= 0 && registrar_ != nullptr) {
+    registrar_->texture_registrar()->UnregisterTexture(texture_id_);
+    texture_id_ = -1;
+  }
+  texture_ = nullptr;
+}
+
+void OverlayWindows::OverlayWindow::Show() {
+  if (window_ == nullptr) {
+    return;
+  }
+  // Before the window is on screen, so the id is registered by the time the
+  // caller pushes the state that carries it.
+  AcquirePreviewTexture();
+  ::ShowWindow(window_, SW_SHOWNOACTIVATE);
+  // Re-asserted on every show, not only the first. A window that has been
+  // hidden leaves the topmost band, and the band is shared: whichever topmost
+  // window called SetWindowPos last is in front. Asking again is what puts an
+  // overlay back above the application it is floating over.
+  ::SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void OverlayWindows::OverlayWindow::Hide() {
+  if (window_ == nullptr) {
+    return;
+  }
+  ::ShowWindow(window_, SW_HIDE);
+  // §19.1 counts registered textures among the resources a session must give
+  // back, and this window no longer goes away to give it back for us.
+  ReleasePreviewTexture();
+  // The pixels go with it. A retained preview that kept its buffer would open
+  // the next session on the last frame of the previous one — a still of the
+  // user, from a recording they have already ended — until the camera delivers
+  // its first frame. Destroying the window used to take care of this; nothing
+  // does now except this line. macOS clears its texture id for the same reason
+  // (OverlayWindows.swift, hideCameraPreview).
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    frame_pixels_.clear();
+    frame_width_ = 0;
+    frame_height_ = 0;
+  }
 }
 
 void OverlayWindows::OverlayWindow::Destroy() {
@@ -1099,11 +1233,7 @@ void OverlayWindows::OverlayWindow::Destroy() {
   // stack reads this flag when that loop returns, and everything below is a
   // reason for it not to touch this object again.
   *alive_ = false;
-  if (texture_id_ >= 0 && registrar_ != nullptr) {
-    registrar_->texture_registrar()->UnregisterTexture(texture_id_);
-    texture_id_ = -1;
-  }
-  texture_ = nullptr;
+  ReleasePreviewTexture();
   if (channel_) {
     channel_->SetMethodCallHandler(nullptr);
     channel_ = nullptr;

@@ -706,6 +706,61 @@ TEST(ApplyCameraMaskRow, AnUnconfiguredMaskLeavesTheFrameOpaque) {
   }
 }
 
+// ── source thumbnails ────────────────────────────────────────────────────────
+
+TEST(ForceOpaqueBgra, AGdiCaptureBecomesAPictureRatherThanATransparentFrame) {
+  // What GDI hands back: the colour of every pixel, and a zero in the byte the
+  // PNG encoder reads as alpha. Encoded as it came, every thumbnail in the
+  // picker was an empty frame.
+  constexpr uint32_t kWidth = 3;
+  constexpr uint32_t kHeight = 2;
+  constexpr uint32_t kStride = kWidth * 4;
+  std::vector<uint8_t> pixels(kStride * kHeight);
+  for (size_t i = 0; i < pixels.size(); ++i) {
+    pixels[i] = (i % 4 == 3) ? uint8_t{0} : static_cast<uint8_t>(i + 1);
+  }
+  const std::vector<uint8_t> before = pixels;
+
+  ForceOpaqueBgra(pixels.data(), kWidth, kHeight, kStride);
+
+  for (size_t i = 0; i < pixels.size(); ++i) {
+    if (i % 4 == 3) {
+      EXPECT_EQ(pixels[i], 0xFF) << "alpha of pixel " << i / 4;
+    } else {
+      EXPECT_EQ(pixels[i], before[i]) << "a colour byte moved, at " << i;
+    }
+  }
+}
+
+TEST(ForceOpaqueBgra, RowPaddingPastTheImageIsLeftAlone) {
+  // A stride wider than the row is ordinary for a bitmap, and the bytes past
+  // the last pixel belong to nobody's alpha.
+  constexpr uint32_t kWidth = 2;
+  constexpr uint32_t kHeight = 2;
+  constexpr uint32_t kStride = kWidth * 4 + 4;
+  std::vector<uint8_t> pixels(kStride * kHeight, 0x11);
+
+  ForceOpaqueBgra(pixels.data(), kWidth, kHeight, kStride);
+
+  for (uint32_t row = 0; row < kHeight; ++row) {
+    const uint8_t* line = pixels.data() + row * kStride;
+    EXPECT_EQ(line[3], 0xFF);
+    EXPECT_EQ(line[7], 0xFF);
+    for (uint32_t pad = kWidth * 4; pad < kStride; ++pad) {
+      EXPECT_EQ(line[pad], 0x11) << "row " << row << ", padding byte " << pad;
+    }
+  }
+}
+
+TEST(ForceOpaqueBgra, AStrideTooShortForTheRowIsRefusedRatherThanOverrun) {
+  std::vector<uint8_t> pixels(8, 0);
+  ForceOpaqueBgra(pixels.data(), 4, 2, 4);
+  for (const uint8_t byte : pixels) {
+    EXPECT_EQ(byte, 0);
+  }
+  ForceOpaqueBgra(nullptr, 4, 2, 16);  // and a null image is not a crash
+}
+
 // ── letterboxing ─────────────────────────────────────────────────────────────
 
 TEST(LetterboxRect, TheSourceShapeIsPreservedAndCentred) {
@@ -1396,6 +1451,217 @@ TEST(SessionClock, ConcurrentAccessFromManyThreadsIsSafe) {
     thread.join();
   }
   EXPECT_TRUE(clock.running());
+}
+
+// ── frame pacing (spec 10, 22) ───────────────────────────────────────────────
+
+// What a source ticking steadily at `source_hz` gets encoded at, driven through
+// exactly the gate RecordingSession::OnCapturedFrame runs: the first frame
+// establishes the schedule, and every later one is measured against a deadline
+// that advances by one interval per accepted frame.
+struct PacedRun {
+  int encoded = 0;
+  int64_t widest_gap_100ns = 0;
+};
+
+PacedRun RunPacedSource(double source_hz, uint32_t frame_rate, double seconds) {
+  const int64_t interval = FrameInterval100ns(frame_rate);
+  const int64_t period = static_cast<int64_t>(kSecond / source_hz);
+  const int64_t span = static_cast<int64_t>(seconds * kSecond);
+  PacedRun run;
+  int64_t due = -1;
+  int64_t previous = -1;
+  for (int64_t media = 0; media <= span; media += period) {
+    if (!FrameIsDue(media, due)) {
+      continue;
+    }
+    due = NextFrameDeadline100ns(due, media, interval);
+    if (previous >= 0 && media - previous > run.widest_gap_100ns) {
+      run.widest_gap_100ns = media - previous;
+    }
+    previous = media;
+    ++run.encoded;
+  }
+  return run;
+}
+
+TEST(FrameInterval100ns, TheConfiguredRateBecomesItsInterval) {
+  EXPECT_EQ(FrameInterval100ns(30), kSecond / 30);
+  EXPECT_EQ(FrameInterval100ns(60), kSecond / 60);
+  // Spec 10's default, and what RecordingConfig carries when nothing said
+  // otherwise. Never zero: an interval of zero is a schedule that cannot move.
+  EXPECT_EQ(FrameInterval100ns(0), kSecond / 30);
+  EXPECT_GE(FrameInterval100ns(4000000000u), 1);
+}
+
+TEST(FrameIsDue, TheFirstFrameOfASessionEstablishesTheSchedule) {
+  // -1 is a schedule nothing has started. Rejecting the first frame would leave
+  // the session with no picture at all until the source happened to tick.
+  EXPECT_TRUE(FrameIsDue(0, -1));
+  EXPECT_TRUE(FrameIsDue(12345, -1));
+}
+
+TEST(FrameIsDue, AFrameBeforeItsDeadlineIsSkippedAndOneOnItIsTaken) {
+  const int64_t interval = FrameInterval100ns(30);
+  EXPECT_FALSE(FrameIsDue(interval - 1, interval));
+  EXPECT_TRUE(FrameIsDue(interval, interval));
+  EXPECT_TRUE(FrameIsDue(interval + 1, interval));
+}
+
+TEST(NextFrameDeadline100ns, TheDeadlineMovesByOneIntervalNotByTheLateArrival) {
+  // The whole defect in one assertion: a 48 Hz frame lands 8.33 ms past a 30 fps
+  // deadline, and measuring the next deadline from the arrival rather than from
+  // the deadline is what let two source periods fit inside one gap.
+  const int64_t interval = FrameInterval100ns(30);
+  const int64_t due = 10 * interval;
+  const int64_t late = due + interval / 4;
+
+  EXPECT_EQ(NextFrameDeadline100ns(due, late, interval), due + interval);
+}
+
+TEST(NextFrameDeadline100ns, ASourceSlowerThanTheRateDoesNotLeaveTheScheduleBehind) {
+  // A window changing 20 times a second has no frame to offer for two thirds of
+  // the deadlines. The schedule must not accumulate the ones it missed, or the
+  // moment that window came back to life it would accept a burst.
+  const int64_t interval = FrameInterval100ns(30);
+  const int64_t due = interval;
+  const int64_t accepted = 10 * interval;
+
+  EXPECT_EQ(NextFrameDeadline100ns(due, accepted, interval), accepted + interval);
+}
+
+TEST(NextFrameDeadline100ns, TheFirstFrameSchedulesFromItself) {
+  const int64_t interval = FrameInterval100ns(30);
+  EXPECT_EQ(NextFrameDeadline100ns(-1, 500, interval), 500 + interval);
+}
+
+TEST(FramePacing, ASixtyHertzSourceIsHalvedOntoThirtyFps) {
+  const PacedRun run = RunPacedSource(60.0, 30, 1.0);
+
+  EXPECT_EQ(run.encoded, 30);
+}
+
+TEST(FramePacing, AFortyEightHertzSourceStillEncodesThirtyFps) {
+  // The machine that produced the defect: ~47-48 Hz delivered, 24 fps encoded
+  // into a file declaring 30. One source period is under the 30 fps interval and
+  // two are over it, so a gap-based gate can only ever take every second frame.
+  const PacedRun run = RunPacedSource(48.0, 30, 1.0);
+
+  EXPECT_EQ(run.encoded, 30);
+  EXPECT_LE(run.widest_gap_100ns, 2 * FrameInterval100ns(48));
+}
+
+TEST(FramePacing, AFortySevenHertzSourceEncodesThirtyFpsToo) {
+  const PacedRun run = RunPacedSource(47.0, 30, 1.0);
+
+  EXPECT_EQ(run.encoded, 30);
+}
+
+TEST(FramePacing, ASourceSlowerThanTheRateIsEncodedWhole) {
+  // Nothing is invented here and nothing is thrown away: every frame a 20 Hz
+  // window delivers is encoded, at the timestamp it was captured at.
+  const PacedRun run = RunPacedSource(20.0, 30, 10.0);
+
+  EXPECT_EQ(run.encoded, 201);
+  EXPECT_EQ(run.widest_gap_100ns, kSecond / 20);
+}
+
+TEST(FramePacing, ASixtyHertzSourceAtSixtyFpsKeepsEveryFrame) {
+  const PacedRun run = RunPacedSource(60.0, 60, 1.0);
+
+  EXPECT_EQ(run.encoded, 61);
+  EXPECT_EQ(run.widest_gap_100ns, kSecond / 60);
+}
+
+TEST(FramePacing, TenSecondsAccumulateNoDrift) {
+  // The property the deadline exists for: the count over a long run is the rate
+  // times the run, whatever the source's own rate is and however its vblank
+  // beats against ours. A panel a shade off nominal — 59.94 Hz, 60.1 Hz — is
+  // the case the tolerance-based gate was written for, and 144 Hz is the one it
+  // was never tried against.
+  EXPECT_EQ(RunPacedSource(60.0, 30, 10.0).encoded, 300);
+  EXPECT_EQ(RunPacedSource(59.94, 30, 10.0).encoded, 300);
+  EXPECT_EQ(RunPacedSource(60.1, 30, 10.0).encoded, 300);
+  EXPECT_EQ(RunPacedSource(48.0, 30, 10.0).encoded, 300);
+  EXPECT_EQ(RunPacedSource(47.0, 30, 10.0).encoded, 300);
+  EXPECT_EQ(RunPacedSource(144.0, 30, 10.0).encoded, 300);
+  EXPECT_EQ(RunPacedSource(60.0, 60, 10.0).encoded, 601);
+}
+
+TEST(RepeatFrameTimestamp100ns, NothingIsRepeatedBeforeTheFirstFrameIsEncoded) {
+  // There is no picture to hold. A session that has encoded nothing must wait
+  // for the source rather than publish an empty canvas.
+  const int64_t interval = FrameInterval100ns(30);
+
+  EXPECT_LT(RepeatFrameTimestamp100ns(10 * kSecond, -1, interval), 0);
+}
+
+TEST(RepeatFrameTimestamp100ns, ASourceKeepingUpIsNeverPreEmpted) {
+  // One interval past the deadline is not enough grace: a source that ticks a
+  // little slower than the configured rate would have every second frame
+  // replaced by a stale repeat.
+  const int64_t interval = FrameInterval100ns(30);
+  const int64_t written = 5 * kSecond;
+
+  EXPECT_LT(RepeatFrameTimestamp100ns(written + interval, written, interval), 0);
+  EXPECT_LT(RepeatFrameTimestamp100ns(written + 2 * interval - 1, written, interval), 0);
+  EXPECT_EQ(RepeatFrameTimestamp100ns(written + 2 * interval, written, interval),
+            written + interval);
+}
+
+TEST(RepeatFrameTimestamp100ns, ATwentyHertzWindowGetsNoRepeatsAtAll) {
+  // Driven the way the encoder thread drives it: poll every 5 ms, take whatever
+  // the source delivered, and ask whether the timeline has stopped. A window
+  // changing 20 times a second is real content and must be encoded as itself.
+  const int64_t interval = FrameInterval100ns(30);
+  const int64_t period = kSecond / 20;
+  int64_t written = -1;
+  int64_t next_frame = 0;
+  int repeats = 0;
+  for (int64_t now = 0; now <= 10 * kSecond; now += kSecond / 200) {
+    while (next_frame <= now) {
+      written = next_frame;
+      next_frame += period;
+    }
+    const int64_t repeat = RepeatFrameTimestamp100ns(now, written, interval);
+    if (repeat >= 0) {
+      written = repeat;
+      ++repeats;
+    }
+  }
+
+  EXPECT_EQ(repeats, 0);
+}
+
+TEST(RepeatFrameTimestamp100ns, ASilentSourceIsHeldAtTheConfiguredRate) {
+  // The window nobody is typing in: one frame at zero and then nothing for ten
+  // seconds. The timeline has to go on advancing at the configured rate, and it
+  // has to do so without drifting — 299 repeats plus the captured frame is 30 a
+  // second — trailing the clock by between one and two intervals, which is the
+  // grace that keeps the slot of a real frame free for it.
+  const int64_t interval = FrameInterval100ns(30);
+  int64_t written = 0;
+  int64_t previous = 0;
+  int repeats = 0;
+  int64_t widest_gap = 0;
+  for (int64_t now = 0; now <= 10 * kSecond; now += kSecond / 200) {
+    const int64_t repeat = RepeatFrameTimestamp100ns(now, written, interval);
+    if (repeat < 0) {
+      continue;
+    }
+    EXPECT_GT(repeat, previous) << "repeats must be monotonic (spec 22)";
+    EXPECT_LE(repeat, now) << "and never ahead of the session clock";
+    widest_gap = (std::max)(widest_gap, repeat - previous);
+    previous = repeat;
+    written = repeat;
+    ++repeats;
+  }
+
+  EXPECT_EQ(repeats, 299);
+  EXPECT_EQ(widest_gap, interval);
+  EXPECT_EQ(written, 299 * interval);
+  EXPECT_GE(10 * kSecond - written, interval);
+  EXPECT_LT(10 * kSecond - written, 2 * interval);
 }
 
 // ── output paths ─────────────────────────────────────────────────────────────

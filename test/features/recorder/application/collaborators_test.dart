@@ -284,15 +284,27 @@ void main() {
   });
 
   group('ArtifactRecovery', () {
+    PlatformArtifactRecovery recoveryFor(
+      FakeRecordingStore store, {
+      FakeRecorder? recorder,
+    }) => PlatformArtifactRecovery(
+      recorder: recorder ?? FakeRecorder(),
+      store: store,
+      logger: logger,
+    );
+
+    /// What the artefacts still on offer are called, which is what these
+    /// assertions are actually about — the objects themselves are rebuilt by
+    /// every scan.
+    List<String> offered(PlatformArtifactRecovery recovery) => recovery.pending
+        .map((IncompleteRecordingArtifact a) => a.recordingId)
+        .toList(growable: false);
+
     test('a scan reports what the store found', () async {
       final FakeRecordingStore store = FakeRecordingStore(
         artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
       );
-      final PlatformArtifactRecovery recovery = PlatformArtifactRecovery(
-        recorder: FakeRecorder(),
-        store: store,
-        logger: logger,
-      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
 
       await recovery.scan();
       expect(recovery.pending, hasLength(1));
@@ -303,10 +315,9 @@ void main() {
       final FakeRecordingStore store = FakeRecordingStore(
         artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
       );
-      final PlatformArtifactRecovery recovery = PlatformArtifactRecovery(
+      final PlatformArtifactRecovery recovery = recoveryFor(
+        store,
         recorder: FakeRecorder()..recoverResult = null,
-        store: store,
-        logger: logger,
       );
       await recovery.scan();
 
@@ -317,16 +328,15 @@ void main() {
     test(
       'a platform failure is reported as nothing recovered, not a throw',
       () async {
-        final PlatformArtifactRecovery recovery = PlatformArtifactRecovery(
+        final PlatformArtifactRecovery recovery = recoveryFor(
+          FakeRecordingStore(
+            artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
+          ),
           recorder: FakeRecorder()
             ..failOnRecover = const RecorderException(
               RecorderErrorCode.finalizationFailed,
               'nope',
             ),
-          store: FakeRecordingStore(
-            artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
-          ),
-          logger: logger,
         );
         await recovery.scan();
 
@@ -341,11 +351,7 @@ void main() {
           _artifact('def456'),
         ],
       );
-      final PlatformArtifactRecovery recovery = PlatformArtifactRecovery(
-        recorder: FakeRecorder(),
-        store: store,
-        logger: logger,
-      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
       await recovery.scan();
 
       await recovery.discard(recovery.pending.first);
@@ -356,17 +362,134 @@ void main() {
       final FakeRecordingStore store = FakeRecordingStore(
         artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
       );
-      final PlatformArtifactRecovery recovery = PlatformArtifactRecovery(
-        recorder: FakeRecorder(),
-        store: store,
-        logger: logger,
-      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
       await recovery.scan();
 
       recovery.dismiss();
 
       expect(recovery.pending, isEmpty);
       expect(store.discarded, isEmpty, reason: '"Keep as is" deletes nothing');
+    });
+
+    test('and it is still dismissed after the next scan', () async {
+      // A dismissal that lived only in the pending list lasted until the next
+      // rescan, and the recorder rescans after every stop (§18) — so the same
+      // artefact was offered again the moment the session went idle, and again
+      // after the stop after that, for as long as the file existed. "Keep as
+      // is" has to mean *this* file, kept, silently.
+      final FakeRecordingStore store = FakeRecordingStore(
+        artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
+      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
+      await recovery.scan();
+      recovery.dismiss();
+
+      await recovery.scan();
+
+      expect(offered(recovery), isEmpty);
+      expect(store.discarded, isEmpty, reason: 'still nothing was deleted');
+    });
+
+    test('a dismissal covers that artefact and no other', () async {
+      // Remembered per file rather than as a flag over the folder: a crash
+      // *after* the dismissal leaves an artefact the user has never been asked
+      // about, and design `1n` is the only place they can answer for it.
+      final FakeRecordingStore store = FakeRecordingStore(
+        artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
+      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
+      await recovery.scan();
+      recovery.dismiss();
+
+      store.replaceArtifacts(<IncompleteRecordingArtifact>[
+        _artifact('abc123'),
+        _artifact('def456'),
+      ]);
+      await recovery.scan();
+
+      expect(offered(recovery), <String>['def456']);
+    });
+
+    test('a dismissed path is forgotten once its file is gone', () async {
+      // Otherwise the set only ever grows, and it grows over a process that
+      // may be up for days. Each scan keeps only the paths it still saw, so an
+      // entry outlives its file by exactly one scan.
+      //
+      // The set is private, so what a test can watch is the consequence: after
+      // the scan that stops finding the file, a `.part` at that path is
+      // offered again rather than filtered away. It is a different file by
+      // then — the user has answered for the one that is gone, not for this.
+      final FakeRecordingStore store = FakeRecordingStore(
+        artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
+      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
+      await recovery.scan();
+      recovery.dismiss();
+
+      store.replaceArtifacts(const <IncompleteRecordingArtifact>[]);
+      await recovery.scan();
+      store.replaceArtifacts(<IncompleteRecordingArtifact>[
+        _artifact('abc123'),
+      ]);
+      await recovery.scan();
+
+      expect(offered(recovery), <String>['abc123']);
+    });
+
+    test('discarding one artefact does not re-offer a dismissed one', () async {
+      // `discard` rescans as well, which makes it a second door into the same
+      // filter — and one the recovery screen walks through with the other
+      // artefacts still waiting behind the one on screen.
+      final FakeRecordingStore store = FakeRecordingStore(
+        artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
+      );
+      final PlatformArtifactRecovery recovery = recoveryFor(store);
+      await recovery.scan();
+      recovery.dismiss();
+      store.replaceArtifacts(<IncompleteRecordingArtifact>[
+        _artifact('abc123'),
+        _artifact('def456'),
+      ]);
+      await recovery.scan();
+
+      await recovery.discard(recovery.pending.single);
+
+      expect(store.discarded, <String>['/tmp/recording-def456.part']);
+      expect(
+        offered(recovery),
+        isEmpty,
+        reason: 'deleting one artefact is not an answer about another',
+      );
+    });
+
+    test('finalizing one artefact does not re-offer a dismissed one', () async {
+      // `finalize` rescans on purpose too: a successful one consumed its
+      // `.part`, and a failed one may still have changed the folder. Answering
+      // for one artefact must not re-open the question about another.
+      final FakeRecordingStore store = FakeRecordingStore(
+        artifacts: <IncompleteRecordingArtifact>[_artifact('abc123')],
+      );
+      final PlatformArtifactRecovery recovery = recoveryFor(
+        store,
+        recorder: FakeRecorder()
+          ..recoverResult = FakeRecorder.sampleRecording(
+            path: '/tmp/recording-def456.mp4',
+          ),
+      );
+      await recovery.scan();
+      recovery.dismiss();
+      store.replaceArtifacts(<IncompleteRecordingArtifact>[
+        _artifact('abc123'),
+        _artifact('def456'),
+      ]);
+      await recovery.scan();
+
+      expect(await recovery.finalize(recovery.pending.single), isNotNull);
+      expect(
+        offered(recovery),
+        isNot(contains('abc123')),
+        reason: 'recovering one artefact is not an answer about another',
+      );
     });
   });
 

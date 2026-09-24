@@ -12,6 +12,13 @@ import 'package:recorder_platform_interface/recorder_platform_interface.dart';
 /// Adds no Dart behaviour: macOS and Windows speak the same channel contract,
 /// so [MethodChannelRecorderPlatform] already provides the recorder, the
 /// permission gateway and the overlay controller.
+///
+/// [windowChrome] is inherited rather than overridden, and that is the whole
+/// statement: `windows/runner/win32_window.cpp` creates a plain
+/// `WS_OVERLAPPEDWINDOW`, so the Flutter view is the client rect *underneath*
+/// a real caption and nothing of the system's is painted over it —
+/// [WindowChrome.separateTitleBar]. The header row reserving room for window
+/// buttons on this window is what left a dead gap on its leading edge.
 class RecorderWindows extends MethodChannelRecorderPlatform {
   RecorderWindows();
 

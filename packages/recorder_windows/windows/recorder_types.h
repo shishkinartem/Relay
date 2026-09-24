@@ -407,6 +407,16 @@ void ApplyCameraMaskRow(const CameraFrameMask& mask, double y, uint32_t width,
 // anything of the frame's alpha channel at all.
 bool CameraMaskIsRectangular(const CameraFrameMask& mask);
 
+// Sets the fourth byte of every pixel in a top-down BGRA image to 255, leaving
+// the colour bytes and any row padding past `width` untouched.
+//
+// For the source thumbnails, whose pixels come out of GDI: BitBlt, StretchBlt
+// and PrintWindow all leave that byte 0, because to GDI it has no meaning. The
+// thumbnail is then encoded as 32 bpp BGRA PNG, where it has one, and a 0 there
+// is a picture every decoder draws as fully transparent — so the picker showed
+// an empty frame for every display and every window (spec 4.1).
+void ForceOpaqueBgra(uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride);
+
 // Largest centred rectangle of the source aspect ratio that fits the canvas.
 // Produces the letterbox/pillarbox bars required by fixedCanvasLetterbox.
 RectD LetterboxRect(double source_width, double source_height,
@@ -444,6 +454,63 @@ inline constexpr uint32_t kMaximumVideoBitrate = 40000000u;
 // Quality-oriented VBR rate for a canvas. Not a user-facing setting (spec 11).
 // Lives here rather than in MediaWriter so ctest can execute it.
 uint32_t RecommendedVideoBitrate(uint32_t width, uint32_t height, uint32_t frame_rate);
+
+// ── frame pacing (spec 10, 22) ───────────────────────────────────────────────
+//
+// Windows.Graphics.Capture delivers a frame when the source *changes*, at up to
+// the panel's refresh rate, and never otherwise. It has no counterpart to
+// ScreenCaptureKit's `minimumFrameInterval`, which is what paces a macOS session
+// end to end (RecordingSession.swift, `makeStream`): there the operating system
+// is asked for the configured rate and delivers on it. On Windows the session
+// has to pace itself in both directions — decimate a source faster than the
+// configured rate, and hold the last picture for one that has gone quiet — and
+// both directions are timeline arithmetic, so they live here where ctest can
+// execute them rather than inside a session only a Windows host can run.
+
+// The gap between two encoded frames, in 100 ns units. A configured rate of 0
+// is the 30 fps default of RecordingConfig (spec 10).
+int64_t FrameInterval100ns(uint32_t frame_rate);
+
+// Whether the frame captured at `media_100ns` fills the slot due at
+// `due_100ns`. A negative deadline is a schedule no frame has started yet: the
+// first frame of a session always fills it.
+bool FrameIsDue(int64_t media_100ns, int64_t due_100ns);
+
+// Where the slot after `due_100ns` falls, once a frame has been accepted for it
+// at `accepted_100ns`.
+//
+// One interval past the deadline just filled, never one past the frame that
+// filled it. A source ticks on its own vblank rather than on ours, so it almost
+// never has a frame exactly on a deadline: a 48 Hz panel recorded at 30 fps
+// lands up to one source period late on every one of them, and a schedule
+// measured from those late arrivals pushes each deadline later than the last
+// until two source periods fit inside one gap. Every second frame is then
+// refused and a 48 Hz source is encoded at 24 fps into a file that declares 30
+// — which is what the interval-since-the-last-accepted-frame gate this replaced
+// did on the first Windows machine to run it, its 10 % tolerance being far too
+// small to cover a whole extra vblank.
+//
+// The deadline is pulled forward to `accepted + interval` only when it would
+// otherwise be left in the past: a source slower than the configured rate has
+// nothing to catch up to, and a schedule left behind reality would accept a
+// burst the moment that source sped up again.
+int64_t NextFrameDeadline100ns(int64_t due_100ns, int64_t accepted_100ns,
+                               int64_t interval_100ns);
+
+// The timestamp the last composed frame must be published again at, or -1 when
+// the timeline does not need one yet. `written_100ns` is where the encoded
+// timeline currently ends, negative for a session that has encoded nothing.
+//
+// A window the user is not typing in changes nothing for seconds at a time, so
+// nothing is captured and — with no repeat — nothing is encoded: the video
+// clock stands still while the audio track runs on, and the recording holds one
+// image for as long as the window was idle. Two intervals of silence before a
+// repeat, not one: a source that updates a little slower than the configured
+// rate must have its own frames encoded, and a repeat published the instant a
+// deadline passed would take the slot of the frame arriving two milliseconds
+// later.
+int64_t RepeatFrameTimestamp100ns(int64_t media_now_100ns, int64_t written_100ns,
+                                  int64_t interval_100ns);
 
 // ── the movable control strip (spec 33.3) ────────────────────────────────────
 //
@@ -691,11 +758,11 @@ struct ResourceCensus {
   // True when every row of spec 19.1's *first* table is zero.
   //
   // `overlay_engines` is excluded deliberately: 19.1's second table lets a host
-  // keep its overlay engines for the life of the process. This host does not —
-  // it destroys each window and its engine on hide — so the row happens to be
-  // zero here too, and the exclusion is about the rule rather than about
-  // Windows. What every host owes instead is stability, which the census
-  // *equality* test is what checks.
+  // keep its overlay engines for the life of the process, and both hosts now do
+  // — the ADR behind the overlay windows requires it, and Windows destroying
+  // them on hide was a defect rather than the other lawful choice. So this row
+  // does not return to zero on either platform. What every host owes instead is
+  // stability, which the census *equality* test is what checks.
   bool session_resources_released() const;
 };
 

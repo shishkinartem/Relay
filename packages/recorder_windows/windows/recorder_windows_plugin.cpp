@@ -468,7 +468,10 @@ RecorderWindowsPlugin::RecorderWindowsPlugin(flutter::PluginRegistrarWindows* re
             return nullptr;
           }));
 
-  overlays_.SetMainWindow(MainWindow());
+  // A provider rather than a handle: this runs during plugin registration, and
+  // the runner has not parented its Flutter view into the top-level window yet,
+  // so MainWindow() answers null here and would answer null forever.
+  overlays_.SetMainWindowProvider([this]() { return MainWindow(); });
   // The anchor an overlay command carries is the overlay layer's own business —
   // it decides where the menu opens — so nothing but the bare name crosses the
   // event channel (spec 33.4).
@@ -1388,26 +1391,40 @@ void RecorderWindowsPlugin::HandleRecorderMethod(
       return;
     }
     const bool enabled = arguments != nullptr && BoolAt(*arguments, "enabled", false);
-    bool ok = true;
-    if (method == "setMicrophoneEnabled") {
-      ok = session_->SetMicrophoneEnabled(enabled, &error);
-    } else if (method == "setSystemAudioEnabled") {
-      ok = session_->SetSystemAudioEnabled(enabled, &error);
-    } else {
-      ok = session_->SetCameraEnabled(enabled, &error);
-      if (ok) {
-        // A different camera is a differently shaped tile, and the preview is
-        // that tile: its geometry, its crop and its mask all move with it
-        // (design 1p). The camera it turns on has not reported a frame size
-        // yet; the first frame at a new resolution re-places the window again.
-        RefreshCameraPreview(/*reposition=*/true);
+    if (method == "setMicrophoneEnabled" || method == "setSystemAudioEnabled") {
+      // Both only re-point the mixer; neither opens or closes a device, so
+      // neither can block the thread the whole UI is drawn on.
+      const bool ok = method == "setMicrophoneEnabled"
+                          ? session_->SetMicrophoneEnabled(enabled, &error)
+                          : session_->SetSystemAudioEnabled(enabled, &error);
+      if (!ok) {
+        ReplyError(shared, error);
+        return;
       }
-    }
-    if (!ok) {
-      ReplyError(shared, error);
+      shared->Success();
       return;
     }
-    shared->Success();
+    // The camera is the one input whose toggle touches a device. Turning it off
+    // joins the capture thread, and ReadSample blocks until the next frame, so
+    // done inline this freezes every overlay and the main window for up to a
+    // camera frame interval — which is what made the strip feel unresponsive on
+    // Windows. macOS moved this off its main thread for the same reason.
+    const std::shared_ptr<RecordingSession> session = session_;
+    if (!worker_.Post([this, shared, session, enabled]() {
+          RecorderError failure;
+          if (!session->SetCameraEnabled(enabled, &failure)) {
+            ReplyError(shared, failure);
+            return;
+          }
+          // A different camera is a differently shaped tile, and the preview is
+          // that tile: its geometry, its crop and its mask all move with it
+          // (design 1p). The camera it turns on has not reported a frame size
+          // yet; the first frame at a new resolution re-places the window again.
+          RunOnPlatformThread([this]() { RefreshCameraPreview(/*reposition=*/true); });
+          ReplySuccess(shared, flutter::EncodableValue());
+        })) {
+      busy();
+    }
     return;
   }
   if (method == "debugResourceCensus") {

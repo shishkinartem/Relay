@@ -79,10 +79,21 @@ Errors are typed states/results rather than arbitrary UI strings.
   alternating. The transparent surplus takes no press, and a drag reads and
   reports the tile rather than the window;
 - overlay placement is resolved against the display the main application window
-  was on when the session started (§5). That window is hidden for the whole
-  session, so the display is pinned at the first show rather than re-resolved
-  per call — otherwise anything placed later falls back to whichever display has
-  keyboard focus, which is the one being recorded, not the one §5 names;
+  was on when the session started (§5). That window is off the screen for the
+  whole session, so the display is pinned at the first show rather than
+  re-resolved per call — otherwise anything placed later falls back to whichever
+  display has keyboard focus, which is the one being recorded, not the one §5
+  names;
+- **off the screen is not the same as gone**, and the two hosts reach it
+  differently. macOS orders the window out and keeps its Dock tile either way.
+  Windows minimizes it, because hiding it outright takes the taskbar button and
+  the Alt+Tab entry with it — and an application that is on no screen, in no
+  taskbar and in no switcher is indistinguishable from one that has crashed,
+  which on 2026-09-09 is exactly what a user concluded before launching two more
+  copies over the top of the recording
+  (`../development/compatibility-matrix.md`, *The second Windows run*). A
+  minimized window is rendered by nothing, so it still cannot reach a display
+  recording, which is the property §6 actually needs;
 - the finished session is released when the user leaves the post-recording
   screen, not at process exit. `releaseSession` is a distinct call from `abort`,
   which platforms may refuse once a file is finalized, and from `dispose`, which

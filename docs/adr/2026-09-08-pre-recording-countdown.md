@@ -143,6 +143,27 @@ back**, the second with the countdown off.
 **Windows needs no equivalent** — `HideControlStrip` destroys the window and
 keeps no snapshot.
 
+**Amended 2026-09-10: Windows needs the equivalent after all, and now has it.**
+`HideControlStrip` no longer destroys the strip window — it hides it, and the
+window and its engine live for the process, which is what
+`2026-08-23-overlay-windows-as-secondary-flutter-engines.md` specified from the
+start and only macOS had ever done. The reason it changed is not the countdown:
+on the 2026-09-09 Windows run the strip did not come back for the second
+recording in a process, and an engine rebuilt per show is the leading suspect
+(`docs/development/compatibility-matrix.md`, *The second Windows run*). A window
+that outlives its session keeps the frame it was hidden on, so both Windows
+sentences above turn over together. `OverlayWindows` now remembers the last
+state map, rewinds on hide exactly the three fields macOS rewinds — `isStopping`,
+`isPaused`, `elapsedMs` — and erases `countdownMs` rather than nulling it, for
+the same reason `NSNull` was refused above: an encodable null decodes as a
+*present* value and would open the next session's strip mid-countdown. It then
+replays that corrected map from `ShowControlStrip`, so the push *before* the show
+is load-bearing on Windows too and not only on macOS. None of the reasoning above
+is withdrawn — what changed is that one host is no longer exempt from it.
+`overlay_windows.cpp` is outside the ctest project, so this half has no unit
+coverage either: **check it the same way**, two sessions back to back with the
+second's countdown off, on Windows. That has not been done.
+
 **The camera preview is up during the pre-roll, and had to be.** Windows applies
 `WDA_EXCLUDEFROMCAPTURE` over its excluded set once, at `Start`; a preview
 created after that is never in the set and would be composited into the file. So

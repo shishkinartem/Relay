@@ -830,6 +830,19 @@ bool CameraMaskIsRectangular(const CameraFrameMask& mask) {
   return !(mask.corner_radius > 0);
 }
 
+void ForceOpaqueBgra(uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride) {
+  if (bgra == nullptr || width == 0 || height == 0 ||
+      static_cast<uint64_t>(stride) < static_cast<uint64_t>(width) * 4) {
+    return;
+  }
+  for (uint32_t row = 0; row < height; ++row) {
+    uint8_t* line = bgra + static_cast<size_t>(row) * stride;
+    for (uint32_t column = 0; column < width; ++column) {
+      line[static_cast<size_t>(column) * 4 + 3] = 0xFF;
+    }
+  }
+}
+
 double CameraMaskCoverage(const CameraFrameMask& mask, double x, double y) {
   return MaskCoverageAt(mask.crop, ResolveMaskRow(mask, y), x);
 }
@@ -917,6 +930,33 @@ uint32_t RecommendedVideoBitrate(uint32_t width, uint32_t height, uint32_t frame
       (std::max)(static_cast<double>(kMinimumVideoBitrate),
                  (std::min)(static_cast<double>(kMaximumVideoBitrate), bitrate));
   return static_cast<uint32_t>(clamped);
+}
+
+int64_t FrameInterval100ns(uint32_t frame_rate) {
+  const int64_t rate = frame_rate == 0 ? 30 : static_cast<int64_t>(frame_rate);
+  const int64_t interval = 10000000LL / rate;
+  // A rate above 10 MHz is not a rate anything configured, but an interval of
+  // zero would leave the schedule unable to advance at all.
+  return interval < 1 ? 1 : interval;
+}
+
+bool FrameIsDue(int64_t media_100ns, int64_t due_100ns) {
+  return due_100ns < 0 || media_100ns >= due_100ns;
+}
+
+int64_t NextFrameDeadline100ns(int64_t due_100ns, int64_t accepted_100ns,
+                               int64_t interval_100ns) {
+  const int64_t from = due_100ns < 0 ? accepted_100ns : due_100ns;
+  const int64_t next = from + interval_100ns;
+  return next > accepted_100ns ? next : accepted_100ns + interval_100ns;
+}
+
+int64_t RepeatFrameTimestamp100ns(int64_t media_now_100ns, int64_t written_100ns,
+                                  int64_t interval_100ns) {
+  if (written_100ns < 0 || media_now_100ns < written_100ns + 2 * interval_100ns) {
+    return -1;
+  }
+  return written_100ns + interval_100ns;
 }
 
 LONG StripSnapPixels(double scale) {

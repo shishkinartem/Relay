@@ -997,6 +997,16 @@ class FakeRecordingStore implements RecordingStore {
   final List<String> discarded = <String>[];
   final List<String> deleted = <String>[];
 
+  /// Changes what the next scan will find.
+  ///
+  /// The folder does not hold still between two scans: the recorder re-scans
+  /// after every stop (§18), so by then a crash may have left a new `.part`
+  /// behind and the user may have deleted an old one in Finder or Explorer.
+  /// Recovery's own bookkeeping only means anything against a folder that
+  /// moves, so the fake has to be able to move.
+  void replaceArtifacts(List<IncompleteRecordingArtifact> artifacts) =>
+      _artifacts = List<IncompleteRecordingArtifact>.unmodifiable(artifacts);
+
   @override
   Directory get directory => Directory.systemTemp;
 

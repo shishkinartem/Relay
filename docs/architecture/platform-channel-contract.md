@@ -453,12 +453,20 @@ key is always present.
 
 Every row except `overlayEngines` must be zero once a session is over — §19.1's
 first table. `overlayEngines` is in its second table, "survives, because it is a
-setting and not state": **both lifetimes are lawful and the two platforms chose
-differently.** macOS builds an engine on first use and keeps it for the life of
-the process, so its count settles at three and stays there; Windows destroys each
-window and its engine on hide, so its count returns to zero — and its
-`registeredTextures` goes with it, because the preview's texture belongs to the
-window. What both owe is *stability*, which is why §19.1's equality census is
+setting and not state", and **both hosts keep them**: each builds an overlay
+engine on first use and keeps it for the life of the process, so both counts
+settle at three and stay there. That is not a lifetime a host may choose — it is
+what `../adr/2026-08-23-overlay-windows-as-secondary-flutter-engines.md` decided,
+*created lazily … and reused for the process lifetime*. Windows destroyed each
+window and its engine on hide until 2026-09-10, and this section recorded that as
+the other lawful reading; it was a defect against the ADR, and the leading suspect
+for a control strip that did not come back for the second recording in a process.
+A window that is kept is not exempt from the first table: `registeredTextures` is
+in it, so both hosts register the preview's texture on show and unregister it on
+hide — a registered texture keeps its last uploaded contents, and a window that
+held on to its own would open the next session on the previous one's last camera
+frame.
+What both owe beyond that is *stability*, which is why §19.1's equality census is
 taken after the first cycle rather than at launch. See
 `../development/compatibility-matrix.md`.
 

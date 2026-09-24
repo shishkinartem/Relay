@@ -58,5 +58,34 @@ target_compile_definitions(recorder_types_test PRIVATE
 
 target_link_libraries(recorder_types_test PRIVATE GTest::gtest_main)
 
+# `audio_mixer.cpp` is the second self-contained translation unit in the plugin:
+# it includes its own header, <algorithm>, <cstring> and nothing else, so the
+# resampler, the ring buffer and the drain ceiling are testable without WASAPI,
+# Media Foundation or Flutter. It was outside this project until the first real
+# Windows run shipped a recording whose microphone track was punched full of
+# holes — a defect entirely inside these two pure functions, and one no suite
+# could have caught while they were not compiled here.
+add_executable(audio_mixer_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/audio_mixer_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../audio_mixer.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../recorder_types.cpp"
+)
+
+target_include_directories(audio_mixer_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+
+target_compile_definitions(audio_mixer_test PRIVATE
+  UNICODE
+  _UNICODE
+  NOMINMAX
+  WIN32_LEAN_AND_MEAN
+  WINVER=0x0A00
+  _WIN32_WINNT=0x0A00
+)
+
+target_link_libraries(audio_mixer_test PRIVATE GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(recorder_types_test)
+gtest_discover_tests(audio_mixer_test)

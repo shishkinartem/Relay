@@ -297,6 +297,9 @@ std::vector<uint8_t> ScaleAndEncode(HDC source_dc, uint32_t source_width,
   ::GdiFlush();
   std::vector<uint8_t> png;
   if (ok != FALSE) {
+    // GDI wrote colour and nothing else: every alpha byte is 0, and a PNG that
+    // says so is invisible (ForceOpaqueBgra).
+    ForceOpaqueBgra(static_cast<uint8_t*>(bits), width, height, width * 4);
     png = EncodePng(static_cast<const uint8_t*>(bits), width, height, width * 4);
   }
   ::SelectObject(target.get(), previous);

@@ -1,6 +1,7 @@
 #include "video_compositor.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace relay {
 
@@ -137,6 +138,10 @@ bool VideoCompositor::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
 void VideoCompositor::Shutdown() {
   std::lock_guard<std::mutex> lock(mutex_);
   camera_frame_ = nullptr;
+  held_source_ = nullptr;
+  held_width_ = 0;
+  held_height_ = 0;
+  composed_generation_ = 0;
   input_views_.clear();
   canvas_views_.clear();
   canvases_.clear();
@@ -155,6 +160,7 @@ void VideoCompositor::SetCameraEnabled(bool enabled) {
   if (!enabled) {
     camera_frame_ = nullptr;
   }
+  ++generation_;
 }
 
 bool VideoCompositor::is_initialized() const {
@@ -170,6 +176,7 @@ bool VideoCompositor::camera_enabled() const {
 void VideoCompositor::SetCameraOverlay(const CameraOverlayConfig& camera) {
   std::lock_guard<std::mutex> lock(mutex_);
   camera_config_ = camera;
+  ++generation_;
 }
 
 CameraOverlayConfig VideoCompositor::camera_overlay() const {
@@ -183,6 +190,7 @@ void VideoCompositor::SetCameraFrame(winrt::com_ptr<ID3D11Texture2D> frame,
   camera_frame_ = std::move(frame);
   camera_width_ = width;
   camera_height_ = height;
+  ++generation_;
 }
 
 PipDraw VideoCompositor::CameraPipDraw(uint32_t frame_width,
@@ -229,43 +237,61 @@ winrt::com_ptr<ID3D11VideoProcessorInputView> VideoCompositor::InputViewFor(
 }
 
 bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target,
-                           std::string* error) {
+                           std::string* error, size_t* dropped) {
   if (layers == nullptr || count == 0 || count > kMaskedTileStreams) {
     *error = "The compositor was asked to draw nothing.";
     return false;
   }
 
-  // Input views first, and all of them, so a surface that cannot be bound fails
-  // before any stream state has been touched.
+  // Input views first, and all of them, so a surface that cannot be bound is
+  // settled before any stream state has been touched. An optional layer that
+  // will not bind is left out and the rest of the frame is still drawn; only a
+  // required one fails the blit.
   winrt::com_ptr<ID3D11VideoProcessorInputView> inputs[kMaskedTileStreams];
+  const Layer* bound[kMaskedTileStreams] = {};
+  size_t drawn = 0;
   for (size_t i = 0; i < count; ++i) {
-    inputs[i] = InputViewFor(layers[i].texture);
-    if (!inputs[i]) {
-      *error = "A capture surface could not be bound to the video processor.";
-      return false;
+    winrt::com_ptr<ID3D11VideoProcessorInputView> view =
+        InputViewFor(layers[i].texture);
+    if (!view) {
+      if (layers[i].required) {
+        *error = "A capture surface could not be bound to the video processor.";
+        return false;
+      }
+      if (dropped != nullptr) {
+        ++*dropped;
+      }
+      continue;
     }
+    inputs[drawn] = std::move(view);
+    bound[drawn] = &layers[i];
+    ++drawn;
+  }
+  if (drawn == 0) {
+    *error = "No capture surface could be bound to the video processor.";
+    return false;
   }
 
   D3D11_VIDEO_PROCESSOR_STREAM streams[kMaskedTileStreams]{};
-  for (size_t i = 0; i < count; ++i) {
+  for (size_t i = 0; i < drawn; ++i) {
     const UINT index = static_cast<UINT>(i);
     video_context_->VideoProcessorSetStreamSourceRect(processor_.get(), index, TRUE,
-                                                      &layers[i].source);
+                                                      &bound[i]->source);
     video_context_->VideoProcessorSetStreamDestRect(processor_.get(), index, TRUE,
-                                                    &layers[i].dest);
+                                                    &bound[i]->dest);
     // Per-pixel alpha is what shapes the tile, and the planar alpha switch is
     // what asks the driver to blend the stream at all; at 1.0 it changes no
     // pixel the frame's own alpha did not already decide. Turned off again for
     // an unmasked layer, because this state is the processor's and outlives the
     // blit that set it.
     video_context_->VideoProcessorSetStreamAlpha(
-        processor_.get(), index, layers[i].blend_alpha ? TRUE : FALSE, 1.0f);
+        processor_.get(), index, bound[i]->blend_alpha ? TRUE : FALSE, 1.0f);
     if (video_context1_) {
       // Preview mirroring is the overlay's business; only mirrorOutput reaches
       // the file (spec 7).
       video_context1_->VideoProcessorSetStreamMirror(
           processor_.get(), index, TRUE,
-          layers[i].mirror_horizontal ? TRUE : FALSE, FALSE);
+          bound[i]->mirror_horizontal ? TRUE : FALSE, FALSE);
     }
     streams[i].Enable = TRUE;
     streams[i].OutputIndex = 0;
@@ -282,7 +308,7 @@ bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target
 
   const HRESULT hr = video_context_->VideoProcessorBlt(
       processor_.get(), canvas_views_[next_canvas_].get(), 0,
-      static_cast<UINT>(count), streams);
+      static_cast<UINT>(drawn), streams);
   if (FAILED(hr)) {
     *error = "VideoProcessorBlt failed (" + HResultToString(hr) + ").";
     return false;
@@ -293,7 +319,10 @@ bool VideoCompositor::Blit(const Layer* layers, size_t count, const RECT* target
 bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
                               uint32_t source_height,
                               winrt::com_ptr<ID3D11Texture2D>* out_canvas,
-                              std::string* error) {
+                              std::string* error, bool* camera_dropped) {
+  if (camera_dropped != nullptr) {
+    *camera_dropped = false;
+  }
   if (!processor_ || canvases_.empty()) {
     *error = "The compositor is not initialized.";
     return false;
@@ -302,12 +331,81 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
     *error = "The source frame is empty.";
     return false;
   }
+  if (!Draw(source, source_width, source_height, out_canvas, error, camera_dropped)) {
+    return false;
+  }
+  HoldSource(source, source_width, source_height);
+  return true;
+}
 
+VideoCompositor::RecomposeResult VideoCompositor::Recompose(
+    winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error,
+    bool* camera_dropped) {
+  if (camera_dropped != nullptr) {
+    *camera_dropped = false;
+  }
+  if (!processor_ || canvases_.empty() || !held_source_) {
+    return RecomposeResult::kUnchanged;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation_ == composed_generation_) {
+      return RecomposeResult::kUnchanged;
+    }
+  }
+  return Draw(held_source_.get(), held_width_, held_height_, out_canvas, error,
+              camera_dropped)
+             ? RecomposeResult::kComposed
+             : RecomposeResult::kFailed;
+}
+
+void VideoCompositor::HoldSource(ID3D11Texture2D* source, uint32_t source_width,
+                                 uint32_t source_height) {
+  D3D11_TEXTURE2D_DESC desc{};
+  source->GetDesc(&desc);
+  D3D11_TEXTURE2D_DESC held{};
+  if (held_source_) {
+    held_source_->GetDesc(&held);
+  }
+  if (!held_source_ || held.Width != desc.Width || held.Height != desc.Height ||
+      held.Format != desc.Format) {
+    held_source_ = nullptr;
+    // What the video processor accepts as an input surface — USAGE_DEFAULT and
+    // RENDER_TARGET, the same as the camera's pool (camera_capture.cpp) — and
+    // CopyResource needs nothing else to match but the shape and the format.
+    D3D11_TEXTURE2D_DESC copy{};
+    copy.Width = desc.Width;
+    copy.Height = desc.Height;
+    copy.MipLevels = 1;
+    copy.ArraySize = 1;
+    copy.Format = desc.Format;
+    copy.SampleDesc.Count = 1;
+    copy.Usage = D3D11_USAGE_DEFAULT;
+    copy.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&copy, nullptr, held_source_.put()))) {
+      // Nothing to recompose from, which leaves the repeat publishing the last
+      // canvas as it always did. A still camera, never a failed recording.
+      held_source_ = nullptr;
+      held_width_ = 0;
+      held_height_ = 0;
+      return;
+    }
+  }
+  context_->CopyResource(held_source_.get(), source);
+  held_width_ = source_width;
+  held_height_ = source_height;
+}
+
+bool VideoCompositor::Draw(ID3D11Texture2D* source, uint32_t source_width,
+                           uint32_t source_height,
+                           winrt::com_ptr<ID3D11Texture2D>* out_canvas,
+                           std::string* error, bool* camera_dropped) {
   winrt::com_ptr<ID3D11Texture2D> camera;
   uint32_t camera_width = 0;
   uint32_t camera_height = 0;
   CameraOverlayConfig camera_config;
   bool draw_camera = false;
+  uint64_t generation = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (source_width != last_source_width_ || source_height != last_source_height_) {
@@ -324,6 +422,7 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
       camera_height = camera_height_;
       draw_camera = camera_width > 0 && camera_height > 0;
     }
+    generation = generation_;
   }
 
   Layer desktop;
@@ -339,6 +438,7 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
     }
     *out_canvas = canvases_[next_canvas_];
     next_canvas_ = (next_canvas_ + 1) % canvases_.size();
+    composed_generation_ = generation;
     return true;
   }
 
@@ -354,15 +454,19 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
   tile.source = ToRect(pip.source);
   tile.dest = ToRect(pip.dest);
   tile.mirror_horizontal = camera_config.mirror_output;
+  // The one optional layer. A recording without the tile is a recording; a
+  // recording without the screen is not.
+  tile.required = false;
   // A rounded tile carries its shape in the frame's alpha channel, which only
   // the two-stream path composites (see the header). Everything else keeps the
   // two-blit path it has always used, so an ordinary recording is composed
   // exactly as it was before presets existed.
   const bool masked = pip.corner_radius > 0 && supports_masked_tile_;
+  size_t dropped = 0;
   if (masked) {
     tile.blend_alpha = true;
     const Layer layers[kMaskedTileStreams] = {desktop, tile};
-    if (!Blit(layers, kMaskedTileStreams, nullptr, error)) {
+    if (!Blit(layers, kMaskedTileStreams, nullptr, error, &dropped)) {
       return false;
     }
   } else {
@@ -370,14 +474,22 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
       return false;
     }
     // The target rectangle is the tile's own, so the rest of the canvas the
-    // first pass just wrote is not touched.
-    if (!Blit(&tile, 1, &tile.dest, error)) {
-      return false;
+    // first pass just wrote is not touched — which is what makes every failure
+    // of this second pass survivable, not only a surface that would not bind.
+    // The canvas already holds a complete desktop frame; discarding it because
+    // the tile could not be drawn would be the original defect reached by
+    // another route.
+    if (!Blit(&tile, 1, &tile.dest, error, &dropped)) {
+      dropped = 1;
     }
+  }
+  if (dropped > 0 && camera_dropped != nullptr) {
+    *camera_dropped = true;
   }
 
   *out_canvas = canvases_[next_canvas_];
   next_canvas_ = (next_canvas_ + 1) % canvases_.size();
+  composed_generation_ = generation;
   return true;
 }
 

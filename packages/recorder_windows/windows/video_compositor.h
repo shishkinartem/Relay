@@ -93,15 +93,57 @@ class VideoCompositor {
   CameraFrameMask CameraMask(uint32_t frame_width, uint32_t frame_height) const;
 
   // Latest-wins single slot: capacity 1, the previous frame is released when a
-  // newer one arrives. The compositor consumes at the screen frame rate, which
-  // is independent of the camera rate.
+  // newer one arrives. The compositor consumes at the screen frame rate — and,
+  // over a source that has gone quiet, at the rate the session holds its last
+  // frame (Recompose) — neither of which is the camera rate.
   void SetCameraFrame(winrt::com_ptr<ID3D11Texture2D> frame, uint32_t width,
                       uint32_t height);
 
   // Composes into a canvas texture from the internal rotating pool. The
   // returned texture stays valid until the pool wraps around to it again.
+  //
+  // A camera surface this adapter refuses to bind is dropped from the frame,
+  // not made into a failure: capture, camera and encode are separate failure
+  // domains (spec 23, CLAUDE.md), and the alternative — which is what shipped —
+  // is a recording whose video track stops the moment the camera starts.
+  // `camera_dropped` says whether that happened, so the caller can report it
+  // once instead of per frame.
+  //
+  // Also keeps a copy of `source`, which is what Recompose draws from.
+  //
+  // Compose and Recompose must never run at the same time: both drive the one
+  // video processor and hand out canvases from the one pool. RecordingSession
+  // serializes them under its composition lock, which also covers the queue
+  // accounting that keeps the pool from wrapping onto a canvas in use.
   bool Compose(ID3D11Texture2D* source, uint32_t source_width, uint32_t source_height,
-               winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error);
+               winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error,
+               bool* camera_dropped = nullptr);
+
+  enum class RecomposeResult {
+    // Nothing to draw: no source has been composed yet, or nothing the tile is
+    // drawn from has changed since the last composition, so the canvas that
+    // composition produced is still exactly right.
+    kUnchanged,
+    kComposed,
+    kFailed,
+  };
+
+  // Draws the last source frame Compose saw again, under the camera as it is
+  // now, into the next canvas of the pool.
+  //
+  // For a window, Windows.Graphics.Capture delivers a frame only when the
+  // window's content changes, and while it does not the session holds the last
+  // picture on the timeline (RecordingSession::RepeatLastComposedFrame). A held
+  // canvas holds its camera tile too, so a window nobody was touching froze the
+  // camera in the file — live in the preview, a still in the recording, and
+  // jerky whenever the window changed only now and then. This is what lets the
+  // tile move while the desktop stands still.
+  //
+  // "Changed" is a new camera frame, the camera toggled, or the tile moved or
+  // reshaped (SetCameraFrame, SetCameraEnabled, SetCameraOverlay): turning the
+  // camera off over a static window must take the tile out of the file too.
+  RecomposeResult Recompose(winrt::com_ptr<ID3D11Texture2D>* out_canvas,
+                            std::string* error, bool* camera_dropped = nullptr);
 
   uint32_t canvas_width() const { return canvas_width_; }
   uint32_t canvas_height() const { return canvas_height_; }
@@ -116,15 +158,30 @@ class VideoCompositor {
     RECT dest{};
     bool mirror_horizontal = false;
     bool blend_alpha = false;
+    // False for a layer the frame is still worth drawing without. The desktop
+    // is required; the camera tile is not.
+    bool required = true;
   };
 
   winrt::com_ptr<ID3D11VideoProcessorInputView> InputViewFor(ID3D11Texture2D* texture);
+  // The body Compose and Recompose share: the desktop letterboxed into the
+  // canvas and the tile over it, from one snapshot of the camera state.
+  bool Draw(ID3D11Texture2D* source, uint32_t source_width, uint32_t source_height,
+            winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error,
+            bool* camera_dropped);
+  // Copies `source` into held_source_, reallocating it when the capture pool's
+  // textures have changed shape. A copy rather than a reference: the capture
+  // pool's texture goes back to Windows.Graphics.Capture the moment the frame
+  // callback returns, and is drawn over by the next frame.
+  void HoldSource(ID3D11Texture2D* source, uint32_t source_width,
+                  uint32_t source_height);
   // Composites `layers` in order onto the canvas being written. `target`
   // restricts the area that is written at all, or is null for the whole canvas:
   // pixels outside it are not modified, and pixels inside it that no layer
   // covers are filled with the background colour.
+  // `dropped` counts optional layers that could not be bound and were left out.
   bool Blit(const Layer* layers, size_t count, const RECT* target,
-            std::string* error);
+            std::string* error, size_t* dropped = nullptr);
 
   winrt::com_ptr<ID3D11Device> device_;
   winrt::com_ptr<ID3D11DeviceContext> context_;
@@ -154,12 +211,26 @@ class VideoCompositor {
   static constexpr UINT kMaskedTileStreams = 2;
   bool supports_masked_tile_ = false;
 
+  // The last source frame Compose drew, and the part of it that is content
+  // (the capture pool's textures can be larger than the frame they carry).
+  // Touched only by Compose and Recompose, which never overlap, and by
+  // Shutdown once both have stopped.
+  winrt::com_ptr<ID3D11Texture2D> held_source_;
+  uint32_t held_width_ = 0;
+  uint32_t held_height_ = 0;
+  // The `generation_` the last composition drew its tile from. Same owners.
+  uint64_t composed_generation_ = 0;
+
   mutable std::mutex mutex_;
   CameraOverlayConfig camera_config_;
   bool camera_enabled_ = false;
   winrt::com_ptr<ID3D11Texture2D> camera_frame_;
   uint32_t camera_width_ = 0;
   uint32_t camera_height_ = 0;
+  // Advances with everything a composed tile is drawn from — a camera frame,
+  // the toggle, the geometry — so Recompose can tell a held canvas that is
+  // still right from one that is not.
+  uint64_t generation_ = 1;
   uint32_t canvas_width_ = 0;
   uint32_t canvas_height_ = 0;
   uint32_t last_source_width_ = 0;

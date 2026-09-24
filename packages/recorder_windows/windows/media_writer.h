@@ -57,8 +57,18 @@ class MediaWriter {
   // hardware encoder. Passing nullptr forces the system-memory path.
   bool Open(const Config& config, ID3D11Device* device, RecorderError* error);
 
+  // The sample carries its time and no duration, exactly as the macOS pixel
+  // buffer adaptor appends `withPresentationTime:` and nothing else
+  // (RecordingSession.swift). A duration is a claim about when the *next* frame
+  // starts, which nothing knows at the moment this one is written: a window
+  // source delivers when its content changes, so the real gap is whatever the
+  // source and the frame-rate gate produce, not the configured rate. This used
+  // to assert 33.33 ms onto samples that were 41.67 ms apart; the times were
+  // right and the durations were a lie, and players that read durations rather
+  // than sample times got the lie. The MP4 sink derives the per-sample deltas
+  // from the sample times, which are correct.
   bool WriteVideoFrame(ID3D11Texture2D* nv12, int64_t timestamp_100ns,
-                       int64_t duration_100ns, RecorderError* error);
+                       RecorderError* error);
   bool WriteAudioFrames(const float* interleaved_stereo, size_t frames,
                         int64_t timestamp_100ns, RecorderError* error);
 
@@ -75,6 +85,18 @@ class MediaWriter {
 
   bool hardware_encoding() const { return hardware_encoding_; }
   const std::string& encoder_name() const { return encoder_name_; }
+
+  // Why the file has no audio track, empty when it has one or when none was
+  // asked for. Set by Open, and read once the session is about to record.
+  //
+  // A configuration that asks for audio and gets no stream is not a failed
+  // Open: an installation with no AAC encoder still records picture, and a
+  // recording with no sound is still a recording
+  // (docs/adr/2026-08-23-optional-inputs-degrade-instead-of-blocking.md). It is
+  // not a *silent* one either — the session reports it and takes the audio
+  // inputs off the strip (RecordingSession::ReportMissingAudioTrack), which is
+  // what stopped this from producing a soundless file and saying nothing.
+  const std::string& audio_stream_error() const { return audio_stream_error_; }
   uint64_t encoded_video_frames() const { return encoded_video_frames_.load(); }
   uint64_t encoded_audio_frames() const { return encoded_audio_frames_.load(); }
   int64_t last_video_timestamp_100ns() const { return last_video_100ns_.load(); }
@@ -108,6 +130,7 @@ class MediaWriter {
   DWORD video_stream_ = 0;
   DWORD audio_stream_ = 0;
   bool has_audio_stream_ = false;
+  std::string audio_stream_error_;
 
   std::vector<int16_t> pcm_scratch_;
   std::atomic<uint64_t> encoded_video_frames_{0};

@@ -35,9 +35,10 @@ remote copy is confirmed.
 - Microphone and system audio mixed into one track.
 - The control strip goes wherever you drag it, and is excluded from the capture — it
   never appears in the output.
-- Pause and resume; 720p or 1080p, 30 or 60 fps.
+- Pause and resume, and an optional countdown before the recording starts.
+- The source's own resolution by default, or 720p / 1080p; 30 or 60 fps.
 - Send to **Telegram** or **WebDAV** — neither needs a developer account, an API console,
-  or a payment method.
+  or a payment method — and optionally keep a copy after sending.
 
 <p align="center">
   <img src="docs/images/ready.png" alt="Post-recording screen" width="380">
@@ -45,76 +46,38 @@ remote copy is confirmed.
 
 ## Install
 
-There is no tagged release yet. A build is either one you make below, or one someone hands you
-— and for Windows, one you download from CI (the `Windows build` job publishes
-`relay-windows-x64` on every run).
+Download the build for your computer from the newest entry on the
+**[Releases page](https://github.com/shishkinartem/Relay/releases)** — a `.dmg` for macOS 13.5
+or later, a `.zip` for 64-bit Windows 10 (version 2004) or later and Windows 11.
+**[The installation guide](docs/install.md)** walks through every step below, and what to do
+when one of them goes wrong.
 
 ### macOS
 
-Requires **macOS 13.5 or newer**. The bundle is universal (`x86_64` + `arm64`), but only Apple
-Silicon has ever been run.
-
-1. Open `relay-<version>.dmg` and drag **relay.app** onto **Applications**. Install it there and
-   nowhere else: LaunchServices and TCC resolve `com.relay.relay` by whichever copy they rank
-   first, so a stray copy in a build tree can quietly take the permission you granted.
-2. The app is signed **Apple Development** — not Developer ID, not notarized — so Gatekeeper
-   refuses it on every Mac but the one that built it, reporting the app as damaged or the
-   developer as unverifiable. Clear the quarantine flag:
+1. Open the `.dmg` and drag **relay** onto **Applications**.
+2. Relay is not notarized by Apple, so macOS reports it as damaged until the download flag is
+   cleared:
    ```bash
    xattr -dr com.apple.quarantine /Applications/relay.app
    ```
-3. Launch it from Finder, or by full path — never the binary inside the bundle:
-   ```bash
-   open /Applications/relay.app
-   ```
-   macOS attributes a screen-recording request to the *responsible* process. A binary started
-   from a shell is judged as that shell, and Relay then enumerates zero screens.
-4. Relay opens on a preflight screen. Press **Allow screen recording…**, switch Relay on under
-   **Privacy & Security → Screen & System Audio Recording**, then use **Quit and reopen Relay** —
-   macOS applies the answer only at the next start. Microphone and camera are different: refuse
-   either and the recording still happens, without that track.
-5. Open **Settings → Upload destination → Set up** and connect **Telegram** (a bot token and a
-   chat id, both obtained inside the messenger) or **WebDAV** (address, user name, app password).
-   Credentials are verified before they are stored, so a typo is reported there and then. Until
-   one is connected, Send reports *not configured* and keeps the file.
-
-Screen recording is granted **once, not once per update**: a certificate-based signature gives a
-designated requirement that TCC stores instead of the code's hash, so a later build by the same
-developer still satisfies it. Only an ad-hoc signature loses the grant on every rebuild.
-
-Recordings go to `~/Movies/Relay`, settings to
-`~/Library/Application Support/com.relay.relay/settings.json`, credentials to the Keychain. All
-three survive reinstalling the app.
+3. Open Relay from Applications, press **Allow screen recording…**, switch **relay** on in
+   **System Settings → Privacy & Security → Screen & System Audio Recording**, then **Quit and
+   reopen Relay**. Microphone and camera are asked for when first used, and are optional.
 
 ### Windows
 
-Requires **Windows 10 build 19041 (2004) or newer**, x64 — the plugin checks that build number
-at startup and refuses to run below it.
+1. Extract the `.zip` and keep the **Relay** folder together — `relay.exe` needs the files beside
+   it. The Visual C++ runtime is included.
+2. Run `relay.exe`. SmartScreen does not know the publisher: **More info → Run anyway**.
+3. Screen capture needs no permission; microphone and camera follow **Settings → Privacy &
+   security**.
 
-Also requires the **Microsoft Visual C++ 2015–2022 Redistributable (x64)**. This is not
-optional and not an OS component: `relay.exe` and every plugin DLL link `/MD` against
-`vcruntime140.dll`, `vcruntime140_1.dll` and `msvcp140.dll`, and nothing in the build copies
-them. On a machine that has never had Visual Studio the app does not start — it shows a
-*`vcruntime140_1.dll` was not found* dialog, which looks like Relay being broken. Install it
-from Microsoft first. (Windows **N / KN** editions additionally need the *Media Feature Pack*:
-the recorder links Media Foundation, and without it the process fails to start rather than
-degrading.)
+### Then, on either
 
-There is no installer and no single file. The build *is* the folder: `relay.exe` is a launcher
-that needs its neighbours (`flutter_windows.dll`, the plugin DLLs, `data\`). Download
-`relay-windows-x64` from the latest green CI run, unzip it anywhere, run `relay.exe`.
-SmartScreen will object to an unknown publisher — *More info* → *Run anyway*; this project
-configures no Authenticode certificate.
-
-Windows asks for no permission to capture the screen; microphone and camera are governed by
-*Settings → Privacy*. Recordings go to `%USERPROFILE%\Videos\Relay`.
-
-**Nobody has ever run Relay on Windows.** The C++ half compiles under MSVC in CI and its native
-unit tests pass there — that is the entire body of evidence, and a compiler cannot tell you a
-recording comes out. The [compatibility matrix](docs/development/compatibility-matrix.md) is the
-authority on what is actually verified, and
-[the Windows smoke test](docs/development/windows-smoke-test.md) is the ordered script for
-changing that.
+Open **Settings → Upload destination → Set up** and connect **Telegram** (a bot token and a chat
+id, both obtained inside the messenger) or **WebDAV** (address, user name, app password) — see
+[Connecting an upload destination](docs/upload-destinations.md). Credentials are checked before
+they are stored, and until one is connected, Send keeps the file and says why.
 
 ## Build from source
 
@@ -147,17 +110,19 @@ combination that opens with a double click on any Mac, and it needs a paid membe
 
 | | |
 |---|---|
+| [Installing Relay](docs/install.md) | downloading, first launch, updating, uninstalling, troubleshooting |
 | [Connecting Telegram or WebDAV](docs/upload-destinations.md) | step-by-step setup, and lifting Telegram's 50 MB limit |
 | [Running locally](docs/development/running-locally.md) | Xcode, permissions, tests, packaging a build to send |
+| [Releasing](docs/development/releasing.md) | turning a tag into a published release |
 | [Engineering docs](docs/README.md) | architecture, testing, design system, decisions |
 | [`TECHNICAL_SPEC.md`](TECHNICAL_SPEC.md) | product and technical behaviour — the source of truth |
 
 ## Status
 
-macOS is built, run and tested. Windows compiles under MSVC in CI and its native unit
-tests pass there, but nobody has run the application — see the
-[compatibility matrix](docs/development/compatibility-matrix.md) for exactly what is and
-is not verified. Linux is deferred by design.
+macOS is built, run and tested. Windows is built and run, and still in testing: it has been
+through three rounds on Windows 11, each followed by fixes, and has known issues open. The
+[compatibility matrix](docs/development/compatibility-matrix.md) says exactly what is and is not
+verified on each platform. Linux is deferred by design.
 
 ## Contributing
 
