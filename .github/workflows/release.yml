@@ -1,0 +1,156 @@
+name: Release
+
+# Turns a version tag into a draft GitHub Release with one download per
+# platform, so installing Relay is a download from the Releases page rather
+# than a GitHub sign-in and a hunt through CI runs whose artefacts expire in 14
+# days (docs/install.md, docs/development/releasing.md).
+#
+#   git tag v0.5.0-beta.1 && git push origin v0.5.0-beta.1
+#
+# The tag is the version: both builds are stamped with it through
+# --build-name, so pubspec.yaml's version does not have to be bumped first. A
+# tag with a hyphen makes a pre-release, which is what every release is until
+# docs/development/testing.md's release-readiness list passes.
+#
+# The release is created as a DRAFT. Nothing is public until someone presses
+# Publish on the Releases page — which is also the moment to replace the macOS
+# DMG, if there is a better-signed one to replace it with (the macOS job says
+# why there usually is).
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.1
+
+jobs:
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # The runner has no Apple certificate, so this is the one signature that
+      # needs none — and the one macOS keys screen-recording permission to the
+      # code's own hash, so a user who updates to the next release grants it
+      # again. A DMG built with ./tool/package-dmg.sh --build on a Mac holding
+      # the project's Apple Development certificate does not have that problem;
+      # upload it over this one before publishing when there is one.
+      - name: Ad-hoc signing
+        run: |
+          printf 'CODE_SIGN_IDENTITY = -\nCODE_SIGN_STYLE = Manual\nDEVELOPMENT_TEAM =\n' \
+            > macos/Runner/Configs/Signing.local.xcconfig
+      - name: flutter build macos
+        run: |
+          flutter build macos --release \
+            --build-name="${GITHUB_REF_NAME#v}" --build-number="${GITHUB_RUN_NUMBER}"
+      - name: Package the DMG
+        run: ./tool/package-dmg.sh --out "build/relay-${GITHUB_REF_NAME#v}-macos.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: build/relay-*-macos.dmg
+          retention-days: 7
+          if-no-files-found: error
+
+  windows:
+    name: Windows zip
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: flutter build windows
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          flutter build windows --release --build-name=$version --build-number=$env:GITHUB_RUN_NUMBER
+          exit $LASTEXITCODE
+      # The build is a folder, not a file: relay.exe needs flutter_windows.dll,
+      # the plugin DLLs and data\ beside it. It is zipped inside a folder of its
+      # own so that Extract All produces one `Relay` folder rather than forty
+      # loose files.
+      #
+      # The Visual C++ runtime goes in beside them. relay.exe and every plugin
+      # DLL link it dynamically and nothing in the Flutter build copies it, so
+      # on a machine that has never had Visual Studio the application would not
+      # start — a "vcruntime140_1.dll was not found" dialog that looks like
+      # Relay being broken. Microsoft supports exactly this: the DLLs in the
+      # Redist\MSVC\...\Microsoft.VC14x.CRT folder may be deployed into the
+      # application's own folder ("Local deployment", Deployment in Visual C++).
+      # They come from the same toolset that just built everything else.
+      - name: Stage the folder, with the C++ runtime beside it
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $stage = 'dist\Relay'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item -Recurse -Path 'build\windows\x64\runner\Release\*' -Destination $stage
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $crt = Get-ChildItem -Path "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT" -Directory |
+            Where-Object { $_.Parent.Parent.Name -match '^\d+(\.\d+)+$' } |
+            Sort-Object { [version]$_.Parent.Parent.Name } |
+            Select-Object -Last 1
+          if (-not $crt) { throw "No Microsoft.VC14x.CRT folder under $vs\VC\Redist\MSVC" }
+          Copy-Item -Path "$($crt.FullName)\*.dll" -Destination $stage
+          Get-ChildItem $stage -Filter *.dll | ForEach-Object { $_.Name }
+
+          if (-not (Test-Path "$stage\relay.exe")) { throw 'relay.exe is missing from the staged folder' }
+          if (-not (Test-Path "$stage\vcruntime140_1.dll")) { throw 'the C++ runtime was not staged' }
+          Compress-Archive -Path $stage -DestinationPath "dist\relay-$version-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/relay-*-windows-x64.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Draft the release
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          prerelease=
+          case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft $prerelease --verify-tag \
+            --title "Relay ${GITHUB_REF_NAME#v}" \
+            --notes "Installing: https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/install.md" \
+            --generate-notes

@@ -10,8 +10,9 @@ Relay uploads to Telegram or WebDAV. Architecture and the destination contract l
 
 Open **Settings → Upload destination → Set up**. Two destinations ship, and
 neither needs a developer account, an API console or a payment method.
-Credentials go to the macOS Keychain / Windows Credential Manager, never to a
-file (§27).
+Credentials go to the macOS Keychain; on Windows they are encrypted into
+Relay's settings folder with a key that Windows Credential Manager holds. They
+never go into `settings.json` or any plain file (§27).
 
 | | Setup | Per-file limit | Good for |
 |---|---|---|---|
