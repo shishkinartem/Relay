@@ -308,6 +308,7 @@ bool RecordingSession::Prepare(const RecordingConfig& config, RecorderError* err
   backpressure_drops_.store(0);
   fatal_error_.store(false);
   camera_drop_reported_.store(false);
+  recompose_failure_reported_.store(false);
   camera_frames_seen_.store(false);
   stale_frame_drops_.store(0);
   next_frame_due_100ns_.store(-1);
@@ -877,22 +878,39 @@ void RecordingSession::OnCapturedFrame(const CaptureEngine::Frame& frame) {
     return;
   }
 
-  // Composing hands out the next canvas of a fixed pool, so a frame that the
-  // queue cannot take must be dropped before it is composed — otherwise the
-  // blit lands in the canvas the encoder is still reading. The deadline stays
-  // where it is: the slot is still unfilled, and the next frame should take it.
-  if (video_queue_.full()) {
-    backpressure_drops_.fetch_add(1);
-    return;
-  }
-  next_frame_due_100ns_.store(
-      NextFrameDeadline100ns(due_100ns, media_100ns, interval_100ns));
-
   QueuedFrame queued;
   std::string detail;
   bool camera_dropped = false;
-  if (!compositor_.Compose(frame.texture, frame.width, frame.height, &queued.canvas,
-                           &detail, &camera_dropped)) {
+  bool composed = false;
+  {
+    // From the look at the queue to the push, so the encoder's re-draw of a
+    // held frame cannot take a canvas in between (composition_mutex_).
+    std::lock_guard<std::mutex> lock(composition_mutex_);
+    // Composing hands out the next canvas of a fixed pool, so a frame that the
+    // queue cannot take must be dropped before it is composed — otherwise the
+    // blit lands in the canvas the encoder is still reading. The deadline stays
+    // where it is: the slot is still unfilled, and the next frame should take
+    // it.
+    if (video_queue_.full()) {
+      backpressure_drops_.fetch_add(1);
+      return;
+    }
+    next_frame_due_100ns_.store(
+        NextFrameDeadline100ns(due_100ns, media_100ns, interval_100ns));
+
+    composed = compositor_.Compose(frame.texture, frame.width, frame.height,
+                                   &queued.canvas, &detail, &camera_dropped);
+    if (composed) {
+      queued.timestamp_100ns = media_100ns;
+      // No file I/O on this thread: the encoder thread owns the sink writer
+      // (spec 22). This is the only producer and the queue had room a moment
+      // ago — only Pop runs concurrently — so the push cannot displace a frame
+      // the encoder still needs. A queue closed by a concurrent stop counts its
+      // own drop.
+      video_queue_.Push(std::move(queued));
+    }
+  }
+  if (!composed) {
     const uint64_t failures = composition_failures_.fetch_add(1);
     // Reported once, not per frame. A fault that fails composition fails it for
     // every frame, and this handler runs on the capture thread at the frame
@@ -910,27 +928,26 @@ void RecordingSession::OnCapturedFrame(const CaptureEngine::Frame& frame) {
     }
     return;
   }
-  // The screen was composed; only the tile was left out. Reported once, as a
-  // degraded input rather than a capture failure, because that is what the user
-  // sees: a recording that is fine except that the camera is not in it.
-  if (camera_dropped && !camera_drop_reported_.exchange(true) && events_.on_error) {
-    RecorderError degraded;
-    degraded.code = RecorderErrorCode::kCameraUnavailable;
-    degraded.message =
-        "The camera could not be drawn into the recording. The screen is still "
-        "being recorded.";
-    degraded.details = detail;
-    degraded.fatal = false;
-    events_.on_error(degraded);
+  if (camera_dropped) {
+    NoteCameraDropped(detail);
   }
-  queued.timestamp_100ns = media_100ns;
+}
 
-  // No file I/O on this thread: the encoder thread owns the sink writer
-  // (spec 22). This is the only producer and the queue had room a moment ago —
-  // only Pop runs concurrently — so the push cannot displace a frame the
-  // encoder still needs. A queue closed by a concurrent stop counts its own
-  // drop.
-  video_queue_.Push(std::move(queued));
+// The screen was composed; only the tile was left out. Reported once, as a
+// degraded input rather than a capture failure, because that is what the user
+// sees: a recording that is fine except that the camera is not in it.
+void RecordingSession::NoteCameraDropped(const std::string& detail) {
+  if (camera_drop_reported_.exchange(true) || !events_.on_error) {
+    return;
+  }
+  RecorderError degraded;
+  degraded.code = RecorderErrorCode::kCameraUnavailable;
+  degraded.message =
+      "The camera could not be drawn into the recording. The screen is still "
+      "being recorded.";
+  degraded.details = detail;
+  degraded.fatal = false;
+  events_.on_error(degraded);
 }
 
 void RecordingSession::DrainAudio(bool flush) {
@@ -1055,15 +1072,25 @@ void RecordingSession::EncodeLoop() {
 // behind, which is what keeps this from becoming an unbounded backlog under
 // another name. The empty queue is also what makes the canvas safe to read: the
 // compositor hands out the next texture of a three-deep pool per composed frame,
-// and with the queue empty the only compose that can be in flight is the one
-// after this canvas — so the pool cannot have wrapped back onto the texture
-// being read.
+// and with the queue empty — looked at again under `composition_mutex_`, which
+// the capture thread holds across its own compose and push — no canvas but the
+// one last written is in use, so neither publishing it again nor re-drawing
+// into the next one can land on a texture the encoder still needs.
 //
 // A repeat is not a captured frame and is deliberately not counted as one:
 // `capturedFrames` goes on meaning frames Windows.Graphics.Capture delivered,
 // which is the diagnostic that made this defect visible in the first place. In
 // the log a working repeat reads as `encodedFrames` climbing while
 // `capturedFrames` stands still.
+//
+// What is held is the *source*, not the whole canvas. Republishing the canvas
+// held the camera tile along with the window, so the third Windows run recorded
+// a camera that was live on screen and stuttering in the file: still for as
+// long as the window under it was, stepping only when the window changed. The
+// canvas is now drawn again from the compositor's copy of the last source frame
+// whenever anything the tile is drawn from has moved on
+// (VideoCompositor::Recompose), and published unchanged when nothing has, which
+// with the camera off is always.
 bool RecordingSession::RepeatLastComposedFrame(int64_t interval_100ns) {
   if (!last_encoded_canvas_) {
     return true;  // nothing composed yet: there is no picture to hold
@@ -1077,12 +1104,49 @@ bool RecordingSession::RepeatLastComposedFrame(int64_t interval_100ns) {
   if (repeat_100ns < 0) {
     return true;  // the source is keeping up on its own
   }
+
+  winrt::com_ptr<ID3D11Texture2D> canvas = last_encoded_canvas_;
+  std::string detail;
+  bool camera_dropped = false;
+  VideoCompositor::RecomposeResult recomposed =
+      VideoCompositor::RecomposeResult::kUnchanged;
+  {
+    std::lock_guard<std::mutex> lock(composition_mutex_);
+    // The capture thread got a frame in after all: encode that instead. It is
+    // also the condition the re-draw needs, because only with nothing queued
+    // is the canvas it is about to take guaranteed not to be one still waiting
+    // to be encoded (composition_mutex_).
+    if (video_queue_.size() > 0) {
+      return true;
+    }
+    winrt::com_ptr<ID3D11Texture2D> redrawn;
+    recomposed = compositor_.Recompose(&redrawn, &detail, &camera_dropped);
+    if (recomposed == VideoCompositor::RecomposeResult::kComposed) {
+      canvas = std::move(redrawn);
+    }
+  }
+  if (recomposed == VideoCompositor::RecomposeResult::kFailed &&
+      !recompose_failure_reported_.exchange(true) && events_.on_error) {
+    RecorderError failure;
+    failure.code = RecorderErrorCode::kCaptureFailed;
+    failure.message =
+        "A held frame could not be redrawn with the camera, so the camera stays "
+        "frozen in the recording while the source is unchanged.";
+    failure.details = detail;
+    failure.fatal = false;
+    events_.on_error(failure);
+  }
+  if (camera_dropped) {
+    NoteCameraDropped(detail);
+  }
+
   RecorderError error;
-  if (!writer_.WriteVideoFrame(last_encoded_canvas_.get(), repeat_100ns, &error)) {
+  if (!writer_.WriteVideoFrame(canvas.get(), repeat_100ns, &error)) {
     OnPipelineError(error);
     return false;
   }
   last_written_video_100ns_ = repeat_100ns;
+  last_encoded_canvas_ = std::move(canvas);
   return true;
 }
 

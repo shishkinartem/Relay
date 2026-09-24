@@ -138,6 +138,10 @@ bool VideoCompositor::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
 void VideoCompositor::Shutdown() {
   std::lock_guard<std::mutex> lock(mutex_);
   camera_frame_ = nullptr;
+  held_source_ = nullptr;
+  held_width_ = 0;
+  held_height_ = 0;
+  composed_generation_ = 0;
   input_views_.clear();
   canvas_views_.clear();
   canvases_.clear();
@@ -156,6 +160,7 @@ void VideoCompositor::SetCameraEnabled(bool enabled) {
   if (!enabled) {
     camera_frame_ = nullptr;
   }
+  ++generation_;
 }
 
 bool VideoCompositor::is_initialized() const {
@@ -171,6 +176,7 @@ bool VideoCompositor::camera_enabled() const {
 void VideoCompositor::SetCameraOverlay(const CameraOverlayConfig& camera) {
   std::lock_guard<std::mutex> lock(mutex_);
   camera_config_ = camera;
+  ++generation_;
 }
 
 CameraOverlayConfig VideoCompositor::camera_overlay() const {
@@ -184,6 +190,7 @@ void VideoCompositor::SetCameraFrame(winrt::com_ptr<ID3D11Texture2D> frame,
   camera_frame_ = std::move(frame);
   camera_width_ = width;
   camera_height_ = height;
+  ++generation_;
 }
 
 PipDraw VideoCompositor::CameraPipDraw(uint32_t frame_width,
@@ -324,12 +331,81 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
     *error = "The source frame is empty.";
     return false;
   }
+  if (!Draw(source, source_width, source_height, out_canvas, error, camera_dropped)) {
+    return false;
+  }
+  HoldSource(source, source_width, source_height);
+  return true;
+}
 
+VideoCompositor::RecomposeResult VideoCompositor::Recompose(
+    winrt::com_ptr<ID3D11Texture2D>* out_canvas, std::string* error,
+    bool* camera_dropped) {
+  if (camera_dropped != nullptr) {
+    *camera_dropped = false;
+  }
+  if (!processor_ || canvases_.empty() || !held_source_) {
+    return RecomposeResult::kUnchanged;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation_ == composed_generation_) {
+      return RecomposeResult::kUnchanged;
+    }
+  }
+  return Draw(held_source_.get(), held_width_, held_height_, out_canvas, error,
+              camera_dropped)
+             ? RecomposeResult::kComposed
+             : RecomposeResult::kFailed;
+}
+
+void VideoCompositor::HoldSource(ID3D11Texture2D* source, uint32_t source_width,
+                                 uint32_t source_height) {
+  D3D11_TEXTURE2D_DESC desc{};
+  source->GetDesc(&desc);
+  D3D11_TEXTURE2D_DESC held{};
+  if (held_source_) {
+    held_source_->GetDesc(&held);
+  }
+  if (!held_source_ || held.Width != desc.Width || held.Height != desc.Height ||
+      held.Format != desc.Format) {
+    held_source_ = nullptr;
+    // What the video processor accepts as an input surface — USAGE_DEFAULT and
+    // RENDER_TARGET, the same as the camera's pool (camera_capture.cpp) — and
+    // CopyResource needs nothing else to match but the shape and the format.
+    D3D11_TEXTURE2D_DESC copy{};
+    copy.Width = desc.Width;
+    copy.Height = desc.Height;
+    copy.MipLevels = 1;
+    copy.ArraySize = 1;
+    copy.Format = desc.Format;
+    copy.SampleDesc.Count = 1;
+    copy.Usage = D3D11_USAGE_DEFAULT;
+    copy.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&copy, nullptr, held_source_.put()))) {
+      // Nothing to recompose from, which leaves the repeat publishing the last
+      // canvas as it always did. A still camera, never a failed recording.
+      held_source_ = nullptr;
+      held_width_ = 0;
+      held_height_ = 0;
+      return;
+    }
+  }
+  context_->CopyResource(held_source_.get(), source);
+  held_width_ = source_width;
+  held_height_ = source_height;
+}
+
+bool VideoCompositor::Draw(ID3D11Texture2D* source, uint32_t source_width,
+                           uint32_t source_height,
+                           winrt::com_ptr<ID3D11Texture2D>* out_canvas,
+                           std::string* error, bool* camera_dropped) {
   winrt::com_ptr<ID3D11Texture2D> camera;
   uint32_t camera_width = 0;
   uint32_t camera_height = 0;
   CameraOverlayConfig camera_config;
   bool draw_camera = false;
+  uint64_t generation = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (source_width != last_source_width_ || source_height != last_source_height_) {
@@ -346,6 +422,7 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
       camera_height = camera_height_;
       draw_camera = camera_width > 0 && camera_height > 0;
     }
+    generation = generation_;
   }
 
   Layer desktop;
@@ -361,6 +438,7 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
     }
     *out_canvas = canvases_[next_canvas_];
     next_canvas_ = (next_canvas_ + 1) % canvases_.size();
+    composed_generation_ = generation;
     return true;
   }
 
@@ -411,6 +489,7 @@ bool VideoCompositor::Compose(ID3D11Texture2D* source, uint32_t source_width,
 
   *out_canvas = canvases_[next_canvas_];
   next_canvas_ = (next_canvas_ + 1) % canvases_.size();
+  composed_generation_ = generation;
   return true;
 }
 

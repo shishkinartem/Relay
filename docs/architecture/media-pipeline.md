@@ -108,6 +108,22 @@ sources, not observed — nothing on this side has been run on a Windows host
 
 Use monotonic timestamps for A/V synchronization. Do not synchronize media using wall-clock time.
 
+## A source that goes quiet
+
+A window nobody is touching produces no new frames. `Windows.Graphics.Capture` delivers a frame
+only when the source's content changes, so the Windows session paces its own timeline: when the
+encoder's queue has been empty for two frame intervals it writes the last picture again
+(`RecordingSession::RepeatLastComposedFrame`). What it holds is the **source**, not the finished
+canvas — the compositor keeps a GPU copy of the last source frame and redraws it under the camera
+whenever the camera has a new frame, is toggled, or the tile moves (`VideoCompositor::Recompose`).
+Holding the canvas instead held the camera tile with it, and a still window froze the camera in
+the file while the preview stayed live. The copy is one texture-to-texture copy per composed
+frame, on the GPU, and is the one frame copy this path makes on purpose.
+
+macOS writes a variable-rate file instead: ScreenCaptureKit marks a frame with nothing new as
+`.idle`, and only `.complete` frames are encoded. Whether a still source holds a still camera tile
+there too has not been checked (`../development/compatibility-matrix.md`, *The third Windows run*).
+
 ## Backpressure
 
 Every producer/consumer boundary must be bounded.

@@ -180,11 +180,14 @@ class RecordingSession {
   bool SwapAudio(MediaDeviceKind kind, const std::string& device_id,
                  RecorderError* error);
   void EncodeLoop();
-  // Writes the last composed frame again when the source has delivered nothing
-  // for long enough that the video timeline has stopped advancing. False only
-  // when the writer refused the frame, which ends the encode loop exactly as a
-  // refused captured frame does.
+  // Holds the last source frame on the timeline when the source has delivered
+  // nothing for long enough that the video clock has stopped advancing — drawn
+  // again under the current camera when the tile has changed, published again
+  // as it was when nothing has. False only when the writer refused the frame,
+  // which ends the encode loop exactly as a refused captured frame does.
   bool RepeatLastComposedFrame(int64_t interval_100ns);
+  // Says once per session that the camera tile was left out of a frame.
+  void NoteCameraDropped(const std::string& detail);
   void TimerLoop();
   void DrainAudio(bool flush);
   void StopInputs();
@@ -277,6 +280,16 @@ class RecordingSession {
   BoundedQueue<QueuedFrame> video_queue_{kVideoQueueCapacity};
   std::atomic<uint64_t> backpressure_drops_{0};
 
+  // Two threads compose now: the capture thread for every frame it is handed,
+  // and the encoder thread when it re-draws a held frame under a moving camera
+  // (RepeatLastComposedFrame). Both take the next canvas of the one pool, so
+  // each holds this from its look at the queue to the end of its compose — and
+  // the capture thread to the end of its push. That is what keeps the
+  // accounting above true with a second composer: the encoder re-draws only
+  // over an empty queue with no capture compose half-done, so at most the
+  // canvas it last wrote and the one it is drawing are in use.
+  std::mutex composition_mutex_;
+
   std::thread encode_thread_;
   std::thread timer_thread_;
   std::atomic<bool> encoding_{false};
@@ -300,6 +313,10 @@ class RecordingSession {
   // The camera tile being dropped from the composition is reported once per
   // session, not once per frame (OnCapturedFrame).
   std::atomic<bool> camera_drop_reported_{false};
+  // Likewise a held frame that could not be re-drawn under the camera. The
+  // repeat still publishes the canvas it already had, so nothing is dropped —
+  // the camera is only still — and the count would be a lie in droppedFrames.
+  std::atomic<bool> recompose_failure_reported_{false};
   std::atomic<bool> camera_frames_seen_{false};
   // Frames the encoder refused because their instant had already been written —
   // a captured frame that lost its slot to a repeat. Counted into
@@ -320,8 +337,10 @@ class RecordingSession {
   // the only thing that writes a video sample. The canvas is one of the
   // compositor's pooled textures, and it is only ever read while the frame queue
   // is empty, which is what keeps the compositor from having wrapped back onto
-  // it. Prepare resets both, and Stop and Abort release the canvas — all three
-  // with that thread stopped.
+  // it — a re-drawn repeat included, which takes the next canvas under
+  // `composition_mutex_` and becomes this one once it is written. Prepare
+  // resets both, and Stop and Abort release the canvas — all three with that
+  // thread stopped.
   int64_t last_written_video_100ns_ = -1;
   winrt::com_ptr<ID3D11Texture2D> last_encoded_canvas_;
 
