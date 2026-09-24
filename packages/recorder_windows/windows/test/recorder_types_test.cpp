@@ -706,6 +706,61 @@ TEST(ApplyCameraMaskRow, AnUnconfiguredMaskLeavesTheFrameOpaque) {
   }
 }
 
+// ── source thumbnails ────────────────────────────────────────────────────────
+
+TEST(ForceOpaqueBgra, AGdiCaptureBecomesAPictureRatherThanATransparentFrame) {
+  // What GDI hands back: the colour of every pixel, and a zero in the byte the
+  // PNG encoder reads as alpha. Encoded as it came, every thumbnail in the
+  // picker was an empty frame.
+  constexpr uint32_t kWidth = 3;
+  constexpr uint32_t kHeight = 2;
+  constexpr uint32_t kStride = kWidth * 4;
+  std::vector<uint8_t> pixels(kStride * kHeight);
+  for (size_t i = 0; i < pixels.size(); ++i) {
+    pixels[i] = (i % 4 == 3) ? uint8_t{0} : static_cast<uint8_t>(i + 1);
+  }
+  const std::vector<uint8_t> before = pixels;
+
+  ForceOpaqueBgra(pixels.data(), kWidth, kHeight, kStride);
+
+  for (size_t i = 0; i < pixels.size(); ++i) {
+    if (i % 4 == 3) {
+      EXPECT_EQ(pixels[i], 0xFF) << "alpha of pixel " << i / 4;
+    } else {
+      EXPECT_EQ(pixels[i], before[i]) << "a colour byte moved, at " << i;
+    }
+  }
+}
+
+TEST(ForceOpaqueBgra, RowPaddingPastTheImageIsLeftAlone) {
+  // A stride wider than the row is ordinary for a bitmap, and the bytes past
+  // the last pixel belong to nobody's alpha.
+  constexpr uint32_t kWidth = 2;
+  constexpr uint32_t kHeight = 2;
+  constexpr uint32_t kStride = kWidth * 4 + 4;
+  std::vector<uint8_t> pixels(kStride * kHeight, 0x11);
+
+  ForceOpaqueBgra(pixels.data(), kWidth, kHeight, kStride);
+
+  for (uint32_t row = 0; row < kHeight; ++row) {
+    const uint8_t* line = pixels.data() + row * kStride;
+    EXPECT_EQ(line[3], 0xFF);
+    EXPECT_EQ(line[7], 0xFF);
+    for (uint32_t pad = kWidth * 4; pad < kStride; ++pad) {
+      EXPECT_EQ(line[pad], 0x11) << "row " << row << ", padding byte " << pad;
+    }
+  }
+}
+
+TEST(ForceOpaqueBgra, AStrideTooShortForTheRowIsRefusedRatherThanOverrun) {
+  std::vector<uint8_t> pixels(8, 0);
+  ForceOpaqueBgra(pixels.data(), 4, 2, 4);
+  for (const uint8_t byte : pixels) {
+    EXPECT_EQ(byte, 0);
+  }
+  ForceOpaqueBgra(nullptr, 4, 2, 16);  // and a null image is not a crash
+}
+
 // ── letterboxing ─────────────────────────────────────────────────────────────
 
 TEST(LetterboxRect, TheSourceShapeIsPreservedAndCentred) {

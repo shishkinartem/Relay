@@ -407,6 +407,16 @@ void ApplyCameraMaskRow(const CameraFrameMask& mask, double y, uint32_t width,
 // anything of the frame's alpha channel at all.
 bool CameraMaskIsRectangular(const CameraFrameMask& mask);
 
+// Sets the fourth byte of every pixel in a top-down BGRA image to 255, leaving
+// the colour bytes and any row padding past `width` untouched.
+//
+// For the source thumbnails, whose pixels come out of GDI: BitBlt, StretchBlt
+// and PrintWindow all leave that byte 0, because to GDI it has no meaning. The
+// thumbnail is then encoded as 32 bpp BGRA PNG, where it has one, and a 0 there
+// is a picture every decoder draws as fully transparent — so the picker showed
+// an empty frame for every display and every window (spec 4.1).
+void ForceOpaqueBgra(uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride);
+
 // Largest centred rectangle of the source aspect ratio that fits the canvas.
 // Produces the letterbox/pillarbox bars required by fixedCanvasLetterbox.
 RectD LetterboxRect(double source_width, double source_height,

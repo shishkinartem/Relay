@@ -830,6 +830,19 @@ bool CameraMaskIsRectangular(const CameraFrameMask& mask) {
   return !(mask.corner_radius > 0);
 }
 
+void ForceOpaqueBgra(uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride) {
+  if (bgra == nullptr || width == 0 || height == 0 ||
+      static_cast<uint64_t>(stride) < static_cast<uint64_t>(width) * 4) {
+    return;
+  }
+  for (uint32_t row = 0; row < height; ++row) {
+    uint8_t* line = bgra + static_cast<size_t>(row) * stride;
+    for (uint32_t column = 0; column < width; ++column) {
+      line[static_cast<size_t>(column) * 4 + 3] = 0xFF;
+    }
+  }
+}
+
 double CameraMaskCoverage(const CameraFrameMask& mask, double x, double y) {
   return MaskCoverageAt(mask.crop, ResolveMaskRow(mask, y), x);
 }
