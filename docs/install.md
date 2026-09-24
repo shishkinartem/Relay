@@ -156,8 +156,8 @@ you pinned the old `relay.exe`, pin the new one.
 
 ## Uninstalling
 
-First, in **Settings → Upload destination**, press **Disconnect**. That deletes the stored
-destination password, which removing the app does not.
+First, open **Settings → Upload destination → Set up** for the connected destination and press
+**Disconnect**. That deletes the stored destination password, which removing the app does not.
 
 - **macOS:** drag `/Applications/relay.app` to the Trash. To remove the settings and the log as
   well, delete `~/Library/Application Support/com.relay.relay`.
